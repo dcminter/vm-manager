@@ -112,6 +112,21 @@ Everything a machine owns — its disk, its key, its console log and its record 
 lives in one directory under `$XDG_STATE_HOME/vm/instances`, and `vm rm` takes
 the lot.
 
+A guest reaches the network through the host's own sockets, so what it sends
+goes out as the user running `vm`. TCP and UDP need nothing more, but `ping`
+from a guest gets no replies unless the host lets that user send pings, which
+it does when `/proc/sys/net/ipv4/ping_group_range` includes one of their
+groups. Debian and Ubuntu allow every group; where it reads `1 0`, allow them
+with:
+
+```bash
+echo 'net.ipv4.ping_group_range = 0 2147483647' | sudo tee /etc/sysctl.d/60-ping.conf
+sudo sysctl --system
+```
+
+Only pings are passed on, so `traceroute` and `mtr` still see nothing past the
+host.
+
 `-v /host/path:/guest/path` shares a directory over virtiofs. Each share is
 served by a `virtiofsd` of its own, started before the machine and reaped with
 it. A share is mounted at every boot from the machine's seed rather than
