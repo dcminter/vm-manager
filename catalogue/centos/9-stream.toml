@@ -1,0 +1,12 @@
+name = "centos"
+tag = "9-stream"
+aliases = ["9"]
+description = "CentOS Stream 9 generic cloud image"
+login = "cloud-init"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+url = "https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-20260908.0.x86_64.qcow2"
+digest = "sha256:d93b1ecfe4d77c8a364e5b2b8a751d1c7f1aa3a7e5bdf4de924ec9649c3b5e15"
+size = 1275920384

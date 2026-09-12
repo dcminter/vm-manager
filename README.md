@@ -18,6 +18,8 @@ Build prerequisites (Debian 13):
 sudo apt install build-essential
 ```
 
+You also need Rust (2024 edition) from [Rustup.sh](https://rustup.rs/) or elsewhere.
+
 Then:
 
 ```bash
@@ -50,6 +52,19 @@ cargo run -p vm -- images
 An image is named `repository:tag`, as in `debian:trixie`. The tag may be
 omitted, in which case `latest` is used, and a specific build may be pinned by
 appending `@sha512:...`.
+
+## Images
+
+The catalogue ships with `debian`, `ubuntu`, `fedora`, `centos`, `almalinux`,
+`rocky`, `opensuse`, `alpine`, `arch` and `omnios`, several releases apiece.
+Run `vm images` for the list. Every entry names a dated build rather than a
+moving `latest`, and carries the checksum its publisher issued, which is what
+`vm pull` verifies what it fetched against.
+
+An entry has to be an uncompressed qcow2 that boots on this tool's machine,
+which is what keeps some obvious names out: desktop spins publish installer
+ISOs and no cloud image, and FreeBSD, NetBSD and 9front publish cloud images
+that are compressed.
 
 ## Machines
 

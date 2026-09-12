@@ -1,0 +1,12 @@
+name = "ubuntu"
+tag = "focal"
+aliases = ["20.04"]
+description = "Ubuntu 20.04 LTS (Focal Fossa) server cloud image"
+login = "cloud-init"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+url = "https://cloud-images.ubuntu.com/releases/focal/release-20250624/ubuntu-20.04-server-cloudimg-amd64.img"
+digest = "sha256:18f2977d77dfea1b74aee14533bd21c34f789139e949c57023b7364894b7e5e9"
+size = 647992832

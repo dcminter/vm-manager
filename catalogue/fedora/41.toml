@@ -1,0 +1,11 @@
+name = "fedora"
+tag = "41"
+description = "Fedora 41 Cloud Base"
+login = "cloud-init"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+url = "https://download.fedoraproject.org/pub/fedora/linux/releases/41/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-41-1.4.x86_64.qcow2"
+digest = "sha256:6205ae0c524b4d1816dbd3573ce29b5c44ed26c9fbc874fbe48c41c89dd0bac2"
+size = 491716608

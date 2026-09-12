@@ -1,0 +1,12 @@
+name = "ubuntu"
+tag = "jammy"
+aliases = ["22.04"]
+description = "Ubuntu 22.04 LTS (Jammy Jellyfish) server cloud image"
+login = "cloud-init"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+url = "https://cloud-images.ubuntu.com/releases/jammy/release-20260826/ubuntu-22.04-server-cloudimg-amd64.img"
+digest = "sha256:c0a5af17e6c0f76351fe07e2fffef3011dab1facb8a8ed5701dcf648dabd4f0a"
+size = 734972416

@@ -1,0 +1,12 @@
+name = "opensuse"
+tag = "leap-15.6"
+aliases = ["leap", "latest"]
+description = "openSUSE Leap 15.6 minimal cloud image"
+login = "cloud-init"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+url = "https://download.opensuse.org/repositories/Cloud:/Images:/Leap_15.6/images/openSUSE-Leap-15.6.x86_64-1.0.2-NoCloud-Build2.159.qcow2"
+digest = "sha256:ab8a1e72149059eda21c5ffb62f5663a15704fa707a96934d558e2aec53697e8"
+size = 728956928

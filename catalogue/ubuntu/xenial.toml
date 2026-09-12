@@ -1,0 +1,12 @@
+name = "ubuntu"
+tag = "xenial"
+aliases = ["16.04"]
+description = "Ubuntu 16.04 LTS (Xenial Xerus) server cloud image"
+login = "cloud-init"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+url = "https://cloud-images.ubuntu.com/releases/xenial/release-20211001/ubuntu-16.04-server-cloudimg-amd64-disk1.img"
+digest = "sha256:fff2494a70bcaffb59f26f71ec49e137dd87d319341c35832dbe0ea65ff15140"
+size = 315359232

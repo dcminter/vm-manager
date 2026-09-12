@@ -1,0 +1,11 @@
+name = "almalinux"
+tag = "8"
+description = "AlmaLinux 8 generic cloud image"
+login = "cloud-init"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+url = "https://repo.almalinux.org/almalinux/8/cloud/x86_64/images/AlmaLinux-8-GenericCloud-8.10-20260831.x86_64.qcow2"
+digest = "sha256:66a440b458e0a0f774868f1b5d74433080c6718e40f38b59d05ff9ab269ae240"
+size = 1622540288

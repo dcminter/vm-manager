@@ -1,0 +1,12 @@
+name = "centos"
+tag = "10-stream"
+aliases = ["10", "latest"]
+description = "CentOS Stream 10 generic cloud image"
+login = "cloud-init"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+url = "https://cloud.centos.org/centos/10-stream/x86_64/images/CentOS-Stream-GenericCloud-10-20260908.0.x86_64.qcow2"
+digest = "sha256:01dd4840ce196680c048b6f1083b0d2f1a277ffb143e53402b61aa4bccc8e23f"
+size = 1045299200

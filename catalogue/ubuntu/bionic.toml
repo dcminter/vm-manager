@@ -1,0 +1,12 @@
+name = "ubuntu"
+tag = "bionic"
+aliases = ["18.04"]
+description = "Ubuntu 18.04 LTS (Bionic Beaver) server cloud image"
+login = "cloud-init"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+url = "https://cloud-images.ubuntu.com/releases/bionic/release-20230607/ubuntu-18.04-server-cloudimg-amd64.img"
+digest = "sha256:8dd2e6b5e5aad20c3f836123b300cba9861249408cbb07c359145a65d6bab6b6"
+size = 405667840

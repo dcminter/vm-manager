@@ -1,0 +1,12 @@
+name = "arch"
+tag = "20260901"
+aliases = ["latest"]
+description = "Arch Linux cloud image, build 20260901"
+login = "cloud-init"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+url = "https://geo.mirror.pkgbuild.com/images/v20260901.583572/Arch-Linux-x86_64-cloudimg-20260901.583572.qcow2"
+digest = "sha256:e3e688f97a71b265ce202905a504253f60f3680cf57d011a45411c43bedfa930"
+size = 559223808

@@ -13,6 +13,11 @@ use std::path::Path;
 /// The label cloud-init's `NoCloud` source matches on. Nothing else is looked at.
 pub const LABEL: &str = "cidata";
 
+/// The shell the account is given where the image has it. Corrected after the
+/// fact on an image that does not, which is cheaper than knowing in advance
+/// what every image ships.
+const SHELL: &str = "/bin/bash";
+
 /// A share to mount in the guest, named by its virtiofs tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mount {
@@ -44,6 +49,37 @@ impl Seed {
     /// The cloud-config document. Password login is disabled outright: the
     /// generated key is the only way in, so a default password left enabled
     /// would only ever be a way for someone else in.
+    /// What has to be put right on the guest itself, because it cannot be
+    /// known from here which of these an image has.
+    ///
+    /// Both are conditional and both end in `true`: a correction that does not
+    /// apply must not fail the module and take the rest of the seed with it.
+    fn corrections(&self) -> Value {
+        let user = &self.user;
+        Value::list([
+            // A shell the image does not have is one ssh cannot exec, so the
+            // account would authenticate and then have nothing to run.
+            Value::list([
+                Value::string("sh"),
+                Value::string("-c"),
+                Value::string(format!(
+                    "test -x {SHELL} || usermod -s /bin/sh {user}; true"
+                )),
+            ]),
+            // The sudo rule above is written to a file only sudo reads. An
+            // image that carries doas instead is told in its own terms, or the
+            // account has no way to become root at all.
+            Value::list([
+                Value::string("sh"),
+                Value::string("-c"),
+                Value::string(format!(
+                    "command -v sudo >/dev/null || {{ command -v doas >/dev/null && \
+                     echo permit nopass {user} >> /etc/doas.conf; }}; true"
+                )),
+            ]),
+        ])
+    }
+
     pub fn user_data(&self) -> String {
         let mut fields = vec![
             ("hostname", Value::string(&self.hostname)),
@@ -52,8 +88,14 @@ impl Seed {
                 "users",
                 Value::list([Value::map([
                     ("name", Value::string(&self.user)),
-                    ("shell", Value::string("/bin/bash")),
-                    ("lock_passwd", Value::Bool(true)),
+                    ("shell", Value::string(SHELL)),
+                    // Disabled, not locked. cloud-init's lock writes a '!'
+                    // into the shadow entry, and OpenSSH built without PAM —
+                    // which is how Alpine ships it — refuses a locked account
+                    // outright, public key and all. A '*' is not a hash any
+                    // password can produce, so this shuts the same door.
+                    ("passwd", Value::string("*")),
+                    ("lock_passwd", Value::Bool(false)),
                     ("sudo", Value::string("ALL=(ALL) NOPASSWD:ALL")),
                     (
                         "ssh_authorized_keys",
@@ -63,6 +105,13 @@ impl Seed {
             ),
             ("ssh_pwauth", Value::Bool(false)),
             ("disable_root", Value::Bool(true)),
+            // The shell asked for above is the one a person wants and nearly
+            // every image has. A musl image such as Alpine has none, and a
+            // shell that is not there is one ssh cannot exec at all, so the
+            // account would authenticate and then be useless. Asking and
+            // correcting beats settling for /bin/sh on every image for the
+            // sake of the few that have nothing else.
+            ("runcmd", self.corrections()),
         ];
         if !self.mounts.is_empty() {
             // Mounted per boot rather than written into the guest's fstab. A
@@ -237,12 +286,35 @@ mod tests {
         assert!(text.contains(KEY), "{text}");
     }
 
+    /// No password can produce a '*', so nothing logs in by one, and sshd is
+    /// told not to offer the option in the first place.
     #[test]
     fn password_login_is_disabled() {
         let text = seed().user_data();
         assert!(text.contains("ssh_pwauth: false"), "{text}");
-        assert!(text.contains("lock_passwd: true"), "{text}");
         assert!(text.contains("disable_root: true"), "{text}");
+        assert!(text.contains("passwd:"), "{text}");
+        assert!(text.contains('*'), "{text}");
+    }
+
+    /// A locked account is refused by OpenSSH built without PAM whatever key
+    /// is offered, so the account must be disabled rather than locked.
+    #[test]
+    fn the_account_is_not_locked() {
+        assert!(
+            !seed().user_data().contains("lock_passwd: true"),
+            "a locked account cannot be reached on a guest without PAM"
+        );
+    }
+
+    /// An image without the shell asked for would authenticate and then have
+    /// nothing to run, so the shell is corrected on the way up.
+    #[test]
+    fn a_shell_the_image_lacks_is_corrected() {
+        let text = seed().user_data();
+        assert!(text.contains("runcmd:"), "{text}");
+        assert!(text.contains("test -x /bin/bash"), "{text}");
+        assert!(text.contains("usermod -s /bin/sh vm"), "{text}");
     }
 
     #[test]

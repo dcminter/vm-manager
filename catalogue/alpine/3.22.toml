@@ -1,0 +1,12 @@
+name = "alpine"
+tag = "3.22"
+aliases = ["latest"]
+description = "Alpine Linux 3.22; musl and busybox, root via doas rather than sudo"
+login = "cloud-init"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+url = "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/cloud/generic_alpine-3.22.0-x86_64-bios-cloudinit-r0.qcow2"
+digest = "sha512:c99ce477ce7ea6a7f03cbaa3c9f349311b7613e2309d56df3454538c337a955ca596181801b230b108b1e1eb6f06985ac33e64fc1d5895b484e387be3893e8a6"
+size = 195297280

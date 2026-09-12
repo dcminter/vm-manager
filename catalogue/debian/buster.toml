@@ -1,0 +1,12 @@
+name = "debian"
+tag = "buster"
+aliases = ["10"]
+description = "Debian 10 (Buster) generic cloud image"
+login = "cloud-init"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+url = "https://cloud.debian.org/images/cloud/buster/20240703-1797/debian-10-genericcloud-amd64-20240703-1797.qcow2"
+digest = "sha512:416bca009f83884ceab49bf8ad944c9fe0091ac90cf80856fcb5d2a8300a949b3f19573b27c34d3e6d44224e716c122c4b884071d1f1634c5ce52c4dc109c5d1"
+size = 253165568

@@ -1,0 +1,12 @@
+name = "omnios"
+tag = "r151058"
+aliases = ["stable", "latest"]
+description = "OmniOS Community Edition r151058, an illumos distribution"
+login = "cloud-init"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+url = "https://downloads.omnios.org/media/stable/omnios-r151058.cloud.qcow2"
+digest = "sha256:eb36b84bbbbede5b4e7dfed931fe58d29049c02170a8e10dc7e2162d89c97f8f"
+size = 1136590848
