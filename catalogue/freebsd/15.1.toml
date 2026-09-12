@@ -1,0 +1,13 @@
+name = "freebsd"
+tag = "15.1"
+aliases = ["15", "latest"]
+description = "FreeBSD 15.1-RELEASE cloud image, UFS; base system only, no sudo"
+login = "cloud-init"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+compression = "xz"
+url = "https://download.freebsd.org/releases/VM-IMAGES/15.1-RELEASE/amd64/Latest/FreeBSD-15.1-RELEASE-amd64-BASIC-CLOUDINIT-ufs.qcow2.xz"
+digest = "sha512:bea82b91a983a20eb7ecdc6f11c1006d394ebbc5668b7f0ecdecf5a54fc5f9ea3a8384fc9f74a6611a9b08c183fa953327147ebfaa0de199fd015e67dd1e608a"
+size = 2671443968

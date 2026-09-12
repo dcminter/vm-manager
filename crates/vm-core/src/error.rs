@@ -99,6 +99,10 @@ pub enum Error {
         reason: String,
     },
     NotFetchable,
+    Decompress {
+        scheme: &'static str,
+        reason: String,
+    },
     Clone {
         reason: String,
     },
@@ -182,6 +186,7 @@ impl Error {
             Self::InstanceName { .. } => "invalid-instance-name",
             Self::InstanceRecord { .. } => "instance-damaged",
             Self::NotFetchable => "image-not-fetchable",
+            Self::Decompress { .. } => "decompression-failed",
             Self::Clone { .. } => "clone-failed",
             Self::UnheldImage { .. } => "image-not-held",
             Self::ImageInUse { .. } => "image-in-use",
@@ -310,6 +315,9 @@ impl fmt::Display for Error {
             ),
             Self::Clone { reason } => {
                 write!(f, "cannot clone the machine's disk: {reason}")
+            }
+            Self::Decompress { scheme, reason } => {
+                write!(f, "cannot expand the {scheme} image: {reason}")
             }
             Self::NotFetchable => write!(
                 f,

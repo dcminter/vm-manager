@@ -1,0 +1,13 @@
+name = "9front"
+tag = "11952"
+aliases = ["latest"]
+description = "9front 11952 (Plan 9); console only, boots to rc, rio needs a framebuffer"
+login = "none"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+compression = "gzip"
+url = "https://9front.org/iso/9front-11952.amd64.qcow2.gz"
+digest = "sha512:989cd90fcbce890d710b1e3a65f63032ab30392dba9d1a7d9bce5d4197455fee5d05597fc170f9af693c967b282d2945e947e75549558358cd0a78df6aa92892"
+size = 549978112

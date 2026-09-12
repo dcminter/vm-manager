@@ -3,7 +3,9 @@ use crate::digest;
 use crate::error::{Error, Result};
 use crate::reference::{Algorithm, Digest};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 
 /// How much of a download has arrived, reported as it goes.
 #[derive(Debug, Clone, Copy)]
@@ -106,26 +108,39 @@ impl Store {
                 status,
             });
         }
-        let total = content_length(&response).or(artifact.size);
+        // Progress counts what crosses the wire, so a stated size only stands
+        // in for the header where the two measure the same thing. For a
+        // compressed artifact the entry's size is what it expands to.
+        let stated = artifact
+            .compression
+            .is_none()
+            .then_some(artifact.size)
+            .flatten();
+        let total = content_length(&response).or(stated);
         let mut body = response.into_body().into_reader();
         let file = fs::File::create(partial).map_err(|source| Error::Store {
             path: partial.to_owned(),
             action: "create",
             source,
         })?;
-        let mut sink = std::io::BufWriter::new(file);
         let mut observe = |received| report(Progress { received, total });
-        let (_, actual) = digest::copy_hashing(
-            &mut body,
-            &mut sink,
-            artifact.digest.algorithm(),
-            &mut observe,
-        )
-        .map_err(|source| Error::Store {
-            path: partial.to_owned(),
-            action: "write",
-            source,
-        })?;
+        let actual = if let Some(command) = artifact.compression.command() {
+            expand(command, artifact, &mut body, file, &mut observe)?
+        } else {
+            let mut sink = std::io::BufWriter::new(file);
+            let (_, hash) = digest::copy_hashing(
+                &mut body,
+                &mut sink,
+                artifact.digest.algorithm(),
+                &mut observe,
+            )
+            .map_err(|source| Error::Store {
+                path: partial.to_owned(),
+                action: "write",
+                source,
+            })?;
+            hash
+        };
         if !digest::matches(&artifact.digest, &actual) {
             return Err(Error::DigestMismatch {
                 url: url.clone(),
@@ -228,6 +243,72 @@ impl Store {
     }
 }
 
+/// Streams a download through a decompressor, which writes the expanded image
+/// straight to the file.
+///
+/// The digest a publisher states covers the file they published, so it is
+/// taken on the way in rather than off the result. The store therefore holds,
+/// for a compressed artifact, a blob whose name is not its own hash; nothing
+/// reads it back that way, and the alternative is either a second digest in
+/// every entry or a checksum nobody else can confirm.
+fn expand(
+    mut command: std::process::Command,
+    artifact: &Artifact,
+    body: &mut impl Read,
+    file: fs::File,
+    observe: &mut dyn FnMut(u64),
+) -> Result<String> {
+    let scheme = artifact.compression.name();
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(file))
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|source| artifact.compression.missing(&source))?;
+    let Some(mut stdin) = child.stdin.take() else {
+        return Err(Error::Decompress {
+            scheme,
+            reason: "the decompressor was given no input pipe".to_owned(),
+        });
+    };
+    let outcome = digest::copy_hashing(body, &mut stdin, artifact.digest.algorithm(), observe)
+        .map(|(_, hash)| hash);
+    // The decompressor reads to end of input, so it will not finish until the
+    // pipe is closed, and it is closed here rather than at the end of a scope.
+    drop(stdin);
+    let finished = child
+        .wait_with_output()
+        .map_err(|source| Error::Decompress {
+            scheme,
+            reason: source.to_string(),
+        })?;
+    // A decompressor that gives up closes its input, and the write that
+    // follows fails with a broken pipe rather than with a reason. Its own
+    // complaint is the one worth repeating, so it is read first.
+    if !finished.status.success() {
+        return Err(Error::Decompress {
+            scheme,
+            reason: complaint(&finished),
+        });
+    }
+    outcome.map_err(|source| Error::Decompress {
+        scheme,
+        reason: source.to_string(),
+    })
+}
+
+/// What the decompressor said, or failing that what it returned.
+fn complaint(finished: &std::process::Output) -> String {
+    String::from_utf8_lossy(&finished.stderr)
+        .lines()
+        .map(str::trim)
+        .rfind(|line| !line.is_empty())
+        .map_or_else(
+            || format!("exited with {}", finished.status),
+            ToOwned::to_owned,
+        )
+}
+
 fn content_length(response: &ureq::http::Response<ureq::Body>) -> Option<u64> {
     response
         .headers()
@@ -269,6 +350,7 @@ mod tests {
 
     use super::*;
     use crate::catalogue::Login;
+    use crate::compression::Compression;
     use std::str::FromStr;
 
     struct Scratch(PathBuf);
@@ -304,7 +386,60 @@ mod tests {
             url: Some("https://example.invalid/image.qcow2".to_owned()),
             digest: digest(),
             size: Some(1024),
+            compression: Compression::None,
         }
+    }
+
+    /// Compresses with the tool that will be asked to undo it, so the test
+    /// exercises the real stream format rather than a fixture of one.
+    fn packed(scheme: Compression, plain: &[u8]) -> Vec<u8> {
+        let packer = match scheme {
+            Compression::Xz => "xz",
+            Compression::Gzip => "gzip",
+            Compression::Zstd => "zstd",
+            Compression::None => unreachable!("nothing to pack"),
+        };
+        let mut child = std::process::Command::new(packer)
+            .arg("-c")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write as _;
+            child.stdin.take().unwrap().write_all(plain).unwrap();
+        }
+        let finished = child.wait_with_output().unwrap();
+        assert!(finished.status.success(), "{packer} would not pack");
+        finished.stdout
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        let mut ignored = |_| {};
+        let (_, hash) =
+            digest::copy_hashing(&mut &bytes[..], Vec::new(), Algorithm::Sha256, &mut ignored)
+                .unwrap();
+        hash
+    }
+
+    fn compressed(scheme: Compression, bytes: &[u8]) -> Artifact {
+        Artifact {
+            compression: scheme,
+            digest: Digest::from_str(&format!("sha256:{}", hex(bytes))).unwrap(),
+            ..artifact()
+        }
+    }
+
+    fn through(scheme: Compression, source: &[u8], destination: &Path) -> Result<String> {
+        let mut ignored = |_| {};
+        expand(
+            scheme.command().unwrap(),
+            &compressed(scheme, source),
+            &mut &source[..],
+            fs::File::create(destination).unwrap(),
+            &mut ignored,
+        )
     }
 
     fn entry() -> Entry {
@@ -440,5 +575,70 @@ mod tests {
         // The agent is never reached, so an unroutable URL is safe here.
         let outcome = store.pull(&artifact(), &http_agent(), &mut |_| {}).unwrap();
         assert_eq!(outcome, Pulled::AlreadyPresent);
+    }
+
+    /// The whole point: what comes out is the image, and what is hashed is
+    /// what the publisher signed.
+    #[test]
+    fn each_scheme_is_expanded_and_the_published_digest_is_what_is_checked() {
+        let scratch = Scratch::new("expand");
+        // Long enough to cross the copy buffer, and compressible enough that
+        // the packed form is nothing like it.
+        let plain: Vec<u8> = (0..400_000u32).map(|held| (held % 251) as u8).collect();
+        for scheme in [Compression::Gzip, Compression::Xz, Compression::Zstd] {
+            let source = packed(scheme, &plain);
+            assert_ne!(source, plain, "{scheme:?} did not compress");
+            let destination = scratch.0.join(format!("{}.img", scheme.name()));
+            let hash = through(scheme, &source, &destination).unwrap();
+            assert_eq!(hash, hex(&source), "{scheme:?} hashed the wrong stream");
+            assert_eq!(fs::read(&destination).unwrap(), plain, "{scheme:?}");
+        }
+    }
+
+    /// A truncated download reaches the decompressor as a truncated stream,
+    /// and the reason it gives is better than the broken pipe that follows.
+    #[test]
+    fn a_stream_that_is_not_what_it_claims_is_refused_in_its_own_words() {
+        let scratch = Scratch::new("corrupt");
+        for scheme in [Compression::Gzip, Compression::Xz, Compression::Zstd] {
+            let source = b"this was never compressed".to_vec();
+            let outcome = through(scheme, &source, &scratch.0.join("out.img"));
+            match outcome {
+                Err(error) => {
+                    assert_eq!(error.kind(), "decompression-failed", "{error}");
+                    assert!(error.to_string().contains(scheme.name()), "{error}");
+                }
+                Ok(_) => panic!("{scheme:?} accepted something that was not its own"),
+            }
+        }
+    }
+
+    /// Progress is reported against what arrives, not what it becomes, because
+    /// only the first of those can be compared with a content length.
+    #[test]
+    fn expanding_reports_the_bytes_that_arrived() {
+        let scratch = Scratch::new("progress");
+        let plain = vec![7u8; 300_000];
+        let source = packed(Compression::Gzip, &plain);
+        let mut seen = Vec::new();
+        let mut observe = |received| seen.push(received);
+        let hash = expand(
+            Compression::Gzip.command().unwrap(),
+            &compressed(Compression::Gzip, &source),
+            &mut &source[..],
+            fs::File::create(scratch.0.join("out.img")).unwrap(),
+            &mut observe,
+        )
+        .unwrap();
+        assert_eq!(hash, hex(&source));
+        assert_eq!(seen.last().copied(), Some(source.len() as u64));
+        assert!(seen.iter().is_sorted(), "{seen:?}");
+    }
+
+    /// An uncompressed entry must keep the path it had, hashing straight into
+    /// the file with nothing in between.
+    #[test]
+    fn an_uncompressed_artifact_asks_for_no_decompressor() {
+        assert!(artifact().compression.command().is_none());
     }
 }

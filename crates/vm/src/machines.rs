@@ -142,6 +142,7 @@ fn build(
     hypervisor::create_overlay(
         &store.path_for(&artifact.digest),
         &directory.overlay(),
+        &artifact.format,
         request.disk_size.as_deref(),
     )?;
 

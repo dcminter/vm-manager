@@ -76,6 +76,8 @@ pub struct Inspect {
     pub description: String,
     pub arch: String,
     pub format: String,
+    /// How the published file is wrapped, or "none".
+    pub compression: String,
     pub url: Option<String>,
     pub digest: String,
     pub seedable: bool,
@@ -92,11 +94,22 @@ impl Inspect {
             description: entry.description.clone(),
             arch: artifact.arch.clone(),
             format: artifact.format.clone(),
+            compression: artifact.compression.name().to_owned(),
             url: artifact.url.clone(),
             digest: artifact.digest.to_string(),
             seedable: entry.login.is_seedable(),
             held,
             size: artifact.size,
+        }
+    }
+
+    /// The image's own format, and the wrapper it arrives in where there is
+    /// one. Written together because the second only qualifies the first.
+    fn formatting(&self) -> String {
+        if self.compression == "none" {
+            self.format.clone()
+        } else {
+            format!("{}, published {}", self.format, self.compression)
         }
     }
 
@@ -118,6 +131,7 @@ impl Report for Inspect {
             ("description", Value::string(self.description.clone())),
             ("arch", Value::string(self.arch.clone())),
             ("format", Value::string(self.format.clone())),
+            ("compression", Value::string(self.compression.clone())),
             ("url", self.url.clone().map_or(Value::Null, Value::String)),
             ("digest", Value::string(self.digest.clone())),
             ("seedable", Value::Bool(self.seedable)),
@@ -136,7 +150,7 @@ impl Report for Inspect {
         }
         fields.extend([
             ("Architecture", self.arch.clone()),
-            ("Format", self.format.clone()),
+            ("Format", self.formatting()),
             (
                 "Source",
                 self.url
@@ -1134,6 +1148,7 @@ mod tests {
             description: "Debian 13".to_owned(),
             arch: "amd64".to_owned(),
             format: "qcow2".to_owned(),
+            compression: "none".to_owned(),
             url: Some("https://example.test/a.qcow2".to_owned()),
             digest: "sha512:abc".to_owned(),
             seedable: false,
@@ -1146,6 +1161,37 @@ mod tests {
             "{lines:?}"
         );
         assert!(to_json(&report.to_value()).contains(r#""aliases": []"#));
+    }
+
+    /// A wrapper is worth saying, because it explains why the file that
+    /// arrives is not the size the entry records.
+    #[test]
+    fn an_inspection_names_the_compression_only_when_there_is_some() {
+        let mut report = Inspect {
+            name: "freebsd".to_owned(),
+            tag: "14.3".to_owned(),
+            aliases: Vec::new(),
+            description: String::new(),
+            arch: "amd64".to_owned(),
+            format: "qcow2".to_owned(),
+            compression: "xz".to_owned(),
+            url: None,
+            digest: String::new(),
+            seedable: true,
+            held: false,
+            size: None,
+        };
+        let line = |report: &Inspect| {
+            report
+                .render_text(Style::plain())
+                .into_iter()
+                .find(|line| line.starts_with("Format"))
+                .unwrap_or_default()
+        };
+        assert!(line(&report).contains("qcow2, published xz"));
+        assert!(to_json(&report.to_value()).contains(r#""compression": "xz""#));
+        report.compression = "none".to_owned();
+        assert!(line(&report).ends_with("qcow2"));
     }
 
     #[test]
@@ -1172,6 +1218,7 @@ mod tests {
             description: String::new(),
             arch: "amd64".to_owned(),
             format: "qcow2".to_owned(),
+            compression: "none".to_owned(),
             url: None,
             digest: String::new(),
             seedable: true,

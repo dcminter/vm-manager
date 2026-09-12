@@ -23,13 +23,22 @@ works on a machine started with no arguments at all.
 .B images
 List the images in the local catalogue, with the size each takes in the store.
 An image that has not been fetched is listed with the size the catalogue
-records for it, so what a pull will cost is known before it is made.
+records for it, so what a pull will cost is known before it is made. The figure
+is what the image occupies once it is here; an entry published compressed
+transfers less than that and is expanded on the way in.
 .TP
 .BI inspect " IMAGE"
 Show where an image comes from and how its guest is reached.
 .TP
 .BI pull " IMAGE"
 Fetch an image into the local store, verifying it against the catalogue digest.
+An entry published compressed is expanded as it arrives, with
+.BR xz (1),
+.BR gzip (1)
+or
+.BR zstd (1)
+according to what the entry states; the digest checked is the publisher's own
+and so covers the file as published.
 .TP
 .B update
 Refresh the local catalogue from its remote source.

@@ -144,8 +144,13 @@ pub fn arguments(instance: &Instance, directory: &Directory) -> Vec<String> {
     ));
     if instance.seeded {
         push("-drive");
+        // Writable, though nothing is meant to write to it. FreeBSD's
+        // nuageinit mounts the volume read-write and gives up when it
+        // cannot, so a read-only seed is a seed that is never read. The
+        // file belongs to this instance alone and is rewritten on every
+        // start, so there is nothing here for a guest to spoil.
         push(&format!(
-            "file={},if=virtio,format=raw,readonly=on",
+            "file={},if=virtio,format=raw",
             directory.seed().display()
         ));
     }
@@ -303,7 +308,16 @@ pub fn resize_overlay(overlay: &Path, size: &str) -> Result<()> {
 
 /// Creates the instance's writable disk over an image in the store. The image
 /// itself is never written to: it backs every instance built from it.
-pub fn create_overlay(image: &Path, overlay: &Path, size: Option<&str>) -> Result<()> {
+///
+/// The overlay is always qcow2, because that is what an overlay has to be.
+/// The backing format is whatever the catalogue says the image is: several
+/// projects publish raw disks, and `qemu-img` refuses to guess.
+pub fn create_overlay(
+    image: &Path,
+    overlay: &Path,
+    backing: &str,
+    size: Option<&str>,
+) -> Result<()> {
     let mut command = Command::new("qemu-img");
     command
         .arg("create")
@@ -311,7 +325,7 @@ pub fn create_overlay(image: &Path, overlay: &Path, size: Option<&str>) -> Resul
         .arg("-f")
         .arg("qcow2")
         .arg("-F")
-        .arg("qcow2")
+        .arg(backing)
         .arg("-b")
         .arg(image)
         .arg(overlay);
@@ -481,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn a_seeded_instance_is_given_its_seed_read_only() {
+    fn a_seeded_instance_is_given_its_seed_as_a_raw_volume() {
         let scratch = Scratch::new("seeded");
         let directory = scratch.directory("one");
         let arguments = arguments(&instance("one"), &directory);
@@ -489,8 +503,10 @@ mod tests {
             .iter()
             .find(|held| held.contains("seed.img"))
             .unwrap();
-        assert!(seed.contains("readonly=on"), "{seed}");
         assert!(seed.contains("format=raw"), "{seed}");
+        // Read-only would be the obvious choice and it is the wrong one:
+        // a guest that mounts the volume read-write finds nothing at all.
+        assert!(!seed.contains("readonly"), "{seed}");
     }
 
     #[test]
@@ -828,7 +844,7 @@ mod tests {
             return; // qemu-img is not installed here; the CLI reports that itself.
         }
         let overlay = scratch.0.join("overlay.qcow2");
-        create_overlay(&image, &overlay, Some("128M")).unwrap();
+        create_overlay(&image, &overlay, "qcow2", "128M".into()).unwrap();
         assert!(overlay.is_file());
         let info = Command::new("qemu-img")
             .args(["info", "--output=json"])
@@ -839,12 +855,48 @@ mod tests {
         assert!(text.contains("backing-filename"), "{text}");
     }
 
+    /// Several projects publish raw disks, and an overlay over one has to say
+    /// so: left to guess, `qemu-img` warns and later refuses to open it.
+    #[test]
+    fn an_overlay_over_a_raw_image_records_the_backing_format() {
+        let scratch = Scratch::new("rawoverlay");
+        let image = scratch.0.join("image.raw");
+        let made = Command::new("qemu-img")
+            .args(["create", "-q", "-f", "raw"])
+            .arg(&image)
+            .arg("64M")
+            .status();
+        if !made.is_ok_and(|status| status.success()) {
+            return; // qemu-img is not installed here; the CLI reports that itself.
+        }
+        let overlay = scratch.0.join("overlay.qcow2");
+        create_overlay(&image, &overlay, "raw", None).unwrap();
+        let info = Command::new("qemu-img")
+            .args(["info", "--output=json"])
+            .arg(&overlay)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&info.stdout);
+        assert!(
+            text.contains(r#""backing-filename-format": "raw""#),
+            "{text}"
+        );
+        // The warning qemu-img prints for a backing file of unstated format
+        // is the thing this is here to keep out.
+        assert!(
+            String::from_utf8_lossy(&info.stderr).is_empty(),
+            "{}",
+            String::from_utf8_lossy(&info.stderr)
+        );
+    }
+
     #[test]
     fn an_overlay_over_an_image_that_is_not_there_is_refused() {
         let scratch = Scratch::new("nobacking");
         let outcome = create_overlay(
             &scratch.0.join("absent.qcow2"),
             &scratch.0.join("overlay.qcow2"),
+            "qcow2",
             None,
         );
         match outcome {

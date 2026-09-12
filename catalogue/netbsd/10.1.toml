@@ -1,0 +1,13 @@
+name = "netbsd"
+tag = "10.1"
+aliases = ["10", "latest"]
+description = "NetBSD 10.1 live image; console only, root has no password"
+login = "none"
+
+[[image]]
+arch = "amd64"
+format = "raw"
+compression = "gzip"
+url = "https://cdn.netbsd.org/pub/NetBSD/NetBSD-10.1/images/NetBSD-10.1-amd64-live.img.gz"
+digest = "sha512:a801ca62586a923f15442cc62eca0d011b7baa3bb1270557aec3769f443495d86ca51efa731d0793ccbfac1ad847381526bcc91809cbf7c844b78747ecab53b7"
+size = 1999634432

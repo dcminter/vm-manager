@@ -56,15 +56,23 @@ appending `@sha512:...`.
 ## Images
 
 The catalogue ships with `debian`, `ubuntu`, `fedora`, `centos`, `almalinux`,
-`rocky`, `opensuse`, `alpine`, `arch` and `omnios`, several releases apiece.
-Run `vm images` for the list. Every entry names a dated build rather than a
-moving `latest`, and carries the checksum its publisher issued, which is what
-`vm pull` verifies what it fetched against.
+`rocky`, `opensuse`, `alpine`, `arch`, `omnios`, `freebsd`, `netbsd` and
+`9front`, several releases apiece. Run `vm images` for the list. Every entry
+names a dated build rather than a moving `latest`, and carries the checksum its
+publisher issued, which is what `vm pull` verifies what it fetched against.
 
-An entry has to be an uncompressed qcow2 that boots on this tool's machine,
-which is what keeps some obvious names out: desktop spins publish installer
-ISOs and no cloud image, and FreeBSD, NetBSD and 9front publish cloud images
-that are compressed.
+An entry may be published compressed, which several projects do because the
+saving is large: an entry that says `compression = "xz"`, `"gzip"` or `"zstd"`
+is expanded on the way into the store, once, rather than on every boot. The
+digest is still the publisher's own, so it covers the file as published rather
+than what it expands to. An entry also states the `format` of the image itself,
+`qcow2` or `raw`, which is what the instance's overlay records as its backing
+format.
+
+What keeps names out now is the machine rather than the wrapper: desktop spins
+publish installer ISOs and no bootable disk at all, and PureDarwin needs UEFI
+firmware and an Intel processor to present to the guest, neither of which this
+tool can yet be told to arrange.
 
 ## Machines
 
@@ -161,7 +169,9 @@ requested format too, carrying a stable `kind` alongside the message.
 
 Fetched images are verified against the digest the catalogue records and are
 stored under `$XDG_DATA_HOME/vm/images`, addressed by that digest, so tags
-naming the same build share one file.
+naming the same build share one file. A compressed entry is verified as it
+arrives and expanded through `xz`, `gzip` or `zstd`, so the digest checked is
+the published one and the file kept is the usable one.
 
 ## Releases
 

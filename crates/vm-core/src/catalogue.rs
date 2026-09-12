@@ -1,3 +1,4 @@
+use crate::compression::Compression;
 use crate::error::{Error, Result};
 use crate::reference::{Digest, Reference};
 use serde::Deserialize;
@@ -42,17 +43,27 @@ struct RawImage {
     url: Option<String>,
     digest: String,
     size: Option<u64>,
+    /// How the published file is wrapped. Absent means it is not.
+    #[serde(default)]
+    compression: Compression,
 }
 
 /// One architecture's build of a catalogue entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Artifact {
     pub arch: String,
+    /// The format of the image itself, once any wrapper is off: what
+    /// `qemu-img` is told the backing file is.
     pub format: String,
     /// Where to fetch it, or nothing if it was made here by `vm clone`.
     pub url: Option<String>,
+    /// The digest of the file as published, which for a compressed artifact
+    /// is not the digest of what ends up in the store. It is what the
+    /// publisher signs and so it is what can be checked.
     pub digest: Digest,
+    /// What the expanded image occupies, where the entry says.
     pub size: Option<u64>,
+    pub compression: Compression,
 }
 
 /// A named, tagged image as the catalogue describes it.
@@ -241,6 +252,7 @@ fn read_entry(path: &Path) -> Result<Entry> {
                     reason: error.to_string(),
                 })?,
                 size: image.size,
+                compression: image.compression,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -290,6 +302,48 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// An entry that says nothing about compression describes a file that can
+    /// be used as it arrives, which is most of them.
+    #[test]
+    fn an_entry_that_is_silent_describes_an_uncompressed_image() {
+        let scratch = Scratch::new("plain");
+        scratch.write("x/y.toml", &entry_toml("x", "y", ""));
+        let catalogue = scratch.load().unwrap();
+        let (_, artifact) = catalogue.resolve(&"x:y".parse().unwrap(), "amd64").unwrap();
+        assert_eq!(artifact.compression, Compression::None);
+        assert_eq!(artifact.format, "qcow2");
+    }
+
+    #[test]
+    fn an_entry_carries_the_compression_and_format_it_states() {
+        let scratch = Scratch::new("packed");
+        scratch.write(
+            "netbsd/10.1.toml",
+            &format!(
+                r#"
+name = "netbsd"
+tag = "10.1"
+description = "test entry"
+login = "none"
+
+[[image]]
+arch = "amd64"
+format = "raw"
+compression = "gzip"
+url = "https://example.invalid/netbsd.img.gz"
+digest = "sha512:{}"
+"#,
+                "a".repeat(128)
+            ),
+        );
+        let catalogue = scratch.load().unwrap();
+        let (_, artifact) = catalogue
+            .resolve(&"netbsd:10.1".parse().unwrap(), "amd64")
+            .unwrap();
+        assert_eq!(artifact.compression, Compression::Gzip);
+        assert_eq!(artifact.format, "raw");
     }
 
     fn entry_toml(name: &str, tag: &str, aliases: &str) -> String {

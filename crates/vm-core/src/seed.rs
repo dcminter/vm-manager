@@ -54,29 +54,27 @@ impl Seed {
     ///
     /// Both are conditional and both end in `true`: a correction that does not
     /// apply must not fail the module and take the rest of the seed with it.
+    /// Written as shell lines rather than as argument lists.
+    ///
+    /// cloud-init takes either, but FreeBSD's nuageinit takes only the first
+    /// and stops with a Lua error on the second, which costs the whole seed.
+    /// Every command here is `sh -c` material anyway.
     fn corrections(&self) -> Value {
         let user = &self.user;
         Value::list([
             // A shell the image does not have is one ssh cannot exec, so the
             // account would authenticate and then have nothing to run.
-            Value::list([
-                Value::string("sh"),
-                Value::string("-c"),
-                Value::string(format!(
-                    "test -x {SHELL} || usermod -s /bin/sh {user}; true"
-                )),
-            ]),
+            Value::string(format!(
+                "test -x {SHELL} || usermod -s /bin/sh {user} || \
+                 pw usermod {user} -s /bin/sh || chsh -s /bin/sh {user} || true"
+            )),
             // The sudo rule above is written to a file only sudo reads. An
             // image that carries doas instead is told in its own terms, or the
             // account has no way to become root at all.
-            Value::list([
-                Value::string("sh"),
-                Value::string("-c"),
-                Value::string(format!(
-                    "command -v sudo >/dev/null || {{ command -v doas >/dev/null && \
-                     echo permit nopass {user} >> /etc/doas.conf; }}; true"
-                )),
-            ]),
+            Value::string(format!(
+                "command -v sudo >/dev/null || {{ command -v doas >/dev/null && \
+                 echo permit nopass {user} >> /etc/doas.conf; }} || true"
+            )),
         ])
     }
 
@@ -315,6 +313,9 @@ mod tests {
         assert!(text.contains("runcmd:"), "{text}");
         assert!(text.contains("test -x /bin/bash"), "{text}");
         assert!(text.contains("usermod -s /bin/sh vm"), "{text}");
+        // FreeBSD has no usermod, and an account left pointing at a shell
+        // that is not there cannot log in at all.
+        assert!(text.contains("pw usermod vm -s /bin/sh"), "{text}");
     }
 
     #[test]

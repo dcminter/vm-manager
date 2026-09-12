@@ -1,6 +1,7 @@
 pub mod access;
 pub mod catalogue;
 pub mod clone;
+pub mod compression;
 pub mod config;
 pub mod digest;
 pub mod disk;
