@@ -29,7 +29,7 @@ cargo run -p vm -- images
 
 | Command | Purpose |
 |---|---|
-| `vm images` | List the images in the local catalogue |
+| `vm images` | List the images in the local catalogue and what each takes |
 | `vm inspect <image>` | Show where an image comes from and how its guest is reached |
 | `vm pull <image>` | Fetch an image into the local store |
 | `vm update` | Refresh the local catalogue from its remote source |
@@ -37,7 +37,7 @@ cargo run -p vm -- images
 | `vm start <name>` | Start a machine that is not running, and change how it is set up |
 | `vm ssh <name>` | Open a shell on a machine, or run a command in it |
 | `vm cp <from> <to>` | Copy files, naming one side as `name:path` |
-| `vm ps` | List machines; `--all` includes those not running |
+| `vm ps` | List machines; `--all` includes those not running, `--follow` keeps looking |
 | `vm stop <name>` | Ask the guest to shut down, then insist |
 | `vm pause <name>` | Stop a machine's processors without telling the guest |
 | `vm resume <name>` | Let a paused machine carry on |
@@ -90,11 +90,21 @@ since the machine was created, so a machine that failed to boot and was started
 again keeps the evidence. `--follow` writes it as it arrives, which is text
 only: a document cannot be emitted a line at a time and still be a document.
 
+`vm ps` gives each machine's memory and disk as what it costs the host against
+what it was promised: the memory the hypervisor holds now out of what the
+machine was started with, and the bytes its disk occupies out of the size the
+guest sees. A machine that is not running holds no memory, so only the figure
+it was given is shown. `--follow` lists them again every second; on a terminal
+each listing replaces the last, and in a document format one follows another.
+
 `vm commit` flattens a machine's disk into a standalone image in the store and
-gives it a name. A running guest is paused for the duration, because a disk
-taken from under one is crash-consistent at best; `--force` skips the pause and
-says so. Committed images are listed by `vm images` alongside the catalogue's
-own, and `vm update` does not disturb them.
+gives it a name. It runs in two passes and shows both: the disk is flattened,
+and the result is read back and verified, because an image is addressed by its
+digest and the digest cannot be known before the bytes exist. A running guest
+is paused for the duration, because a disk taken from under one is
+crash-consistent at best; `--force` skips the pause and says so. Committed
+images are listed by `vm images` alongside the catalogue's own, and `vm update`
+does not disturb them.
 
 `vm pause` stops a machine's processors. The guest takes no part: its memory,
 its disk and everything it holds open stay as they are, held by a hypervisor
@@ -104,10 +114,13 @@ survives neither a host reboot nor `vm kill`. A paused guest answers nothing,
 so `vm ssh` and `vm cp` say so rather than wait, and `vm stop` lets it carry on
 first so that it can take the power button.
 
-`vm rmi` takes an image back out of the store. One the catalogue provides is
+`vm rmi` takes a name back out of the store. One the catalogue provides is
 listed again as unfetched; one made here has nowhere to be fetched from, so its
-entry goes with it. A machine is built on its image rather than a copy of it,
-so an image still in use is refused unless `--force` says otherwise.
+entry goes with it. Images are held by digest, so two commits of an unchanged
+disk are one file under two names: the file goes with the last name for it, and
+until then `vm rmi` says which names are keeping it. A machine is built on its
+image rather than a copy of it, so an image still in use is refused unless
+`--force` says otherwise.
 
 Images that carry no cloud-init still run; they simply take no key and no user,
 which `vm run` says at the time rather than leaving to be discovered.

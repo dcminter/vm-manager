@@ -548,10 +548,46 @@ pub fn list(all: bool) -> Result<reports::Machines> {
             } else {
                 reports::State::Stopped
             };
-            rows.push(reports::MachineRow::of(&held, state));
+            let disk = vm_core::disk::usage(&directory.overlay());
+            rows.push(reports::MachineRow::of(&held, state, disk));
         }
     }
     Ok(reports::Machines { rows, all })
+}
+
+/// How often a followed listing is taken again. A machine's memory and disk
+/// move slowly enough that a second is already generous.
+const REFRESH: Duration = Duration::from_secs(1);
+
+/// Lists instances over and over until the reader has had enough.
+///
+/// On a terminal each pass clears the screen, so what is there stays in one
+/// place and can be read as a display. Redirected, and in the document
+/// formats, one listing simply follows another, because a reader that is
+/// piping this somewhere wants all of them rather than the latest.
+pub fn watch(all: bool, format: crate::output::Format, style: Style) -> Result<()> {
+    use std::io::{IsTerminal as _, Write as _};
+    let clearing = format.is_text() && std::io::stdout().is_terminal();
+    loop {
+        let report = list(all)?;
+        if clearing {
+            // Home, then clear: clearing first leaves the cursor wherever the
+            // last listing left it.
+            let _ = write!(std::io::stdout(), "\u{1b}[H\u{1b}[2J");
+        }
+        if format == crate::output::Format::Yaml {
+            // Without it, one listing's items run on from the last one's and
+            // the stream reads as a single ever-growing list. JSON needs no
+            // equivalent: its values are self-delimiting.
+            let _ = writeln!(std::io::stdout(), "---");
+        }
+        // A sink that has gone is the end of the stream rather than a failure
+        // to report: `vm ps --follow | head` ends this way by design.
+        if crate::output::emit(&report, format, style).is_err() {
+            return Ok(());
+        }
+        std::thread::sleep(REFRESH);
+    }
 }
 
 /// Refuses a machine that cannot answer.
@@ -721,7 +757,7 @@ pub enum Consistency {
 /// A running guest is paused for the duration unless the user insists
 /// otherwise, because a disk taken from under one is crash-consistent at best
 /// and there is no guest agent here to freeze its filesystems properly.
-pub fn commit(name: &str, target: &str, force: bool) -> Result<reports::Committed> {
+pub fn commit(name: &str, target: &str, force: bool, text: bool) -> Result<reports::Committed> {
     let reference: vm_core::Reference = target.parse()?;
     let instances = Instances::discover()?;
     let directory = instances.open(name)?;
@@ -736,6 +772,11 @@ pub fn commit(name: &str, target: &str, force: bool) -> Result<reports::Committe
         (true, true) => Consistency::Running,
     };
 
+    // A commit reads the whole backing chain and then reads the result back to
+    // hash it, either of which on a large image is long enough that a silent
+    // tool looks like a wedged one. Both passes are named, because a bar that
+    // reaches the end and starts again otherwise reads as a stall.
+    let mut bar = progress::Bar::new("", text);
     let committed = if consistency == Consistency::Paused {
         let mut client = qmp::connect(&held.monitor)?;
         // A machine the user paused is left paused; only one paused here is
@@ -749,24 +790,33 @@ pub fn commit(name: &str, target: &str, force: bool) -> Result<reports::Committe
             &local,
             &held,
             &directory.overlay(),
-            reference.repository(),
-            reference.tag(),
+            &reference,
             true,
+            Some(&mut |stage, percent| {
+                bar.naming(&format!("  {:<10}", vm_core::commit::Stage::label(stage)));
+                bar.portion(percent);
+            }),
         );
+        bar.clear();
         if was_running {
             client.resume()?;
         }
         outcome?
     } else {
-        vm_core::commit::commit(
+        let outcome = vm_core::commit::commit(
             &store,
             &local,
             &held,
             &directory.overlay(),
-            reference.repository(),
-            reference.tag(),
+            &reference,
             running,
-        )?
+            Some(&mut |stage, percent| {
+                bar.naming(&format!("  {:<10}", vm_core::commit::Stage::label(stage)));
+                bar.portion(percent);
+            }),
+        );
+        bar.clear();
+        outcome?
     };
 
     Ok(reports::Committed {
@@ -801,10 +851,15 @@ pub fn remove(name: &str, force: bool) -> Result<reports::Removed> {
 
 /// Removes an image from the store.
 ///
-/// The bytes are what is removed. A reference from the fetched catalogue
-/// survives and simply shows as unheld again; one made here by `vm commit` has
-/// nowhere to be fetched from, so its entry goes with it rather than naming an
-/// image nothing could ever produce.
+/// What is removed is the name. A reference from the fetched catalogue survives
+/// and simply shows as unheld again; one made here by `vm commit` has nowhere
+/// to be fetched from, so its entry goes with it rather than naming an image
+/// nothing could ever produce.
+///
+/// The bytes go with the last name for them. Images are addressed by digest, so
+/// two commits of an unchanged disk are one file under two names, and removing
+/// the file out from under the other one would strand an image that cannot be
+/// fetched back.
 pub fn remove_image(
     catalogue: &Catalogue,
     store: &Store,
@@ -813,7 +868,12 @@ pub fn remove_image(
 ) -> Result<reports::Untagged> {
     let parsed: vm_core::Reference = reference.parse()?;
     let (entry, artifact) = catalogue.resolve(&parsed, host_architecture())?;
-    if !store.contains(&artifact.digest) {
+    // An entry with nowhere to fetch from was written here, so it is ours to
+    // take away; one the catalogue provides would come back on the next update.
+    let local = artifact.url.is_none();
+    if !store.contains(&artifact.digest) && !local {
+        // There is nothing to remove and the name will still be there
+        // afterwards, so this would do nothing at all.
         return Err(Error::UnheldImage {
             reference: reference.to_owned(),
         });
@@ -826,11 +886,13 @@ pub fn remove_image(
             instances: users,
         });
     }
-    let size = store.discard(&artifact.digest)?;
+    let kept_by = stranded(catalogue, entry, artifact);
+    let size = if kept_by.is_empty() {
+        store.discard(&artifact.digest)?
+    } else {
+        0
+    };
     store.forget(&entry.name, &entry.tag, &artifact.arch);
-    // An entry with nowhere to fetch from was written here, so it is ours to
-    // take away; one the catalogue provides would come back on the next update.
-    let local = artifact.url.is_none();
     if local && let Some(root) = vm_core::paths::local_catalogue_directory() {
         let directory = root.join(&entry.name);
         let _ = std::fs::remove_file(directory.join(format!("{}.toml", entry.tag)));
@@ -844,7 +906,33 @@ pub fn remove_image(
         size,
         forgotten: local,
         broke: users,
+        kept_by,
     })
+}
+
+/// Other names for the same bytes that could not get them back.
+///
+/// Only an image made here is at risk: one the catalogue provides is listed as
+/// unfetched and pulled again, which is the point of removing it. The machines
+/// built on an image are a separate question, answered by `holders`, and one
+/// the user can overrule; this one they cannot, because nothing could undo it.
+fn stranded(
+    catalogue: &Catalogue,
+    entry: &vm_core::catalogue::Entry,
+    artifact: &vm_core::catalogue::Artifact,
+) -> Vec<String> {
+    catalogue
+        .entries()
+        .into_iter()
+        .filter(|other| other.name != entry.name || other.tag != entry.tag)
+        .filter(|other| {
+            other
+                .artifacts
+                .iter()
+                .any(|held| held.digest == artifact.digest && held.url.is_none())
+        })
+        .map(|other| format!("{}:{}", other.name, other.tag))
+        .collect()
 }
 
 /// The machines whose disk is backed by a given image.
@@ -898,7 +986,7 @@ fn tail(text: &str, lines: Option<usize>) -> Vec<String> {
 /// The whole file comes first, so following a machine that has already booted
 /// shows what it said on the way. Text only: a document cannot be emitted a
 /// line at a time and still be a document.
-pub fn follow(name: &str, from: Option<usize>) -> Result<reports::Console> {
+pub fn follow(name: &str, from: Option<usize>) -> Result<()> {
     use std::io::{Read as _, Write as _};
     let instances = Instances::discover()?;
     let directory = instances.open(name)?;
@@ -909,7 +997,7 @@ pub fn follow(name: &str, from: Option<usize>) -> Result<reports::Console> {
         // Nothing has been written yet, and waiting for a file that may never
         // appear is worse than saying so.
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(reports::Console::followed(name));
+            return Ok(());
         }
         Err(source) => {
             return Err(Error::State {
@@ -924,31 +1012,31 @@ pub fn follow(name: &str, from: Option<usize>) -> Result<reports::Console> {
     // next write will land, so nothing between the two is missed.
     let mut buffer = Vec::new();
     if file.read_to_end(&mut buffer).is_err() {
-        return Ok(reports::Console::followed(name));
+        return Ok(());
     }
     let text = String::from_utf8_lossy(&buffer);
     for line in tail(&text, from) {
         if writeln!(out, "{line}").is_err() {
-            return Ok(reports::Console::followed(name));
+            return Ok(());
         }
     }
     loop {
         let running = directory.read().is_ok_and(|held| held.is_running());
         buffer.clear();
         if file.read_to_end(&mut buffer).is_err() {
-            return Ok(reports::Console::followed(name));
+            return Ok(());
         }
         if buffer.is_empty() {
             // Nothing new, and if nothing is running there will be no more.
             if !running {
                 let _ = out.flush();
-                return Ok(reports::Console::followed(name));
+                return Ok(());
             }
             std::thread::sleep(Duration::from_millis(200));
             continue;
         }
         if out.write_all(&buffer).is_err() || out.flush().is_err() {
-            return Ok(reports::Console::followed(name));
+            return Ok(());
         }
     }
 }

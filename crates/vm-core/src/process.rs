@@ -100,6 +100,20 @@ pub fn signal(handle: &Handle, signal: Signal) -> Result<()> {
     }
 }
 
+/// Resident memory, in bytes: what a process costs the host now rather than
+/// what it was promised.
+///
+/// A hypervisor is given its guest's memory as an address space and takes it
+/// as the guest touches it, so a machine started with 2G may be holding a
+/// fraction of that. `VmRSS` is in kibibytes and says so; the unit is not
+/// parsed, because `/proc` has never written anything else there.
+pub fn resident(pid: u32) -> Option<u64> {
+    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
+    let kibibytes: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    kibibytes.checked_mul(1024)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     /// Ask. A hypervisor treats this as a request to quit.
@@ -228,5 +242,22 @@ mod tests {
     fn a_stat_line_that_is_not_one_yields_nothing() {
         assert_eq!(start_time("nonsense"), None);
         assert_eq!(start_time("1234 (sleep) S 1 2 3"), None);
+    }
+
+    /// This process is holding something, and whatever it is, it is more than
+    /// a page and less than the machine.
+    #[test]
+    fn a_running_process_reports_what_it_is_holding() {
+        let held = resident(std::process::id()).unwrap();
+        assert!(held >= 4096, "{held}");
+    }
+
+    #[test]
+    fn a_pid_that_is_not_there_holds_nothing() {
+        let mut child = sleeper();
+        let pid = child.id();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(resident(pid), None);
     }
 }

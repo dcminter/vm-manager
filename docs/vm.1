@@ -21,7 +21,9 @@ works on a machine started with no arguments at all.
 .SH COMMANDS
 .TP
 .B images
-List the images in the local catalogue.
+List the images in the local catalogue, with the size each takes in the store.
+An image that has not been fetched is listed with the size the catalogue
+records for it, so what a pull will cost is known before it is made.
 .TP
 .BI inspect " IMAGE"
 Show where an image comes from and how its guest is reached.
@@ -71,6 +73,19 @@ List machines.
 .B \-\-all
 includes those that are not running. The status of a running machine is what it
 says of itself through its monitor, so a paused one is listed as paused.
+.IP
+The memory and disk columns give what the machine is costing the host against
+what it was promised: memory a running hypervisor holds now out of what it was
+started with, and the bytes its disk occupies out of the size the guest sees. A
+machine that is not running holds no memory, so only the figure it was given is
+shown. The document formats carry all four figures, in mebibytes, as
+.IR memory ", " memory_used ", " disk " and " disk_used .
+.IP
+.B \-\-follow
+lists them again every second until interrupted. On a terminal each listing
+replaces the last, so it reads as a display; redirected, or in a document
+format, one listing follows another and a YAML stream separates them with
+.BR \-\-\- .
 .TP
 .BI stop " NAME"
 Ask the guest to shut down, waiting
@@ -111,6 +126,10 @@ has nowhere to be fetched from, so its catalogue entry goes with it. Machines
 are built on their image, so one that is still in use is refused unless
 .B \-\-force
 is given.
+.IP
+What is removed is the name. Images are held by digest, so two commits of an
+unchanged disk are one file under two names, and the file goes only with the
+last name for it; until then the command says which names are keeping it.
 .TP
 .BI commit " NAME IMAGE"
 Save a machine's disk as a new image, named
@@ -118,6 +137,10 @@ Save a machine's disk as a new image, named
 A running guest is paused for the duration unless
 .B \-\-force
 is given.
+.IP
+It runs in two passes, both shown: the disk is flattened, and the result is read
+back and verified, because an image is addressed by its digest and the digest
+cannot be known before the bytes exist.
 .TP
 .BI rm " NAME"
 Delete a machine and its disk.

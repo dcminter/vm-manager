@@ -3,6 +3,7 @@ pub mod catalogue;
 pub mod commit;
 pub mod config;
 pub mod digest;
+pub mod disk;
 pub mod error;
 pub mod fat;
 pub mod hypervisor;

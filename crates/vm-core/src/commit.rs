@@ -6,11 +6,40 @@
 
 use crate::error::{Error, Result};
 use crate::instance::Instance;
-use crate::reference::{Algorithm, Digest};
+use crate::reference::{Algorithm, Digest, Reference};
 use crate::store::Store;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// How far along a conversion is, in whole percent.
+pub type Converting<'a> = &'a mut dyn FnMut(u8);
+
+/// Which pass a commit is in the middle of.
+///
+/// There are two, and they take comparable time on a large image: the disk is
+/// flattened, and then read back to be hashed, because an image is addressed
+/// by its digest and the digest cannot be known before the bytes exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Converting,
+    Hashing,
+}
+
+impl Stage {
+    /// What to call the pass to a user. The second one is hashing, but what it
+    /// is for is establishing that the image is the bytes it claims to be, and
+    /// that is the part worth waiting through.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Converting => "converting",
+            Self::Hashing => "verifying",
+        }
+    }
+}
+
+/// How far along a commit is: which pass, and how much of it is done.
+pub type Reporter<'a> = &'a mut dyn FnMut(Stage, u8);
 
 /// Local images are hashed with SHA-256. Nothing external publishes a sum for
 /// them, so the only requirement is that it names the bytes.
@@ -36,11 +65,19 @@ pub struct Committed {
 /// The input format is stated rather than left to be probed. Left to guess,
 /// `qemu-img` falls back to raw, so a damaged overlay converts successfully
 /// into an image of its own wreckage instead of being refused.
-pub fn convert(overlay: &Path, destination: &Path, in_use: bool) -> Result<()> {
+pub fn convert(
+    overlay: &Path,
+    destination: &Path,
+    in_use: bool,
+    report: Option<Converting<'_>>,
+) -> Result<()> {
     let mut command = Command::new("qemu-img");
     command
         .arg("convert")
-        .arg("-q")
+        // `-p` writes a percentage whether or not it is talking to a terminal,
+        // rewriting one line with a carriage return. It is asked for either
+        // way so that there is only one code path to have got right.
+        .arg("-p")
         .arg("-f")
         .arg("qcow2")
         .arg("-O")
@@ -52,10 +89,15 @@ pub fn convert(overlay: &Path, destination: &Path, in_use: bool) -> Result<()> {
         // else is still writing to is refused rather than read.
         command.arg("-U");
     }
-    let output = command
+    let mut child = command
         .arg(overlay)
         .arg(destination)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        // Held rather than inherited so that a failure is reported as an error
+        // of ours rather than printed over whatever else is on the terminal.
+        // Nothing here writes enough of it to fill a pipe.
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|source| {
             if source.kind() == std::io::ErrorKind::NotFound {
                 Error::MissingTool {
@@ -70,6 +112,13 @@ pub fn convert(overlay: &Path, destination: &Path, in_use: bool) -> Result<()> {
                 }
             }
         })?;
+    if let (Some(stdout), Some(report)) = (child.stdout.take(), report) {
+        watch(stdout, report);
+    }
+    let output = child.wait_with_output().map_err(|source| Error::Launch {
+        program: "qemu-img".to_owned(),
+        source,
+    })?;
     if output.status.success() {
         return Ok(());
     }
@@ -77,6 +126,50 @@ pub fn convert(overlay: &Path, destination: &Path, in_use: bool) -> Result<()> {
     Err(Error::Commit {
         reason: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
     })
+}
+
+/// Reads the conversion's progress until it stops writing any.
+///
+/// This is also what waits for the child to get on with it: nothing else is
+/// read until its output ends, which it does when the process does.
+fn watch(stdout: std::process::ChildStdout, report: Converting<'_>) {
+    use std::io::BufRead as _;
+    let mut reader = std::io::BufReader::new(stdout);
+    let mut buffer = Vec::new();
+    while reader
+        .read_until(b'\r', &mut buffer)
+        .is_ok_and(|read| read > 0)
+    {
+        if let Some(percent) = percentage(&String::from_utf8_lossy(&buffer)) {
+            report(percent);
+        }
+        buffer.clear();
+    }
+}
+
+/// The whole percent out of `    (37.50/100%)`.
+///
+/// The fraction is dropped rather than rounded, because this is read only to
+/// decide what to draw and a bar has nowhere to put it.
+fn percentage(text: &str) -> Option<u8> {
+    let open = text.rfind('(')?;
+    let slash = text.get(open..)?.find('/')? + open;
+    if !text.get(slash..)?.starts_with("/100%") {
+        return None;
+    }
+    let figure = text.get(open + 1..slash)?;
+    let whole = figure.split_once('.').map_or(figure, |(whole, _)| whole);
+    whole.parse().ok()
+}
+
+/// How much of a known total has been read, in whole percent. A pass whose
+/// length is not known reports nothing rather than a figure it made up.
+fn proportion(progress: &crate::store::Progress) -> u8 {
+    let Some(total) = progress.total.filter(|total| *total > 0) else {
+        return 0;
+    };
+    let percent = progress.received.saturating_mul(100) / total;
+    u8::try_from(percent.min(100)).unwrap_or(100)
 }
 
 /// Commits an instance's disk into the store under `name:tag`.
@@ -88,14 +181,27 @@ pub fn commit(
     local: &Path,
     instance: &Instance,
     overlay: &Path,
-    name: &str,
-    tag: &str,
+    target: &Reference,
     in_use: bool,
+    mut report: Option<Reporter<'_>>,
 ) -> Result<Committed> {
+    let (name, tag) = (target.repository(), target.tag());
     let staged = store.staging(&format!("{name}-{tag}"))?;
     let _ = fs::remove_file(&staged);
-    convert(overlay, &staged, in_use)?;
-    let digest = store.adopt(&staged, ALGORITHM)?;
+    let mut say = |stage, percent| {
+        if let Some(report) = report.as_deref_mut() {
+            report(stage, percent);
+        }
+    };
+    convert(
+        overlay,
+        &staged,
+        in_use,
+        Some(&mut |percent| say(Stage::Converting, percent)),
+    )?;
+    let digest = store.adopt(&staged, ALGORITHM, &mut |progress| {
+        say(Stage::Hashing, proportion(&progress));
+    })?;
     let path = store.path_for(&digest);
     let size = fs::metadata(&path).map_or(0, |data| data.len());
     let entry = write_entry(local, instance, name, tag, &digest, size)?;
@@ -161,7 +267,6 @@ mod tests {
 
     use super::*;
     use crate::catalogue::Catalogue;
-    use crate::reference::Reference;
 
     struct Scratch(PathBuf);
 
@@ -206,6 +311,102 @@ mod tests {
         Catalogue::load(local).unwrap()
     }
 
+    #[test]
+    fn a_progress_line_yields_its_whole_percent() {
+        assert_eq!(percentage("    (37.50/100%)"), Some(37));
+        assert_eq!(percentage("    (0.00/100%)"), Some(0));
+        assert_eq!(percentage("    (100.00/100%)"), Some(100));
+    }
+
+    /// Anything else on the stream is not progress and must not be read as it.
+    #[test]
+    fn a_line_that_is_not_progress_yields_nothing() {
+        for text in ["", "(", "()", "(x.00/100%)", "(50.00/50%)", "(50.00)"] {
+            assert_eq!(percentage(text), None, "{text}");
+        }
+    }
+
+    /// The digits alone would parse out of a byte count as readily as out of a
+    /// percentage; the shape is what identifies it.
+    #[test]
+    fn a_figure_too_large_for_a_percentage_is_refused() {
+        assert_eq!(percentage("(300.00/100%)"), None);
+    }
+
+    /// A conversion that runs reports at least that it finished. `qemu-img`
+    /// writes a first line before any work and a last one after all of it.
+    #[test]
+    fn a_conversion_reports_its_progress() {
+        let scratch = Scratch::new("progress");
+        let image = scratch.0.join("image.qcow2");
+        let made = Command::new("qemu-img")
+            .args(["create", "-q", "-f", "qcow2"])
+            .arg(&image)
+            .arg("64M")
+            .status();
+        if !made.is_ok_and(|status| status.success()) {
+            return;
+        }
+        let mut seen = Vec::new();
+        convert(
+            &image,
+            &scratch.0.join("out.qcow2"),
+            false,
+            Some(&mut |percent| seen.push(percent)),
+        )
+        .unwrap();
+        assert_eq!(seen.last(), Some(&100), "{seen:?}");
+        assert!(seen.windows(2).all(|pair| pair[0] <= pair[1]), "{seen:?}");
+    }
+
+    #[test]
+    fn each_pass_is_named_for_what_it_is_doing() {
+        assert_eq!(Stage::Converting.label(), "converting");
+        assert_eq!(Stage::Hashing.label(), "verifying");
+    }
+
+    #[test]
+    fn a_pass_of_known_length_reports_how_far_through_it_is() {
+        use crate::store::Progress;
+        let at = |received, total| {
+            proportion(&Progress {
+                received,
+                total: Some(total),
+            })
+        };
+        assert_eq!(at(0, 1000), 0);
+        assert_eq!(at(500, 1000), 50);
+        assert_eq!(at(1000, 1000), 100);
+    }
+
+    /// Nothing to measure against, so there is no figure to give. Neither a
+    /// zero total nor a runaway count may produce one out of range.
+    #[test]
+    fn a_pass_of_unknown_length_reports_nothing() {
+        use crate::store::Progress;
+        assert_eq!(
+            proportion(&Progress {
+                received: 42,
+                total: None
+            }),
+            0
+        );
+        assert_eq!(
+            proportion(&Progress {
+                received: 42,
+                total: Some(0)
+            }),
+            0
+        );
+        assert_eq!(
+            proportion(&Progress {
+                received: 4000,
+                total: Some(10)
+            }),
+            100
+        );
+    }
+
     /// The flag that lets a disk be read while a hypervisor holds it. Asking
     /// for it when nothing holds the disk would hide a genuine clash.
     #[test]
@@ -222,7 +423,7 @@ mod tests {
         }
         for in_use in [false, true] {
             let out = scratch.0.join(format!("out-{in_use}.qcow2"));
-            convert(&image, &out, in_use).unwrap();
+            convert(&image, &out, in_use, None).unwrap();
             assert!(out.is_file());
         }
     }
@@ -310,7 +511,7 @@ mod tests {
         let scratch = Scratch::new("notadisk");
         let overlay = scratch.0.join("not-a-disk");
         fs::write(&overlay, b"certainly not a qcow2").unwrap();
-        let outcome = convert(&overlay, &scratch.0.join("out.qcow2"), false);
+        let outcome = convert(&overlay, &scratch.0.join("out.qcow2"), false, None);
         match outcome {
             Err(error) => assert!(
                 matches!(error.kind(), "commit-failed" | "missing-tool"),

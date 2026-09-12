@@ -4,6 +4,7 @@ mod progress;
 mod reports;
 mod style;
 mod table;
+mod units;
 
 use clap::{Parser, Subcommand};
 use output::{Format, Report};
@@ -134,6 +135,9 @@ enum Command {
         /// Include instances that are not running
         #[arg(long, short)]
         all: bool,
+        /// List them again every second until interrupted
+        #[arg(long, short)]
+        follow: bool,
     },
     /// Shut an instance down
     Stop {
@@ -205,7 +209,8 @@ fn main() -> ExitCode {
         Style::plain()
     };
     match run(&cli, style) {
-        Ok(report) => match output::emit(report.as_ref(), cli.format, style) {
+        Ok(Outcome::Written) => ExitCode::SUCCESS,
+        Ok(Outcome::Reported(report)) => match output::emit(report.as_ref(), cli.format, style) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) if output::is_closed_pipe(&error) => ExitCode::SUCCESS,
             Err(error) => {
@@ -232,18 +237,31 @@ fn replacement<T: Clone>(given: &[T], none: bool) -> Option<Vec<T>> {
     }
 }
 
-fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
-    if let Some(report) = machine_command(cli)? {
-        return Ok(report);
+/// What a command left behind: something to write out, or nothing, because it
+/// wrote as it went and there is no last word to add.
+enum Outcome {
+    Reported(Box<dyn Report>),
+    Written,
+}
+
+fn run(cli: &Cli, style: Style) -> vm_core::Result<Outcome> {
+    if let Some(outcome) = machine_command(cli, style)? {
+        return Ok(outcome);
     }
-    catalogue_command(cli, style)
+    catalogue_command(cli, style).map(Outcome::Reported)
 }
 
 /// The commands that read no catalogue and no store, so they work even when
 /// neither is in place. `None` means this was not one of them.
-fn machine_command(cli: &Cli) -> vm_core::Result<Option<Box<dyn Report>>> {
+fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> {
     let report: Box<dyn Report> = match &cli.command {
-        Command::Ps { all } => Box::new(machines::list(*all)?),
+        Command::Ps { all, follow } => {
+            if *follow {
+                machines::watch(*all, cli.format, style)?;
+                return Ok(Some(Outcome::Written));
+            }
+            Box::new(machines::list(*all)?)
+        }
         Command::Start {
             name,
             memory,
@@ -274,10 +292,10 @@ fn machine_command(cli: &Cli) -> vm_core::Result<Option<Box<dyn Report>>> {
                 if !cli.format.is_text() {
                     return Err(vm_core::Error::FollowNeedsText);
                 }
-                Box::new(machines::follow(name, *lines)?)
-            } else {
-                Box::new(machines::logs(name, *lines)?)
+                machines::follow(name, *lines)?;
+                return Ok(Some(Outcome::Written));
             }
+            Box::new(machines::logs(name, *lines)?)
         }
         Command::Ssh { name, command } => {
             // Either this replaces the process or it reports why it could not.
@@ -301,10 +319,12 @@ fn machine_command(cli: &Cli) -> vm_core::Result<Option<Box<dyn Report>>> {
             cli.format.is_text(),
         )?),
         Command::Rm { name, force } => Box::new(machines::remove(name, *force)?),
-        Command::Commit { name, image, force } => Box::new(machines::commit(name, image, *force)?),
+        Command::Commit { name, image, force } => {
+            Box::new(machines::commit(name, image, *force, cli.format.is_text())?)
+        }
         _ => return Ok(None),
     };
-    Ok(Some(report))
+    Ok(Some(Outcome::Reported(report)))
 }
 
 /// The rest, which need both.
@@ -402,11 +422,23 @@ fn images(catalogue: &Catalogue, store: &Store, all_architectures: bool) -> repo
                     arch: artifact.arch.clone(),
                     description: entry.description.clone(),
                     held: store.contains(&artifact.digest),
+                    size: artifact.size.or_else(|| held_size(store, artifact)),
                 })
                 .collect::<Vec<_>>()
         })
         .collect();
     reports::Images { rows }
+}
+
+/// What a held build takes, for an entry that does not say.
+///
+/// The catalogue is the authority on what a pull will cost, because it can
+/// answer for an image nobody has fetched. Once one is here, the file itself
+/// answers, and it is the same number.
+fn held_size(store: &Store, artifact: &vm_core::catalogue::Artifact) -> Option<u64> {
+    std::fs::metadata(store.path_for(&artifact.digest))
+        .ok()
+        .map(|data| data.len())
 }
 
 fn inspect(
@@ -461,6 +493,8 @@ fn pull(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     /// Saying nothing leaves an instance as it was. Saying "none" is a change
@@ -483,6 +517,39 @@ mod tests {
         assert!(outcome.is_err());
         let outcome = Cli::try_parse_from(["vm", "start", "one", "-v", "/tmp:/mnt", "--no-volume"]);
         assert!(outcome.is_err());
+    }
+
+    /// Following a listing is not the same as listing everything, and the two
+    /// have to be combinable: a display of what is there includes what is not
+    /// running.
+    #[test]
+    fn a_listing_can_be_followed_and_can_include_what_is_stopped() {
+        use clap::Parser as _;
+        let cli = Cli::try_parse_from(["vm", "ps", "-a", "-f"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Ps {
+                all: true,
+                follow: true
+            }
+        ));
+        let cli = Cli::try_parse_from(["vm", "ps"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Ps {
+                all: false,
+                follow: false
+            }
+        ));
+    }
+
+    /// Unlike `vm logs --follow`, this one streams a document as readily as a
+    /// table, so no format is refused.
+    #[test]
+    fn a_followed_listing_is_not_refused_a_document_format() {
+        use clap::Parser as _;
+        let cli = Cli::try_parse_from(["vm", "ps", "--follow", "--format", "json"]).unwrap();
+        assert_eq!(cli.format, Format::Json);
     }
 
     /// Every command is reachable, and none of them collides with another over

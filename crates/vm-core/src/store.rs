@@ -146,14 +146,23 @@ impl Store {
 
     /// Takes a file built at [`Store::staging`] into the store, naming it by
     /// what it turned out to contain.
-    pub fn adopt(&self, staged: &Path, algorithm: Algorithm) -> Result<Digest> {
+    pub fn adopt(
+        &self,
+        staged: &Path,
+        algorithm: Algorithm,
+        report: Reporter<'_>,
+    ) -> Result<Digest> {
         let mut file = fs::File::open(staged).map_err(|source| Error::Store {
             path: staged.to_owned(),
             action: "read",
             source,
         })?;
+        // A whole pass over the file, which on an image is gigabytes and takes
+        // long enough that it has to be visible rather than look like a hang.
+        let total = file.metadata().ok().map(|data| data.len());
+        let mut observe = |received| report(Progress { received, total });
         let mut sink = std::io::sink();
-        let (_, hash) = digest::copy_hashing(&mut file, &mut sink, algorithm, &mut |_| {})
+        let (_, hash) = digest::copy_hashing(&mut file, &mut sink, algorithm, &mut observe)
             .map_err(|source| Error::Store {
                 path: staged.to_owned(),
                 action: "read",

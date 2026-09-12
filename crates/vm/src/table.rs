@@ -1,12 +1,30 @@
+/// How wide a cell is on the screen.
+///
+/// A styled cell carries escape sequences that take no space, and counting
+/// them pads the column by the length of the colour rather than the text.
+fn width(cell: &str) -> usize {
+    let mut count = 0;
+    let mut escaped = false;
+    for held in cell.chars() {
+        if escaped {
+            // A CSI sequence runs until a letter; nothing here writes any
+            // other kind.
+            escaped = !held.is_ascii_alphabetic();
+        } else if held == '\u{1b}' {
+            escaped = true;
+        } else {
+            count += 1;
+        }
+    }
+    count
+}
+
 /// Left-aligned columns, sized to their contents.
 pub fn render(headings: &[&str], rows: &[Vec<String>]) -> Vec<String> {
-    let mut widths: Vec<usize> = headings
-        .iter()
-        .map(|heading| heading.chars().count())
-        .collect();
+    let mut widths: Vec<usize> = headings.iter().map(|heading| width(heading)).collect();
     for row in rows {
         for (column, cell) in row.iter().enumerate() {
-            let width = cell.chars().count();
+            let width = width(cell);
             match widths.get_mut(column) {
                 Some(held) if *held < width => *held = width,
                 Some(_) => {}
@@ -20,7 +38,11 @@ pub fn render(headings: &[&str], rows: &[Vec<String>]) -> Vec<String> {
             let last = column + 1 == cells.len();
             text.push_str(cell);
             if !last {
-                let padding = widths.get(column).copied().unwrap_or(0) - cell.chars().count();
+                let padding = widths
+                    .get(column)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_sub(width(cell));
                 text.push_str(&" ".repeat(padding + 2));
             }
         }
@@ -68,6 +90,24 @@ mod tests {
     #[test]
     fn headings_alone_still_render() {
         assert_eq!(render(&["NAME"], &[]), vec!["NAME".to_owned()]);
+    }
+
+    /// A coloured cell is as wide as the text a reader sees, not as wide as
+    /// the escape sequences that colour it.
+    #[test]
+    fn styling_takes_up_no_width() {
+        assert_eq!(width("\u{1b}[36mq1\u{1b}[0m"), 2);
+        assert_eq!(width("q1"), 2);
+        let coloured = "\u{1b}[36mq1\u{1b}[0m".to_owned();
+        let output = render(&["NAME", "IMAGE"], &[vec![coloured, "debian".to_owned()]]);
+        assert_eq!(output[0], "NAME  IMAGE");
+        // Four spaces: the column is as wide as its heading, and the cell it
+        // holds is two characters of text however many bytes it took.
+        assert!(
+            output[1].ends_with("q1\u{1b}[0m    debian"),
+            "{:?}",
+            output[1]
+        );
     }
 
     #[test]

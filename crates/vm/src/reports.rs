@@ -1,8 +1,9 @@
-use crate::progress::human;
 use crate::style::Style;
 use crate::table;
+use crate::units::{human, human_pair};
 use vm_core::catalogue::{Artifact, Entry};
 use vm_core::instance::{self, Instance, Port};
+use vm_core::process;
 use vm_core::value::Value;
 
 use crate::output::Report;
@@ -14,6 +15,9 @@ pub struct ImageRow {
     pub arch: String,
     pub description: String,
     pub held: bool,
+    /// What the build takes on disk, as the catalogue records it. An entry
+    /// that omits it leaves the column blank rather than claiming a zero.
+    pub size: Option<u64>,
 }
 
 pub struct Images {
@@ -29,6 +33,7 @@ impl Report for Images {
                 ("arch", Value::string(row.arch.clone())),
                 ("description", Value::string(row.description.clone())),
                 ("held", Value::Bool(row.held)),
+                ("size", row.size.map_or(Value::Null, Value::Integer)),
             ])
         }))
     }
@@ -45,6 +50,7 @@ impl Report for Images {
                     style.name(&row.name),
                     row.tag.clone(),
                     row.arch.clone(),
+                    row.size.map(human).unwrap_or_default(),
                     if row.held {
                         "yes".to_owned()
                     } else {
@@ -54,7 +60,7 @@ impl Report for Images {
                 ]
             })
             .collect();
-        let headings = ["REPOSITORY", "TAG", "ARCH", "PULLED", "DESCRIPTION"];
+        let headings = ["REPOSITORY", "TAG", "ARCH", "SIZE", "PULLED", "DESCRIPTION"];
         let mut lines = table::render(&headings, &cells);
         if let Some(first) = lines.first_mut() {
             *first = style.heading(first);
@@ -138,6 +144,10 @@ impl Report for Inspect {
                     .unwrap_or_else(|| "committed here; nowhere to fetch it from".to_owned()),
             ),
             ("Digest", self.digest.clone()),
+            (
+                "Size",
+                self.size.map_or_else(|| "unrecorded".to_owned(), human),
+            ),
             ("Guest access", self.access().to_owned()),
             ("Pulled", if self.held { "yes" } else { "no" }.to_owned()),
         ]);
@@ -370,6 +380,12 @@ impl State {
     }
 }
 
+/// Bytes as the record keeps them. Rounding down is what a size is: 1.9 GiB
+/// held is 1 GiB and a bit, not 2.
+const fn mebibytes(bytes: u64) -> u64 {
+    bytes >> 20
+}
+
 pub struct MachineRow {
     pub name: String,
     pub image: String,
@@ -379,10 +395,19 @@ pub struct MachineRow {
     pub pid: Option<u32>,
     pub ssh_port: Option<u16>,
     pub user: String,
+    /// Mebibytes throughout: what the record and the hypervisor both deal in,
+    /// left as figures here and made readable only for the table.
+    pub memory: Option<u64>,
+    /// What the hypervisor is holding now. A guest is given its memory as an
+    /// address space and takes it as it touches it, so this is the figure the
+    /// host feels, and it is absent for a machine that is not running.
+    pub memory_used: Option<u64>,
+    pub disk: Option<u64>,
+    pub disk_used: Option<u64>,
 }
 
 impl MachineRow {
-    pub fn of(instance: &Instance, state: State) -> Self {
+    pub fn of(instance: &Instance, state: State, disk: vm_core::disk::Usage) -> Self {
         Self {
             name: instance.name.clone(),
             image: instance.image.clone(),
@@ -392,6 +417,13 @@ impl MachineRow {
             pid: instance.pid,
             ssh_port: instance.ssh_port,
             user: instance.user.clone(),
+            memory: Some(instance.memory),
+            memory_used: instance
+                .is_running()
+                .then(|| instance.pid.and_then(process::resident).map(mebibytes))
+                .flatten(),
+            disk: disk.capacity.map(mebibytes),
+            disk_used: disk.allocated.map(mebibytes),
         }
     }
 
@@ -407,6 +439,20 @@ impl MachineRow {
             pid: None,
             ssh_port: None,
             user: String::new(),
+            memory: None,
+            memory_used: None,
+            disk: None,
+            disk_used: None,
+        }
+    }
+
+    /// One figure, or one against the other where both are known.
+    fn sizes(used: Option<u64>, total: Option<u64>) -> String {
+        match (used, total) {
+            (Some(used), Some(total)) => human_pair(used << 20, total << 20),
+            (None, Some(total)) => human(total << 20),
+            (Some(used), None) => human(used << 20),
+            (None, None) => String::new(),
         }
     }
 
@@ -457,6 +503,16 @@ impl Report for Machines {
                         .map_or(Value::Null, |port| Value::Integer(u64::from(port))),
                 ),
                 ("user", Value::string(row.user.clone())),
+                ("memory", row.memory.map_or(Value::Null, Value::Integer)),
+                (
+                    "memory_used",
+                    row.memory_used.map_or(Value::Null, Value::Integer),
+                ),
+                ("disk", row.disk.map_or(Value::Null, Value::Integer)),
+                (
+                    "disk_used",
+                    row.disk_used.map_or(Value::Null, Value::Integer),
+                ),
             ])
         }))
     }
@@ -477,12 +533,14 @@ impl Report for Machines {
                     style.name(&row.name),
                     row.image.clone(),
                     row.status().to_owned(),
+                    MachineRow::sizes(row.memory_used, row.memory),
+                    MachineRow::sizes(row.disk_used, row.disk),
                     age(row.created),
                     ports_text(&row.ports),
                 ]
             })
             .collect();
-        let headings = ["NAME", "IMAGE", "STATUS", "AGE", "PORTS"];
+        let headings = ["NAME", "IMAGE", "STATUS", "MEMORY", "DISK", "AGE", "PORTS"];
         let mut lines = table::render(&headings, &cells);
         if let Some(first) = lines.first_mut() {
             *first = style.heading(first);
@@ -614,6 +672,10 @@ pub struct Untagged {
     /// Machines whose disk was backed by it. Only ever non-empty under
     /// `--force`, and worth saying out loud because they will not start again.
     pub broke: Vec<String>,
+    /// Other names for the same bytes, which is why the bytes are still there.
+    /// An image made here cannot be fetched back, so the file goes only with
+    /// the last name for it.
+    pub kept_by: Vec<String>,
 }
 
 impl Report for Untagged {
@@ -629,15 +691,33 @@ impl Report for Untagged {
                 "broke",
                 Value::List(self.broke.iter().map(Value::string).collect()),
             ),
+            (
+                "kept_by",
+                Value::List(self.kept_by.iter().map(Value::string).collect()),
+            ),
         ])
     }
 
     fn render_text(&self, style: Style) -> Vec<String> {
-        let mut lines = vec![format!(
-            "Removed {} ({} reclaimed)",
-            style.name(&format!("{}:{}", self.name, self.tag)),
-            human(self.size)
-        )];
+        let reference = style.name(&format!("{}:{}", self.name, self.tag));
+        // Nothing reclaimed is not worth a figure: the bytes either stayed
+        // because something else names them, or they were already gone.
+        let mut lines = vec![if self.size > 0 {
+            format!("Removed {reference} ({} reclaimed)", human(self.size))
+        } else {
+            format!("Removed {reference}")
+        }];
+        if !self.kept_by.is_empty() {
+            let names = if self.kept_by.len() == 1 {
+                "still names it"
+            } else {
+                "still name it"
+            };
+            lines.push(style.dim(&format!(
+                "  The image itself stays: {} {names}.",
+                self.kept_by.join(", ")
+            )));
+        }
         if self.forgotten {
             lines.push(style.dim("  It was made here, so its catalogue entry is gone too."));
         }
@@ -655,17 +735,6 @@ impl Report for Untagged {
 pub struct Console {
     pub name: String,
     pub lines: Vec<String>,
-}
-
-impl Console {
-    /// What is left to report once the console has been written out as it
-    /// arrived. Following is text only, so the document is never asked for.
-    pub fn followed(name: &str) -> Self {
-        Self {
-            name: name.to_owned(),
-            lines: Vec::new(),
-        }
-    }
 }
 
 impl Report for Console {
@@ -750,6 +819,7 @@ mod tests {
                 arch: "amd64".to_owned(),
                 description: "Debian 13".to_owned(),
                 held: true,
+                size: Some(512 * 1024 * 1024),
             }],
         }
     }
@@ -818,9 +888,8 @@ mod tests {
         assert_eq!(State::Damaged.slug(), "damaged");
     }
 
-    #[test]
-    fn a_paused_machine_is_listed_as_paused() {
-        let machines = Machines {
+    fn machines() -> Machines {
+        Machines {
             rows: vec![MachineRow {
                 name: "one".to_owned(),
                 image: "debian:trixie".to_owned(),
@@ -830,12 +899,96 @@ mod tests {
                 pid: Some(42),
                 ssh_port: Some(2222),
                 user: "vm".to_owned(),
+                memory: Some(2048),
+                memory_used: Some(731),
+                disk: Some(12 * 1024),
+                disk_used: Some(1434),
             }],
             all: false,
-        };
-        let text = machines.render_text(Style::plain()).join("\n");
+        }
+    }
+
+    #[test]
+    fn a_paused_machine_is_listed_as_paused() {
+        let report = machines();
+        let text = report.render_text(Style::plain()).join("\n");
         assert!(text.contains("paused"), "{text}");
-        assert!(to_json(&machines.to_value()).contains(r#""status": "paused""#));
+        assert!(to_json(&report.to_value()).contains(r#""status": "paused""#));
+    }
+
+    /// The figure is the catalogue's, so it is there before the image is and
+    /// says what pulling it would cost.
+    #[test]
+    fn an_image_is_listed_with_the_size_it_takes() {
+        let report = images();
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(text.contains("SIZE"), "{text}");
+        assert!(text.contains("512.0 MiB"), "{text}");
+        assert!(
+            to_json(&report.to_value()).contains(r#""size": 536870912"#),
+            "{}",
+            to_json(&report.to_value())
+        );
+    }
+
+    /// An entry that records no size leaves the column empty rather than
+    /// claiming the image takes nothing.
+    #[test]
+    fn an_image_of_unknown_size_says_nothing_about_it() {
+        let mut report = images();
+        report.rows[0].size = None;
+        let lines = report.render_text(Style::plain());
+        assert!(!lines[1].contains('B'), "{:?}", lines[1]);
+        assert!(to_json(&report.to_value()).contains(r#""size": null"#));
+    }
+
+    /// Two figures on one scale: what the machine has taken of what it was
+    /// promised, for memory and for its disk.
+    #[test]
+    fn a_machine_is_listed_with_what_it_holds_and_what_it_may() {
+        let text = machines().render_text(Style::plain()).join("\n");
+        assert!(text.contains("MEMORY"), "{text}");
+        assert!(text.contains("0.7 of 2.0 GiB"), "{text}");
+        assert!(text.contains("1.4 of 12.0 GiB"), "{text}");
+    }
+
+    /// Mebibytes in the document, whatever the table makes of them.
+    #[test]
+    fn the_sizes_are_documented_as_figures() {
+        let document = to_yaml(&machines().to_value());
+        for field in [
+            "memory: 2048",
+            "memory_used: 731",
+            "disk: 12288",
+            "disk_used: 1434",
+        ] {
+            assert!(document.contains(field), "{field} missing from {document}");
+        }
+    }
+
+    /// A machine that is not running holds nothing, so there is one figure to
+    /// give rather than two, and the disk it left behind is still there.
+    #[test]
+    fn a_stopped_machine_reports_only_what_it_was_given() {
+        let mut report = machines();
+        report.rows[0].state = State::Stopped;
+        report.rows[0].memory_used = None;
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(text.contains("2.0 GiB"), "{text}");
+        assert!(!text.contains("of 2.0 GiB"), "{text}");
+        assert!(text.contains("1.4 of 12.0 GiB"), "{text}");
+    }
+
+    /// Its record could not be read, so there is nothing to say about either.
+    #[test]
+    fn a_damaged_machine_claims_no_sizes() {
+        let report = Machines {
+            rows: vec![MachineRow::damaged("one")],
+            all: true,
+        };
+        let document = to_yaml(&report.to_value());
+        assert!(document.contains("memory: null"), "{document}");
+        assert!(document.contains("disk: null"), "{document}");
     }
 
     #[test]
@@ -848,6 +1001,7 @@ mod tests {
             size: 1024 * 1024,
             forgotten: false,
             broke: Vec::new(),
+            kept_by: Vec::new(),
         };
         let text = report.render_text(Style::plain()).join("\n");
         assert!(text.contains("debian:trixie"), "{text}");
@@ -867,6 +1021,7 @@ mod tests {
             size: 0,
             forgotten: true,
             broke: vec!["one".to_owned(), "two".to_owned()],
+            kept_by: Vec::new(),
         };
         let text = report.render_text(Style::plain()).join("\n");
         assert!(text.contains("one, two"), "{text}");
@@ -874,6 +1029,36 @@ mod tests {
         let document = to_json(&report.to_value());
         assert!(document.contains(r#""forgotten": true"#), "{document}");
         assert!(document.contains(r#""one""#), "{document}");
+    }
+
+    /// Two commits of an unchanged disk are one file under two names. Taking
+    /// one name away must not take the file, and saying nothing would leave
+    /// the user thinking they had reclaimed the space.
+    #[test]
+    fn a_name_removed_from_shared_bytes_says_they_stayed() {
+        let report = Untagged {
+            name: "mine".to_owned(),
+            tag: "one".to_owned(),
+            arch: "amd64".to_owned(),
+            digest: "sha256:abc".to_owned(),
+            size: 0,
+            forgotten: true,
+            broke: Vec::new(),
+            kept_by: vec!["mine:two".to_owned()],
+        };
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(text.contains("mine:one"), "{text}");
+        assert!(text.contains("mine:two still names it"), "{text}");
+        assert!(!text.contains("reclaimed"), "{text}");
+        assert!(to_json(&report.to_value()).contains(r#""mine:two""#));
+
+        let mut more = report;
+        more.kept_by.push("mine:three".to_owned());
+        let text = more.render_text(Style::plain()).join("\n");
+        assert!(
+            text.contains("mine:two, mine:three still name it"),
+            "{text}"
+        );
     }
 
     /// The guest wrote these lines, so they are passed through as they are.
