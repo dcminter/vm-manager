@@ -1,0 +1,25 @@
+#!/bin/bash
+# Markdown style, forbidden words, and design-directory leakage.
+set -uo pipefail
+cd "$(dirname "$0")/.." || exit 1
+status=0
+
+if command -v mdl >/dev/null; then
+  mapfile -t docs < <(rg --files -g '*.md' --glob '!design/**' --glob '!CLAUDE.md')
+  [ ${#docs[@]} -eq 0 ] || mdl "${docs[@]}" || status=1
+else
+  echo "mdl absent: apt install markdownlint" >&2
+fi
+
+if rg --pcre2 -n -i -f <(sed 's/.*/\\b&\\b/' scripts/forbidden-words.txt) \
+     --glob '!design/**' --glob '!scripts/forbidden-words.txt' --glob '!scripts/lint-docs' .; then
+  echo "forbidden words found" >&2
+  status=1
+fi
+
+if rg -n '\bdesign/' --glob '!design/**' --glob '!scripts/lint-docs' --glob '!.gitignore' --glob '!CLAUDE.md' --glob '!.claude/**' .; then
+  echo "reference to the design directory found" >&2
+  status=1
+fi
+
+exit $status
