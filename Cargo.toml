@@ -11,7 +11,7 @@ authors = ["Dave Minter <dave@paperstack.com>"]
 repository = "https://github.com/dcminter/vm-manager"
 
 [workspace.dependencies]
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 basic-toml = "0.1"
 sha2 = "0.11"

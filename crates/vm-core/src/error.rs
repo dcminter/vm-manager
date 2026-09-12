@@ -53,6 +53,27 @@ pub enum Error {
     },
 }
 
+impl Error {
+    /// A stable slug for structured output. These names are an interface:
+    /// scripts match on them, so they outlive any rewording of the message.
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Reference { .. } => "invalid-reference",
+            Self::CatalogueRead { .. } => "catalogue-unreadable",
+            Self::CatalogueParse { .. } => "catalogue-unparseable",
+            Self::CatalogueEntry { .. } => "catalogue-entry-invalid",
+            Self::UnknownImage { .. } => "unknown-image",
+            Self::UnsupportedArchitecture { .. } => "unsupported-architecture",
+            Self::MissingTool { .. } => "missing-tool",
+            Self::NoImageStore => "no-image-store",
+            Self::Store { .. } => "store-unwritable",
+            Self::Download { .. } => "download-failed",
+            Self::HttpStatus { .. } => "http-error",
+            Self::DigestMismatch { .. } => "digest-mismatch",
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

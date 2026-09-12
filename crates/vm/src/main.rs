@@ -1,8 +1,12 @@
+mod output;
 mod progress;
+mod reports;
 mod style;
 mod table;
+mod value;
 
 use clap::{Parser, Subcommand};
+use output::{Format, Report};
 use std::process::ExitCode;
 use style::Style;
 use vm_core::catalogue::Catalogue;
@@ -16,6 +20,17 @@ use vm_core::{Reference, host_architecture, paths};
     about = "Create and manage QEMU virtual machines"
 )]
 struct Cli {
+    /// Output format
+    #[arg(
+        long,
+        short,
+        global = true,
+        value_enum,
+        env = "VM_OUTPUT",
+        default_value = "text"
+    )]
+    output: Format,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -42,131 +57,108 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(&cli) {
-        Ok(()) => ExitCode::SUCCESS,
+    let style = if cli.output.is_text() {
+        Style::for_stdout()
+    } else {
+        Style::plain()
+    };
+    match run(&cli, style) {
+        Ok(report) => match output::emit(report.as_ref(), cli.output, style) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) if output::is_closed_pipe(&error) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("vm: cannot write output: {error}");
+                ExitCode::FAILURE
+            }
+        },
         Err(error) => {
-            eprintln!("vm: {error}");
+            output::emit_error(&error, cli.output);
             ExitCode::FAILURE
         }
     }
 }
 
-fn run(cli: &Cli) -> vm_core::Result<()> {
-    let style = Style::for_stdout();
+fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
     let catalogue = Catalogue::load(&paths::catalogue_directory())?;
+    let store = Store::discover()?;
     match &cli.command {
         Command::Images { all_architectures } => {
-            images(&catalogue, style, *all_architectures);
-            Ok(())
+            Ok(Box::new(images(&catalogue, &store, *all_architectures)))
         }
-        Command::Inspect { reference } => inspect(&catalogue, style, reference),
-        Command::Pull { reference } => pull(&catalogue, style, reference),
+        Command::Inspect { reference } => Ok(Box::new(inspect(&catalogue, &store, reference)?)),
+        Command::Pull { reference } => Ok(Box::new(pull(
+            &catalogue, &store, style, cli.output, reference,
+        )?)),
     }
 }
 
-fn pull(catalogue: &Catalogue, style: Style, reference: &str) -> vm_core::Result<()> {
+fn images(catalogue: &Catalogue, store: &Store, all_architectures: bool) -> reports::Images {
+    let host = host_architecture();
+    let rows = catalogue
+        .entries()
+        .into_iter()
+        .flat_map(|entry| {
+            entry
+                .artifacts
+                .iter()
+                .filter(|artifact| all_architectures || artifact.arch == host)
+                .map(|artifact| reports::ImageRow {
+                    name: entry.name.clone(),
+                    tag: entry.tag.clone(),
+                    arch: artifact.arch.clone(),
+                    description: entry.description.clone(),
+                    held: store.contains(&artifact.digest),
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    reports::Images { rows }
+}
+
+fn inspect(
+    catalogue: &Catalogue,
+    store: &Store,
+    reference: &str,
+) -> vm_core::Result<reports::Inspect> {
     let reference: Reference = reference.parse()?;
     let (entry, artifact) = catalogue.resolve(&reference, host_architecture())?;
-    let store = Store::discover()?;
-    if store.contains(&artifact.digest) {
-        store.record(entry, artifact)?;
-        println!("{}:{} is already present", entry.name, entry.tag);
-        return Ok(());
+    Ok(reports::Inspect::new(
+        entry,
+        artifact,
+        store.contains(&artifact.digest),
+    ))
+}
+
+fn pull(
+    catalogue: &Catalogue,
+    store: &Store,
+    style: Style,
+    format: Format,
+    reference: &str,
+) -> vm_core::Result<reports::Pull> {
+    let reference: Reference = reference.parse()?;
+    let (entry, artifact) = catalogue.resolve(&reference, host_architecture())?;
+    let mut bar = progress::Bar::new("  ", format.is_text());
+    if format.is_text() && !store.contains(&artifact.digest) {
+        eprintln!("Fetching {}", style.name(&artifact.url));
     }
-    println!("Fetching {}", style.name(&artifact.url));
-    let mut bar = progress::Bar::new("  ");
     let outcome = store.pull(artifact, &vm_core::store::http_agent(), &mut |update| {
         bar.update(update);
     });
-    match outcome {
-        Ok(Pulled::Fetched) => {
-            bar.finish(&format!(
-                "Pulled {}:{} ({})",
-                entry.name,
-                entry.tag,
-                progress::human(file_size(&store, artifact))
-            ));
-            store.record(entry, artifact)?;
-            Ok(())
-        }
-        Ok(Pulled::AlreadyPresent) => {
-            bar.finish("Already present");
-            Ok(())
-        }
-        Err(error) => {
-            bar.finish("Failed");
-            Err(error)
-        }
-    }
-}
-
-fn file_size(store: &Store, artifact: &vm_core::catalogue::Artifact) -> u64 {
-    std::fs::metadata(store.path_for(&artifact.digest)).map_or(0, |data| data.len())
-}
-
-fn images(catalogue: &Catalogue, style: Style, all_architectures: bool) {
-    let host = host_architecture();
-    let mut rows = Vec::new();
-    for entry in catalogue.entries() {
-        for artifact in &entry.artifacts {
-            if !all_architectures && artifact.arch != host {
-                continue;
-            }
-            rows.push(vec![
-                style.name(&entry.name),
-                entry.tag.clone(),
-                artifact.arch.clone(),
-                entry.description.clone(),
-            ]);
-        }
-    }
-    if rows.is_empty() {
-        println!(
-            "{}",
-            style.dim("No images in the catalogue. Try 'vm update'.")
-        );
-        return;
-    }
-    let headings = ["REPOSITORY", "TAG", "ARCH", "DESCRIPTION"];
-    for (index, line) in table::render(&headings, &rows).into_iter().enumerate() {
-        if index == 0 {
-            println!("{}", style.heading(&line));
-        } else {
-            println!("{line}");
-        }
-    }
-}
-
-fn inspect(catalogue: &Catalogue, style: Style, reference: &str) -> vm_core::Result<()> {
-    let reference: Reference = reference.parse()?;
-    let (entry, artifact) = catalogue.resolve(&reference, host_architecture())?;
-    let access = if entry.login.is_seedable() {
-        "cloud-init; volumes and generated keys are available"
-    } else {
-        "console only; volumes and key injection are unavailable"
-    };
-    let mut fields = vec![
-        ("Image", format!("{}:{}", entry.name, entry.tag)),
-        ("Description", entry.description.clone()),
-    ];
-    if !entry.aliases.is_empty() {
-        fields.push(("Aliases", entry.aliases.join(", ")));
-    }
-    fields.extend([
-        ("Architecture", artifact.arch.clone()),
-        ("Format", artifact.format.clone()),
-        ("URL", artifact.url.clone()),
-        ("Digest", artifact.digest.to_string()),
-        ("Guest access", access.to_owned()),
-    ]);
-    let width = fields
-        .iter()
-        .map(|(label, _)| label.chars().count())
-        .max()
-        .unwrap_or(0);
-    for (label, value) in fields {
-        let padding = " ".repeat(width - label.chars().count());
-        println!("{}{padding}  {value}", style.heading(label));
-    }
-    Ok(())
+    bar.clear();
+    let outcome = outcome?;
+    store.record(entry, artifact)?;
+    let path = store.path_for(&artifact.digest);
+    Ok(reports::Pull {
+        name: entry.name.clone(),
+        tag: entry.tag.clone(),
+        arch: artifact.arch.clone(),
+        digest: artifact.digest.to_string(),
+        path: path.display().to_string(),
+        size: std::fs::metadata(&path).map_or(0, |data| data.len()),
+        status: match outcome {
+            Pulled::Fetched => reports::PullStatus::Fetched,
+            Pulled::AlreadyPresent => reports::PullStatus::AlreadyPresent,
+        },
+    })
 }

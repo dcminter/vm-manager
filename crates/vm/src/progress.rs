@@ -6,18 +6,16 @@ pub struct Bar {
     label: String,
     interactive: bool,
     last_shown: u64,
-    finished: bool,
 }
 
 const STEP: u64 = 1 << 20;
 
 impl Bar {
-    pub fn new(label: &str) -> Self {
+    pub fn new(label: &str, wanted: bool) -> Self {
         Self {
             label: label.to_owned(),
-            interactive: std::io::stderr().is_terminal(),
+            interactive: wanted && std::io::stderr().is_terminal(),
             last_shown: 0,
-            finished: false,
         }
     }
 
@@ -31,13 +29,13 @@ impl Bar {
         let _ = stderr.flush();
     }
 
-    pub fn finish(&mut self, message: &str) {
-        self.finished = true;
-        let mut stderr = std::io::stderr();
-        if self.interactive {
+    /// Removes the progress line so the report that follows starts clean.
+    pub fn clear(&self) {
+        if self.interactive && self.last_shown > 0 {
+            let mut stderr = std::io::stderr();
             let _ = write!(stderr, "\r\u{1b}[K");
+            let _ = stderr.flush();
         }
-        let _ = writeln!(stderr, "{message}");
     }
 }
 

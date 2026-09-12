@@ -13,8 +13,7 @@ impl Style {
         }
     }
 
-    #[cfg(test)]
-    const fn plain() -> Self {
+    pub const fn plain() -> Self {
         Self { enabled: false }
     }
 
