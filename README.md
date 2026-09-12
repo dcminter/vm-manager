@@ -73,7 +73,7 @@ so an unreachable or malformed source leaves the working catalogue untouched.
 ## Output
 
 Every command writes a table by default and machine-readable output on request:
-`--output json` or `--output yaml`, or `VM_OUTPUT` in the environment. In those
+`--format json` or `--format yaml`, or `VM_FORMAT` in the environment. In those
 formats the document is the only thing on standard output, with progress and
 errors on standard error, so piping to `jq` needs no filtering. Errors take the
 requested format too, carrying a stable `kind` alongside the message.

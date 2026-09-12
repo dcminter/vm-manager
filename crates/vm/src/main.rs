@@ -23,13 +23,12 @@ struct Cli {
     /// Output format
     #[arg(
         long,
-        short,
         global = true,
         value_enum,
-        env = "VM_OUTPUT",
+        env = "VM_FORMAT",
         default_value = "text"
     )]
-    output: Format,
+    format: Format,
 
     #[command(subcommand)]
     command: Command,
@@ -112,13 +111,13 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let style = if cli.output.is_text() {
+    let style = if cli.format.is_text() {
         Style::for_stdout()
     } else {
         Style::plain()
     };
     match run(&cli, style) {
-        Ok(report) => match output::emit(report.as_ref(), cli.output, style) {
+        Ok(report) => match output::emit(report.as_ref(), cli.format, style) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) if output::is_closed_pipe(&error) => ExitCode::SUCCESS,
             Err(error) => {
@@ -127,7 +126,7 @@ fn main() -> ExitCode {
             }
         },
         Err(error) => {
-            output::emit_error(&error, cli.output);
+            output::emit_error(&error, cli.format);
             ExitCode::FAILURE
         }
     }
@@ -163,7 +162,7 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
         }
         Command::Inspect { reference } => Ok(Box::new(inspect(&catalogue, &store, reference)?)),
         Command::Pull { reference } => Ok(Box::new(pull(
-            &catalogue, &store, style, cli.output, reference,
+            &catalogue, &store, style, cli.format, reference,
         )?)),
         Command::Update => Ok(Box::new(update()?)),
         Command::Run {
@@ -189,7 +188,7 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
                 pull: *pull,
             },
             style,
-            cli.output.is_text(),
+            cli.format.is_text(),
         )?)),
         Command::Ps { .. } | Command::Stop { .. } | Command::Kill { .. } | Command::Rm { .. } => {
             unreachable!("handled above")
