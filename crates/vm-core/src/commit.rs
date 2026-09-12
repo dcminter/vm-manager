@@ -196,6 +196,7 @@ mod tests {
             ssh_port: None,
             pid: None,
             started: None,
+            generation: 0,
             ports: Vec::new(),
             shares: Vec::new(),
         }

@@ -34,14 +34,16 @@ cargo run -p vm -- images
 | `vm pull <image>` | Fetch an image into the local store |
 | `vm update` | Refresh the local catalogue from its remote source |
 | `vm run <image>` | Create and start a machine |
-| `vm start <name>` | Start a machine that is not running |
+| `vm start <name>` | Start a machine that is not running, and change how it is set up |
 | `vm ssh <name>` | Open a shell on a machine, or run a command in it |
 | `vm cp <from> <to>` | Copy files, naming one side as `name:path` |
 | `vm ps` | List machines; `--all` includes those not running |
 | `vm stop <name>` | Ask the guest to shut down, then insist |
 | `vm kill <name>` | Stop a machine without telling the guest |
+| `vm logs <name>` | Show a machine's console; `--follow` writes it as it arrives |
 | `vm commit <name> <image>` | Save a machine's disk as a new image |
 | `vm rm <name>` | Delete a machine and its disk |
+| `vm rmi <image>` | Delete an image from the local store |
 
 An image is named `repository:tag`, as in `debian:trixie`. The tag may be
 omitted, in which case `latest` is used, and a specific build may be pinned by
@@ -67,13 +69,35 @@ the lot.
 
 `-v /host/path:/guest/path` shares a directory over virtiofs. Each share is
 served by a `virtiofsd` of its own, started before the machine and reaped with
-it.
+it. A share is mounted at every boot from the machine's seed rather than
+written into the guest's `/etc/fstab`, because a share belongs to the run: an
+entry left in the guest would outlive it and fail the next boot that went
+without it.
+
+`vm start` takes the same `--memory`, `--cpus`, `--publish`, `--volume`,
+`--user` and `--disk-size` as `vm run`, and each changes the machine from then
+on; what is not given is left as it was. Forwards and shares are replaced as a
+list, and `--no-publish` or `--no-volume` leaves the machine with none. A new
+`--user` is an account cloud-init has to create, so the guest is told it is a
+machine it has not seen before and generates fresh host keys; the account it
+already had is left where it is. None of this touches a running machine, which
+is stopped first.
+
+`vm logs` shows what the guest wrote to its console, appended across every boot
+since the machine was created, so a machine that failed to boot and was started
+again keeps the evidence. `--follow` writes it as it arrives, which is text
+only: a document cannot be emitted a line at a time and still be a document.
 
 `vm commit` flattens a machine's disk into a standalone image in the store and
 gives it a name. A running guest is paused for the duration, because a disk
 taken from under one is crash-consistent at best; `--force` skips the pause and
 says so. Committed images are listed by `vm images` alongside the catalogue's
 own, and `vm update` does not disturb them.
+
+`vm rmi` takes an image back out of the store. One the catalogue provides is
+listed again as unfetched; one made here has nowhere to be fetched from, so its
+entry goes with it. A machine is built on its image rather than a copy of it,
+so an image still in use is refused unless `--force` says otherwise.
 
 Images that carry no cloud-init still run; they simply take no key and no user,
 which `vm run` says at the time rather than leaving to be discovered.

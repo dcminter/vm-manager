@@ -42,11 +42,16 @@ cat <<'NOTICE'
 The workflow runs the unit tests, and nothing that boots a virtual machine.
 Before cutting a release, these are worth doing by hand on this machine:
 
-  vm run --name release-check debian:trixie
-  vm ssh release-check 'cloud-init status --wait; hostname'
+  vm run --name release-check -v /tmp:/mnt/host debian:trixie
+  vm ssh release-check 'cloud-init status --wait; hostname; mount | grep virtiofs'
   vm cp /etc/hostname release-check:/tmp/
+  vm logs release-check -n 5
   vm commit release-check checked:latest
+  vm stop release-check
+  vm start release-check --cpus 1 --no-volume
+  vm ssh release-check 'nproc; systemctl is-system-running'
   vm stop release-check && vm rm release-check
+  vm rmi checked:latest
 
 NOTICE
 confirm "Have those been run against a real guest?" || fail "do that first"

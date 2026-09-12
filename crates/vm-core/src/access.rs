@@ -173,6 +173,7 @@ mod tests {
             ssh_port: Some(2222),
             pid: Some(handle.pid),
             started: Some(handle.started),
+            generation: 0,
             ports: Vec::new(),
             shares: Vec::new(),
         }

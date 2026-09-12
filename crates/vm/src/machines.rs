@@ -124,6 +124,7 @@ fn build(
         ssh_port: None,
         pid: None,
         started: None,
+        generation: 0,
         ports: request.ports.clone(),
         shares: request.shares.clone(),
     };
@@ -276,11 +277,18 @@ fn report(
 }
 
 /// Boots an instance that exists but is not running.
-pub fn start(name: &str) -> Result<reports::Run> {
+pub fn start(name: &str, changes: &Changes) -> Result<reports::Run> {
     let instances = Instances::discover()?;
     let directory = instances.open(name)?;
     let mut held = directory.read()?;
     if held.is_running() {
+        // Every one of these is read when the hypervisor starts, so a machine
+        // that is already running would report a change it had not made.
+        if changes.any() {
+            return Err(Error::ChangeWhileRunning {
+                name: name.to_owned(),
+            });
+        }
         return Ok(report(
             &held,
             &directory,
@@ -289,6 +297,7 @@ pub fn start(name: &str) -> Result<reports::Run> {
         ));
     }
     held.forget_process();
+    apply(&directory, &mut held, changes)?;
     // The port it used last time may belong to something else by now, and a
     // forward that cannot bind would take the whole machine down with it.
     if held.seeded && !held.ssh_port.is_some_and(port_is_free) {
@@ -301,6 +310,90 @@ pub fn start(name: &str) -> Result<reports::Run> {
         accelerated,
         reports::RunStatus::Restarted,
     ))
+}
+
+/// What `vm start` was asked to change. Absent means "as it was", which is not
+/// the same as an empty list: clearing the ports is asked for explicitly.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Changes {
+    pub memory: Option<u64>,
+    pub cpus: Option<u32>,
+    pub ports: Option<Vec<Port>>,
+    pub shares: Option<Vec<Share>>,
+    pub user: Option<String>,
+    pub disk_size: Option<String>,
+}
+
+impl Changes {
+    pub const fn any(&self) -> bool {
+        self.memory.is_some()
+            || self.cpus.is_some()
+            || self.ports.is_some()
+            || self.shares.is_some()
+            || self.user.is_some()
+            || self.disk_size.is_some()
+    }
+}
+
+/// Folds the changes into the record before it is started again.
+///
+/// The seed is rewritten only for what the guest reads from it. Memory,
+/// processors and forwards are the hypervisor's business and the guest never
+/// learns of them, but a share it should mount and an account it should create
+/// are cloud-init's, and it acts on those once per instance id.
+fn apply(directory: &Directory, held: &mut Instance, changes: &Changes) -> Result<()> {
+    if !changes.any() {
+        return Ok(());
+    }
+    if let Some(memory) = changes.memory {
+        held.memory = memory;
+    }
+    if let Some(cpus) = changes.cpus {
+        held.cpus = cpus;
+    }
+    // Two different things: the seed's contents changing, and the guest being
+    // told it is a machine it has not seen before.
+    let mut rewrite = false;
+    let mut renew = false;
+    if let Some(ports) = changes.ports.clone() {
+        held.ports = ports;
+        // The forward to SSH was chosen against the old list; choosing again
+        // is what keeps a published forward and the one `vm ssh` uses the same.
+        if held.seeded {
+            held.ssh_port = held
+                .ports
+                .iter()
+                .find(|port| port.guest == 22)
+                .map(|p| p.host);
+        }
+    }
+    if let Some(shares) = changes.shares.clone() {
+        held.shares = shares;
+        distinguish(&mut held.shares);
+        // Shares are mounted from the seed on every boot, so a new list is
+        // acted on without the guest having to think itself new.
+        rewrite = true;
+    }
+    if let Some(user) = changes.user.clone() {
+        // An account is made once, and only for a machine cloud-init has not
+        // met. The one it already has is left where it is.
+        renew |= user != held.user;
+        held.user = user;
+    }
+    if let Some(size) = &changes.disk_size {
+        hypervisor::resize_overlay(&directory.overlay(), size)?;
+    }
+    if (rewrite || renew) && held.seeded {
+        if renew {
+            held.generation = held.generation.saturating_add(1);
+            // A machine cloud-init thinks is new gets fresh host keys, so the
+            // remembered one would look like an impostor.
+            let _ = std::fs::remove_file(directory.known_hosts());
+        }
+        let public = keys::read_public(&directory.key())?;
+        instance::seed_for(held, &public).write(&directory.seed())?;
+    }
+    directory.write(held)
 }
 
 /// Replaces this process with `ssh`, so that the terminal, the signals and the
@@ -618,6 +711,160 @@ pub fn remove(name: &str, force: bool) -> Result<reports::Removed> {
     })
 }
 
+/// Removes an image from the store.
+///
+/// The bytes are what is removed. A reference from the fetched catalogue
+/// survives and simply shows as unheld again; one made here by `vm commit` has
+/// nowhere to be fetched from, so its entry goes with it rather than naming an
+/// image nothing could ever produce.
+pub fn remove_image(
+    catalogue: &Catalogue,
+    store: &Store,
+    reference: &str,
+    force: bool,
+) -> Result<reports::Untagged> {
+    let parsed: vm_core::Reference = reference.parse()?;
+    let (entry, artifact) = catalogue.resolve(&parsed, host_architecture())?;
+    if !store.contains(&artifact.digest) {
+        return Err(Error::UnheldImage {
+            reference: reference.to_owned(),
+        });
+    }
+    let digest = artifact.digest.to_string();
+    let users = holders(&digest)?;
+    if !users.is_empty() && !force {
+        return Err(Error::ImageInUse {
+            reference: reference.to_owned(),
+            instances: users,
+        });
+    }
+    let size = store.discard(&artifact.digest)?;
+    store.forget(&entry.name, &entry.tag, &artifact.arch);
+    // An entry with nowhere to fetch from was written here, so it is ours to
+    // take away; one the catalogue provides would come back on the next update.
+    let local = artifact.url.is_none();
+    if local && let Some(root) = vm_core::paths::local_catalogue_directory() {
+        let directory = root.join(&entry.name);
+        let _ = std::fs::remove_file(directory.join(format!("{}.toml", entry.tag)));
+        let _ = std::fs::remove_dir(&directory);
+    }
+    Ok(reports::Untagged {
+        name: entry.name.clone(),
+        tag: entry.tag.clone(),
+        arch: artifact.arch.clone(),
+        digest,
+        size,
+        forgotten: local,
+        broke: users,
+    })
+}
+
+/// The machines whose disk is backed by a given image.
+fn holders(digest: &str) -> Result<Vec<String>> {
+    let instances = Instances::discover()?;
+    let mut names = Vec::new();
+    for name in instances.names()? {
+        let Ok(directory) = instances.open(&name) else {
+            continue;
+        };
+        if directory.read().is_ok_and(|held| held.digest == digest) {
+            names.push(name);
+        }
+    }
+    Ok(names)
+}
+
+/// The guest's console, as far as it has been written.
+pub fn logs(name: &str, lines: Option<usize>) -> Result<reports::Console> {
+    let instances = Instances::discover()?;
+    let directory = instances.open(name)?;
+    let console = directory.console();
+    let text = match std::fs::read(&console) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        // A machine that has never started has no console, which is not a
+        // failure to report; there is simply nothing to show.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(source) => {
+            return Err(Error::State {
+                path: console,
+                action: "read the console log",
+                source,
+            });
+        }
+    };
+    Ok(reports::Console {
+        name: name.to_owned(),
+        lines: tail(&text, lines),
+    })
+}
+
+/// The last few lines, or all of them when no number was asked for.
+fn tail(text: &str, lines: Option<usize>) -> Vec<String> {
+    let all: Vec<&str> = text.lines().collect();
+    let from = lines.map_or(0, |wanted| all.len().saturating_sub(wanted));
+    all[from..].iter().map(|line| (*line).to_owned()).collect()
+}
+
+/// Writes the console out as it is written, until the machine stops.
+///
+/// The whole file comes first, so following a machine that has already booted
+/// shows what it said on the way. Text only: a document cannot be emitted a
+/// line at a time and still be a document.
+pub fn follow(name: &str, from: Option<usize>) -> Result<reports::Console> {
+    use std::io::{Read as _, Write as _};
+    let instances = Instances::discover()?;
+    let directory = instances.open(name)?;
+    let console = directory.console();
+    let mut out = std::io::stdout().lock();
+    let mut file = match std::fs::File::open(&console) {
+        Ok(file) => file,
+        // Nothing has been written yet, and waiting for a file that may never
+        // appear is worse than saying so.
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(reports::Console::followed(name));
+        }
+        Err(source) => {
+            return Err(Error::State {
+                path: console,
+                action: "read the console log",
+                source,
+            });
+        }
+    };
+    // The whole file first, so following a machine that has already booted
+    // shows what it said on the way. Reading it leaves the handle where the
+    // next write will land, so nothing between the two is missed.
+    let mut buffer = Vec::new();
+    if file.read_to_end(&mut buffer).is_err() {
+        return Ok(reports::Console::followed(name));
+    }
+    let text = String::from_utf8_lossy(&buffer);
+    for line in tail(&text, from) {
+        if writeln!(out, "{line}").is_err() {
+            return Ok(reports::Console::followed(name));
+        }
+    }
+    loop {
+        let running = directory.read().is_ok_and(|held| held.is_running());
+        buffer.clear();
+        if file.read_to_end(&mut buffer).is_err() {
+            return Ok(reports::Console::followed(name));
+        }
+        if buffer.is_empty() {
+            // Nothing new, and if nothing is running there will be no more.
+            if !running {
+                let _ = out.flush();
+                return Ok(reports::Console::followed(name));
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            continue;
+        }
+        if out.write_all(&buffer).is_err() || out.flush().is_err() {
+            return Ok(reports::Console::followed(name));
+        }
+    }
+}
+
 /// Turns `2G`, `512M` or a bare number of mebibytes into mebibytes.
 pub fn parse_memory(text: &str) -> std::result::Result<u64, String> {
     let text = text.trim();
@@ -729,6 +976,242 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    use vm_core::instance::Instances;
+    use vm_core::seed;
+
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            let mut path = std::env::temp_dir();
+            path.push(format!("vm-machines-{label}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        /// A machine with a key, as `vm run` leaves one.
+        fn machine(&self, name: &str) -> (Directory, Instance) {
+            let instances = Instances::at(self.0.join("instances"), self.0.join("run"));
+            let directory = instances.create(name).unwrap();
+            let public = keys::generate(&directory.key(), "vm-test").unwrap();
+            let held = Instance {
+                name: name.to_owned(),
+                image: "debian:trixie".to_owned(),
+                digest: "sha512:abc".to_owned(),
+                arch: "amd64".to_owned(),
+                created: 1_700_000_000,
+                memory: 2048,
+                cpus: 2,
+                user: "vm".to_owned(),
+                seeded: true,
+                monitor: directory.monitor().to_owned(),
+                ssh_port: Some(2222),
+                pid: None,
+                started: None,
+                generation: 0,
+                ports: Vec::new(),
+                shares: Vec::new(),
+            };
+            instance::seed_for(&held, &public)
+                .write(&directory.seed())
+                .unwrap();
+            directory.write(&held).unwrap();
+            std::fs::write(
+                directory.known_hosts(),
+                b"[127.0.0.1]:2222 ssh-ed25519 AAAA\n",
+            )
+            .unwrap();
+            (directory, held)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn share_at(target: &str) -> Share {
+        Share {
+            tag: "data".to_owned(),
+            source: std::path::PathBuf::from("/tmp"),
+            target: target.to_owned(),
+            pid: None,
+            started: None,
+        }
+    }
+
+    #[test]
+    fn nothing_asked_for_is_nothing_changed() {
+        let scratch = Scratch::new("nochange");
+        let (directory, mut held) = scratch.machine("one");
+        let before = held.clone();
+        apply(&directory, &mut held, &Changes::default()).unwrap();
+        assert_eq!(held, before);
+    }
+
+    #[test]
+    fn the_size_of_a_machine_is_what_was_asked_for() {
+        let scratch = Scratch::new("size");
+        let (directory, mut held) = scratch.machine("one");
+        let changes = Changes {
+            memory: Some(4096),
+            cpus: Some(8),
+            ..Changes::default()
+        };
+        apply(&directory, &mut held, &changes).unwrap();
+        assert_eq!((held.memory, held.cpus), (4096, 8));
+        // And it survives, because the next start reads the record.
+        assert_eq!(directory.read().unwrap().memory, 4096);
+    }
+
+    /// A published forward to the guest's SSH port is the one `vm ssh` uses,
+    /// so replacing the forwards has to be able to change it.
+    #[test]
+    fn publishing_the_guests_ssh_port_takes_over_the_one_it_had() {
+        let scratch = Scratch::new("ssh");
+        let (directory, mut held) = scratch.machine("one");
+        let changes = Changes {
+            ports: Some(vec![Port {
+                host: 2022,
+                guest: 22,
+            }]),
+            ..Changes::default()
+        };
+        apply(&directory, &mut held, &changes).unwrap();
+        assert_eq!(held.ssh_port, Some(2022));
+    }
+
+    /// Clearing the forwards leaves the machine reachable: `vm start` picks a
+    /// port for it, as it does for a machine that published nothing.
+    #[test]
+    fn clearing_the_forwards_leaves_nothing_forwarded() {
+        let scratch = Scratch::new("noports");
+        let (directory, mut held) = scratch.machine("one");
+        held.ports.push(Port {
+            host: 8080,
+            guest: 80,
+        });
+        let changes = Changes {
+            ports: Some(Vec::new()),
+            ..Changes::default()
+        };
+        apply(&directory, &mut held, &changes).unwrap();
+        assert!(held.ports.is_empty());
+    }
+
+    #[test]
+    fn shares_given_again_replace_the_ones_it_had() {
+        let scratch = Scratch::new("shares");
+        let (directory, mut held) = scratch.machine("one");
+        held.shares.push(share_at("/mnt/old"));
+        let changes = Changes {
+            shares: Some(vec![share_at("/mnt/new"), share_at("/mnt/other")]),
+            ..Changes::default()
+        };
+        apply(&directory, &mut held, &changes).unwrap();
+        assert_eq!(held.shares.len(), 2);
+        assert_eq!(held.shares[0].target, "/mnt/new");
+        // Two directories named the same still need distinct tags.
+        assert_ne!(held.shares[0].tag, held.shares[1].tag);
+    }
+
+    /// Shares are mounted from the seed on every boot, so the guest acts on a
+    /// new list without being told it is a machine it has never seen.
+    #[test]
+    fn changing_the_shares_does_not_make_the_guest_a_new_machine() {
+        let scratch = Scratch::new("samehost");
+        let (directory, mut held) = scratch.machine("one");
+        let changes = Changes {
+            shares: Some(vec![share_at("/mnt/new")]),
+            ..Changes::default()
+        };
+        apply(&directory, &mut held, &changes).unwrap();
+        assert_eq!(held.generation, 0);
+        assert!(
+            directory.known_hosts().exists(),
+            "the remembered host key was thrown away for nothing"
+        );
+        let seed = std::fs::read(directory.seed()).unwrap();
+        assert!(
+            String::from_utf8_lossy(&seed).contains("/mnt/new"),
+            "the seed was not rewritten"
+        );
+    }
+
+    /// An account is created once, and only for a machine cloud-init has not
+    /// met, so a new one means a new instance id and fresh host keys with it.
+    #[test]
+    fn changing_the_account_makes_the_guest_a_new_machine() {
+        let scratch = Scratch::new("newuser");
+        let (directory, mut held) = scratch.machine("one");
+        let changes = Changes {
+            user: Some("pilot".to_owned()),
+            ..Changes::default()
+        };
+        apply(&directory, &mut held, &changes).unwrap();
+        assert_eq!(held.generation, 1);
+        assert!(
+            !directory.known_hosts().exists(),
+            "the old host key would look like an impostor"
+        );
+    }
+
+    #[test]
+    fn the_account_it_already_has_is_not_a_change() {
+        let scratch = Scratch::new("sameuser");
+        let (directory, mut held) = scratch.machine("one");
+        let changes = Changes {
+            user: Some("vm".to_owned()),
+            ..Changes::default()
+        };
+        apply(&directory, &mut held, &changes).unwrap();
+        assert_eq!(held.generation, 0);
+        assert!(directory.known_hosts().exists());
+    }
+
+    /// An image that takes no seed has nothing to rewrite, and asking for a
+    /// share on one must not try.
+    #[test]
+    fn a_machine_that_takes_no_seed_is_changed_without_one() {
+        let scratch = Scratch::new("unseeded");
+        let (directory, mut held) = scratch.machine("one");
+        held.seeded = false;
+        let _ = std::fs::remove_file(directory.seed());
+        let changes = Changes {
+            shares: Some(vec![share_at("/mnt/new")]),
+            ..Changes::default()
+        };
+        apply(&directory, &mut held, &changes).unwrap();
+        assert!(!directory.seed().exists());
+    }
+
+    #[test]
+    fn a_console_is_shown_whole_or_by_its_last_lines() {
+        let text = "one\ntwo\nthree\n";
+        assert_eq!(tail(text, None), ["one", "two", "three"]);
+        assert_eq!(tail(text, Some(2)), ["two", "three"]);
+        assert_eq!(tail(text, Some(9)), ["one", "two", "three"]);
+        assert!(tail("", Some(5)).is_empty());
+        assert_eq!(tail(text, Some(0)).len(), 0);
+    }
+
+    /// A machine that has never started has no console, which is nothing to
+    /// show rather than something to complain about.
+    #[test]
+    fn a_console_that_was_never_written_is_empty() {
+        let seed = seed::Seed {
+            instance_id: "x".to_owned(),
+            hostname: "x".to_owned(),
+            user: "vm".to_owned(),
+            authorized_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKq7YQ== vm".to_owned(),
+            mounts: Vec::new(),
+        };
+        assert!(seed.image().is_ok());
+        assert!(tail("", None).is_empty());
+    }
 
     #[test]
     fn memory_is_read_in_mebibytes_by_default() {

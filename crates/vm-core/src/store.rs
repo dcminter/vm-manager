@@ -173,6 +173,30 @@ impl Store {
         Ok(digest)
     }
 
+    /// Removes a build, returning the bytes it occupied. A build that is not
+    /// held is not an error: the point is that it is gone.
+    pub fn discard(&self, digest: &Digest) -> Result<u64> {
+        let path = self.path_for(digest);
+        let size = fs::metadata(&path).map_or(0, |data| data.len());
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(size),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(source) => Err(Error::Store {
+                path,
+                action: "remove",
+                source,
+            }),
+        }
+    }
+
+    /// Removes the record that a reference was fetched, and the directory it
+    /// sat in once nothing is left in it.
+    pub fn forget(&self, name: &str, tag: &str, arch: &str) {
+        let directory = self.root.join("refs").join(name);
+        let _ = fs::remove_file(directory.join(format!("{tag}-{arch}.toml")));
+        let _ = fs::remove_dir(&directory);
+    }
+
     /// Records which reference a build was fetched for, so listings and later
     /// removal have something to read.
     pub fn record(&self, entry: &Entry, artifact: &Artifact) -> Result<()> {
@@ -283,6 +307,51 @@ mod tests {
             login: Login::CloudInit,
             artifacts: vec![artifact()],
         }
+    }
+
+    #[test]
+    fn a_discarded_build_is_gone_and_its_size_is_reported() {
+        let scratch = Scratch::new("discard");
+        let store = scratch.store();
+        let path = store.path_for(&digest());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, vec![0u8; 4096]).unwrap();
+        assert_eq!(store.discard(&digest()).unwrap(), 4096);
+        assert!(!store.contains(&digest()));
+    }
+
+    /// Removing what is not held is the outcome that was asked for, so it is
+    /// not an error.
+    #[test]
+    fn discarding_what_is_not_held_reclaims_nothing() {
+        let scratch = Scratch::new("discardnone");
+        assert_eq!(scratch.store().discard(&digest()).unwrap(), 0);
+    }
+
+    #[test]
+    fn forgetting_a_reference_takes_its_record_and_the_empty_directory() {
+        let scratch = Scratch::new("forget");
+        let store = scratch.store();
+        store.record(&entry(), &artifact()).unwrap();
+        let directory = scratch.0.join("refs").join("debian");
+        assert!(directory.join("trixie-amd64.toml").is_file());
+        store.forget("debian", "trixie", "amd64");
+        assert!(!directory.exists());
+    }
+
+    /// One tag going does not take another tag's record with it.
+    #[test]
+    fn forgetting_one_reference_leaves_the_others() {
+        let scratch = Scratch::new("forgetone");
+        let store = scratch.store();
+        let mut other = entry();
+        other.tag = "bookworm".to_owned();
+        store.record(&entry(), &artifact()).unwrap();
+        store.record(&other, &artifact()).unwrap();
+        store.forget("debian", "trixie", "amd64");
+        let directory = scratch.0.join("refs").join("debian");
+        assert!(directory.join("bookworm-amd64.toml").is_file());
+        assert!(!directory.join("trixie-amd64.toml").exists());
     }
 
     #[test]

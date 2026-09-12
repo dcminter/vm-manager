@@ -38,7 +38,20 @@ Create and start a machine. See
 below.
 .TP
 .BI start " NAME"
-Start a machine that exists but is not running.
+Start a machine that exists but is not running. It takes the same
+.BR \-\-memory ", " \-\-cpus ", " \-\-publish ", " \-\-volume ", " \-\-user
+and
+.B \-\-disk\-size
+options as
+.BR run ,
+each of which changes the machine for this start and every one after it;
+what is not given is left as it was. A list of forwards or shares replaces the
+one the machine had, and
+.B \-\-no\-publish
+or
+.B \-\-no\-volume
+leaves it with none. A running machine is not changed: these are read when a
+machine starts, so it must be stopped first.
 .TP
 .BI ssh " NAME " [\fICOMMAND\fR]
 Open a shell on a machine, or run a command in it. Wraps
@@ -66,6 +79,23 @@ seconds before insisting.
 .BI kill " NAME"
 Stop a machine without telling the guest.
 .TP
+.BI logs " NAME"
+Show what the machine has written to its console, across every boot since it
+was created.
+.B \-\-follow
+writes new output as it arrives, until the machine stops, and
+.BI \-n " COUNT"
+shows only the last few lines.
+.TP
+.BI rmi " IMAGE"
+Delete an image from the local store. An image the catalogue provides is listed
+again as unfetched; one made here by
+.B vm commit
+has nowhere to be fetched from, so its catalogue entry goes with it. Machines
+are built on their image, so one that is still in use is refused unless
+.B \-\-force
+is given.
+.TP
 .BI commit " NAME IMAGE"
 Save a machine's disk as a new image, named
 .IR repository:tag .
@@ -92,7 +122,11 @@ Processors. Default 2.
 Forward a host port to a guest port. May be repeated.
 .TP
 .BI \-v ", " \-\-volume " HOST:GUEST"
-Share a host directory with the guest over virtiofs. May be repeated.
+Share a host directory with the guest over virtiofs. May be repeated. A share
+is mounted at every boot from the machine's seed and is not written to the
+guest's
+.IR /etc/fstab ,
+so a machine started without it simply does not have it.
 .TP
 .BI \-\-user " NAME"
 The account to create in the guest. Default
@@ -113,6 +147,10 @@ progress and errors on standard error. Errors take the requested format too,
 carrying a stable
 .B kind
 alongside the message.
+.PP
+.B vm logs \-\-follow
+writes the console as it arrives, which no document format can do, so it is
+refused there.
 .PP
 .B vm ssh
 is the exception: it replaces itself with
@@ -148,7 +186,9 @@ Catalogue entries for images made here by
 .BR "vm commit" .
 .TP
 .I $XDG_STATE_HOME/vm/instances
-One directory per machine: its disk, key, console log and record.
+One directory per machine: its disk, key, console log and record. The console
+log is appended to, so a machine that failed to boot and was started again
+keeps the evidence.
 .TP
 .I $XDG_RUNTIME_DIR/vm
 Monitor and share sockets, kept short because the kernel bounds the length of

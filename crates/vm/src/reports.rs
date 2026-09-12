@@ -588,6 +588,91 @@ impl Report for Committed {
     }
 }
 
+/// What `vm rmi` took away.
+pub struct Untagged {
+    pub name: String,
+    pub tag: String,
+    pub arch: String,
+    pub digest: String,
+    pub size: u64,
+    /// Whether the catalogue entry went with it, which is so for an image made
+    /// here and not for one the catalogue provides.
+    pub forgotten: bool,
+    /// Machines whose disk was backed by it. Only ever non-empty under
+    /// `--force`, and worth saying out loud because they will not start again.
+    pub broke: Vec<String>,
+}
+
+impl Report for Untagged {
+    fn to_value(&self) -> Value {
+        Value::map([
+            ("name", Value::string(self.name.clone())),
+            ("tag", Value::string(self.tag.clone())),
+            ("arch", Value::string(self.arch.clone())),
+            ("digest", Value::string(self.digest.clone())),
+            ("size", Value::Integer(self.size)),
+            ("forgotten", Value::Bool(self.forgotten)),
+            (
+                "broke",
+                Value::List(self.broke.iter().map(Value::string).collect()),
+            ),
+        ])
+    }
+
+    fn render_text(&self, style: Style) -> Vec<String> {
+        let mut lines = vec![format!(
+            "Removed {} ({} reclaimed)",
+            style.name(&format!("{}:{}", self.name, self.tag)),
+            human(self.size)
+        )];
+        if self.forgotten {
+            lines.push(style.dim("  It was made here, so its catalogue entry is gone too."));
+        }
+        if !self.broke.is_empty() {
+            lines.push(style.dim(&format!(
+                "  The disk behind {} is no longer there.",
+                self.broke.join(", ")
+            )));
+        }
+        lines
+    }
+}
+
+/// The guest's console.
+pub struct Console {
+    pub name: String,
+    pub lines: Vec<String>,
+}
+
+impl Console {
+    /// What is left to report once the console has been written out as it
+    /// arrived. Following is text only, so the document is never asked for.
+    pub fn followed(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            lines: Vec::new(),
+        }
+    }
+}
+
+impl Report for Console {
+    fn to_value(&self) -> Value {
+        Value::map([
+            ("name", Value::string(self.name.clone())),
+            (
+                "lines",
+                Value::List(self.lines.iter().map(Value::string).collect()),
+            ),
+        ])
+    }
+
+    /// Verbatim: the guest wrote these, and this is not the place to decorate
+    /// them.
+    fn render_text(&self, _: Style) -> Vec<String> {
+        self.lines.clone()
+    }
+}
+
 pub struct Removed {
     pub name: String,
 }
@@ -629,6 +714,57 @@ mod tests {
             size: 1024,
             status,
         }
+    }
+
+    #[test]
+    fn a_removed_image_says_what_it_reclaimed() {
+        let report = Untagged {
+            name: "debian".to_owned(),
+            tag: "trixie".to_owned(),
+            arch: "amd64".to_owned(),
+            digest: "sha512:abc".to_owned(),
+            size: 1024 * 1024,
+            forgotten: false,
+            broke: Vec::new(),
+        };
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(text.contains("debian:trixie"), "{text}");
+        assert!(text.contains("1.0 MiB"), "{text}");
+        assert!(!text.contains("catalogue"), "{text}");
+    }
+
+    /// Under --force a machine is left without a disk, which is not something
+    /// to find out later.
+    #[test]
+    fn a_removed_image_names_the_machines_it_broke() {
+        let report = Untagged {
+            name: "mine".to_owned(),
+            tag: "latest".to_owned(),
+            arch: "amd64".to_owned(),
+            digest: "sha256:abc".to_owned(),
+            size: 0,
+            forgotten: true,
+            broke: vec!["one".to_owned(), "two".to_owned()],
+        };
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(text.contains("one, two"), "{text}");
+        assert!(text.contains("catalogue entry is gone"), "{text}");
+        let document = to_json(&report.to_value());
+        assert!(document.contains(r#""forgotten": true"#), "{document}");
+        assert!(document.contains(r#""one""#), "{document}");
+    }
+
+    /// The guest wrote these lines, so they are passed through as they are.
+    #[test]
+    fn a_console_is_rendered_verbatim() {
+        let report = Console {
+            name: "one".to_owned(),
+            lines: vec!["[    0.000000] Linux".to_owned(), "login:".to_owned()],
+        };
+        assert_eq!(report.render_text(Style::plain()), report.lines);
+        let document = to_yaml(&report.to_value());
+        assert!(document.contains("lines:"), "{document}");
+        assert!(document.contains("login:"), "{document}");
     }
 
     #[test]

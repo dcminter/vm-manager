@@ -83,10 +83,36 @@ enum Command {
         #[arg(long, value_enum)]
         pull: Option<machines::Pull>,
     },
-    /// Start an instance that is not running
+    /// Start an instance that is not running, changing how it is set up
     Start {
         /// Instance name
         name: String,
+        /// Memory, in mebibytes unless suffixed with M or G
+        #[arg(long, short, value_parser = machines::parse_memory)]
+        memory: Option<u64>,
+        /// Processors
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=255))]
+        cpus: Option<u32>,
+        /// Forward a host port to a guest port, as host:guest, replacing the
+        /// forwards it had
+        #[arg(long, short, value_parser = machines::parse_port, conflicts_with = "no_publish")]
+        publish: Vec<vm_core::instance::Port>,
+        /// Forward nothing
+        #[arg(long)]
+        no_publish: bool,
+        /// Share a host directory with the guest, as host:guest, replacing the
+        /// shares it had
+        #[arg(long, short = 'v', value_parser = machines::parse_share, conflicts_with = "no_volume")]
+        volume: Vec<vm_core::instance::Share>,
+        /// Share nothing
+        #[arg(long)]
+        no_volume: bool,
+        /// Account to use in the guest; the one it has is left in place
+        #[arg(long, value_parser = machines::parse_user)]
+        user: Option<String>,
+        /// Grow the disk to this size, such as 40G
+        #[arg(long)]
+        disk_size: Option<String>,
     },
     /// Open a shell on an instance, or run a command in it
     Ssh {
@@ -132,6 +158,25 @@ enum Command {
         #[arg(long, short)]
         force: bool,
     },
+    /// Show an instance's console
+    Logs {
+        /// Instance name
+        name: String,
+        /// Write new output as it arrives, until the instance stops
+        #[arg(long, short)]
+        follow: bool,
+        /// Show only the last few lines
+        #[arg(long, short = 'n')]
+        lines: Option<usize>,
+    },
+    /// Delete an image from the local store
+    Rmi {
+        /// Image reference, such as debian:trixie
+        reference: String,
+        /// Delete it even though instances are built on it
+        #[arg(long, short)]
+        force: bool,
+    },
     /// Delete an instance and its disk
     Rm {
         /// Instance name
@@ -165,12 +210,65 @@ fn main() -> ExitCode {
     }
 }
 
+/// A list given on the command line replaces what an instance had; asking for
+/// nothing is different from saying nothing.
+fn replacement<T: Clone>(given: &[T], none: bool) -> Option<Vec<T>> {
+    if none {
+        Some(Vec::new())
+    } else if given.is_empty() {
+        None
+    } else {
+        Some(given.to_vec())
+    }
+}
+
 fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
-    // These commands read no catalogue and no store, so they work even when
-    // neither is in place.
-    match &cli.command {
-        Command::Ps { all } => return Ok(Box::new(machines::list(*all)?)),
-        Command::Start { name } => return Ok(Box::new(machines::start(name)?)),
+    if let Some(report) = machine_command(cli)? {
+        return Ok(report);
+    }
+    catalogue_command(cli, style)
+}
+
+/// The commands that read no catalogue and no store, so they work even when
+/// neither is in place. `None` means this was not one of them.
+fn machine_command(cli: &Cli) -> vm_core::Result<Option<Box<dyn Report>>> {
+    let report: Box<dyn Report> = match &cli.command {
+        Command::Ps { all } => Box::new(machines::list(*all)?),
+        Command::Start {
+            name,
+            memory,
+            cpus,
+            publish,
+            no_publish,
+            volume,
+            no_volume,
+            user,
+            disk_size,
+        } => {
+            let changes = machines::Changes {
+                memory: *memory,
+                cpus: *cpus,
+                ports: replacement(publish, *no_publish),
+                shares: replacement(volume, *no_volume),
+                user: user.clone(),
+                disk_size: disk_size.clone(),
+            };
+            Box::new(machines::start(name, &changes)?)
+        }
+        Command::Logs {
+            name,
+            follow,
+            lines,
+        } => {
+            if *follow {
+                if !cli.format.is_text() {
+                    return Err(vm_core::Error::FollowNeedsText);
+                }
+                Box::new(machines::follow(name, *lines)?)
+            } else {
+                Box::new(machines::logs(name, *lines)?)
+            }
+        }
         Command::Ssh { name, command } => {
             // Either this replaces the process or it reports why it could not.
             return machines::connect(name, command).map(|held| match held {});
@@ -178,28 +276,27 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
         Command::Cp { from, to } => {
             return machines::copy(from, to).map(|held| match held {});
         }
-        Command::Stop { name, timeout } => {
-            return Ok(Box::new(machines::stop(
-                name,
-                std::time::Duration::from_secs(*timeout),
-                false,
-                cli.format.is_text(),
-            )?));
-        }
-        Command::Kill { name } => {
-            return Ok(Box::new(machines::stop(
-                name,
-                std::time::Duration::from_secs(10),
-                true,
-                cli.format.is_text(),
-            )?));
-        }
-        Command::Rm { name, force } => return Ok(Box::new(machines::remove(name, *force)?)),
-        Command::Commit { name, image, force } => {
-            return Ok(Box::new(machines::commit(name, image, *force)?));
-        }
-        _ => {}
-    }
+        Command::Stop { name, timeout } => Box::new(machines::stop(
+            name,
+            std::time::Duration::from_secs(*timeout),
+            false,
+            cli.format.is_text(),
+        )?),
+        Command::Kill { name } => Box::new(machines::stop(
+            name,
+            std::time::Duration::from_secs(10),
+            true,
+            cli.format.is_text(),
+        )?),
+        Command::Rm { name, force } => Box::new(machines::remove(name, *force)?),
+        Command::Commit { name, image, force } => Box::new(machines::commit(name, image, *force)?),
+        _ => return Ok(None),
+    };
+    Ok(Some(report))
+}
+
+/// The rest, which need both.
+fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
     let catalogue = Catalogue::load_layered(&catalogue_layers())?;
     let store = Store::discover()?;
     match &cli.command {
@@ -211,6 +308,9 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
             &catalogue, &store, style, cli.format, reference,
         )?)),
         Command::Update => Ok(Box::new(update()?)),
+        Command::Rmi { reference, force } => Ok(Box::new(machines::remove_image(
+            &catalogue, &store, reference, *force,
+        )?)),
         Command::Run {
             reference,
             name,
@@ -245,6 +345,7 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
         | Command::Stop { .. }
         | Command::Kill { .. }
         | Command::Commit { .. }
+        | Command::Logs { .. }
         | Command::Rm { .. } => unreachable!("handled above"),
     }
 }
@@ -342,4 +443,39 @@ fn pull(
             Pulled::AlreadyPresent => reports::PullStatus::AlreadyPresent,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Saying nothing leaves an instance as it was. Saying "none" is a change
+    /// like any other, and the two must not look the same.
+    #[test]
+    fn nothing_given_is_different_from_nothing_wanted() {
+        let given = [1, 2];
+        assert_eq!(replacement(&given, false), Some(vec![1, 2]));
+        assert_eq!(replacement::<i32>(&[], false), None);
+        assert_eq!(replacement::<i32>(&[], true), Some(Vec::new()));
+    }
+
+    /// The flags conflict, so this is the parser's job rather than a rule the
+    /// reader has to know: --no-publish wins only because it cannot be given
+    /// alongside a forward.
+    #[test]
+    fn a_list_and_its_refusal_cannot_be_asked_for_together() {
+        use clap::Parser as _;
+        let outcome = Cli::try_parse_from(["vm", "start", "one", "-p", "80:80", "--no-publish"]);
+        assert!(outcome.is_err());
+        let outcome = Cli::try_parse_from(["vm", "start", "one", "-v", "/tmp:/mnt", "--no-volume"]);
+        assert!(outcome.is_err());
+    }
+
+    /// Every command is reachable, and none of them collides with another over
+    /// a short flag.
+    #[test]
+    fn the_command_line_is_consistent() {
+        use clap::CommandFactory as _;
+        Cli::command().debug_assert();
+    }
 }

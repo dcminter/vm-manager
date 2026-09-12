@@ -80,6 +80,13 @@ pub struct Instance {
     pub pid: Option<u32>,
     /// Paired with the pid so a reused pid is not mistaken for this one.
     pub started: Option<u64>,
+    /// How many times the seed has been rewritten. It is part of the instance
+    /// id cloud-init reads, and a changed id is what makes the guest act on a
+    /// seed it has already consumed. Absent in a record written before the
+    /// first rewrite, and left out while it is zero so that those records keep
+    /// the instance id they were created with.
+    #[serde(default, skip_serializing_if = "is_first")]
+    pub generation: u32,
     /// An empty list is left out rather than written as `[]`: TOML has no way
     /// to write a bare key after a table, so a written-out empty list after a
     /// populated one makes the file unwritable.
@@ -87,6 +94,14 @@ pub struct Instance {
     pub ports: Vec<Port>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shares: Vec<Share>,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "the signature serde's skip_serializing_if requires"
+)]
+const fn is_first(generation: &u32) -> bool {
+    *generation == 0
 }
 
 impl Instance {
@@ -444,9 +459,20 @@ fn hexadecimal(bytes: &[u8], count: usize) -> String {
 }
 
 /// Builds the cloud-init seed for an instance from its record.
+/// What cloud-init calls this machine.
+///
+/// The per-instance modules run once for a given id, so rewriting the seed
+/// only means anything if the id changes with it.
+fn instance_id(instance: &Instance) -> String {
+    match instance.generation {
+        0 => format!("{}-{}", instance.name, instance.created),
+        generation => format!("{}-{}-{generation}", instance.name, instance.created),
+    }
+}
+
 pub fn seed_for(instance: &Instance, authorized_key: &str) -> seed::Seed {
     seed::Seed {
-        instance_id: format!("{}-{}", instance.name, instance.created),
+        instance_id: instance_id(instance),
         hostname: instance.name.clone(),
         user: instance.user.clone(),
         authorized_key: authorized_key.to_owned(),
@@ -504,6 +530,7 @@ mod tests {
             ssh_port: Some(2222),
             pid: None,
             started: None,
+            generation: 0,
             ports: Vec::new(),
             shares: Vec::new(),
         }
@@ -848,5 +875,43 @@ mod tests {
             seed_for(&held, key).instance_id,
             seed_for(&held, key).instance_id
         );
+    }
+
+    /// And it must change when the guest is meant to configure itself again,
+    /// which is the whole of what a generation is for.
+    #[test]
+    fn a_new_generation_is_a_machine_cloud_init_has_not_met() {
+        let held = instance("demo");
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKq7YQ== vm";
+        let mut renewed = held.clone();
+        renewed.generation = 1;
+        assert_ne!(
+            seed_for(&held, key).instance_id,
+            seed_for(&renewed, key).instance_id
+        );
+    }
+
+    /// A record written before generations existed keeps the identity it was
+    /// created with, so an upgrade does not reconfigure every guest.
+    #[test]
+    fn a_record_without_a_generation_keeps_the_identity_it_had() {
+        let held = instance("demo");
+        assert_eq!(held.generation, 0);
+        assert_eq!(instance_id(&held), "demo-1700000000");
+    }
+
+    /// It is left out of the record while it is zero, for the same reason.
+    #[test]
+    fn a_first_generation_is_not_written_to_the_record() {
+        let scratch = Scratch::new("generation");
+        let instances = scratch.instances();
+        let directory = instances.create("one").unwrap();
+        let mut held = instance("one");
+        directory.write(&held).unwrap();
+        let text = fs::read_to_string(directory.record()).unwrap();
+        assert!(!text.contains("generation"), "{text}");
+        held.generation = 2;
+        directory.write(&held).unwrap();
+        assert_eq!(directory.read().unwrap().generation, 2);
     }
 }

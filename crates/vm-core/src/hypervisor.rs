@@ -173,8 +173,15 @@ pub fn arguments(instance: &Instance, directory: &Directory) -> Vec<String> {
     }
     push("-display");
     push("none");
+    // Appended rather than truncated: a machine that failed to boot and was
+    // started again would otherwise take the evidence with it.
+    push("-chardev");
+    push(&format!(
+        "file,id=console,path={},append=on",
+        directory.console().display()
+    ));
     push("-serial");
-    push(&format!("file:{}", directory.console().display()));
+    push("chardev:console");
     push("-qmp");
     push(&format!(
         "unix:{},server,nowait",
@@ -256,6 +263,41 @@ pub fn share_launch(source: &Path, socket: &Path, log: PathBuf) -> Launch {
             "none".to_owned(),
         ],
         log,
+    }
+}
+
+/// Grows an existing disk. Shrinking is refused by `qemu-img` itself, which
+/// is the right answer: the guest's filesystem would still be the old size.
+pub fn resize_overlay(overlay: &Path, size: &str) -> Result<()> {
+    let output = Command::new("qemu-img")
+        .arg("resize")
+        .arg("-q")
+        .arg("-f")
+        .arg("qcow2")
+        .arg(overlay)
+        .arg(size)
+        .output()
+        .map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                Error::MissingTool {
+                    binary: "qemu-img",
+                    package: "qemu-utils",
+                    operation: "resizing a virtual machine's disk",
+                }
+            } else {
+                Error::Launch {
+                    program: "qemu-img".to_owned(),
+                    source,
+                }
+            }
+        })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(Error::Overlay {
+            path: overlay.to_owned(),
+            reason: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        })
     }
 }
 
@@ -361,6 +403,7 @@ mod tests {
             ssh_port: None,
             pid: None,
             started: None,
+            generation: 0,
             ports: Vec::new(),
             shares: Vec::new(),
         }
@@ -516,7 +559,14 @@ mod tests {
         );
         assert_eq!(
             pair(&arguments, "-serial"),
-            Some(format!("file:{}", directory.console().display()))
+            Some("chardev:console".to_owned())
+        );
+        assert_eq!(
+            pair(&arguments, "-chardev"),
+            Some(format!(
+                "file,id=console,path={},append=on",
+                directory.console().display()
+            ))
         );
     }
 
@@ -573,7 +623,9 @@ mod tests {
         let scratch = Scratch::new("noshares");
         let arguments = arguments(&instance("one"), &scratch.directory("one"));
         assert!(!arguments.iter().any(|held| held.contains("vhost-user-fs")));
-        assert!(!arguments.iter().any(|held| held == "-chardev"));
+        // The console has a chardev of its own, so the share ones are what
+        // this is looking for.
+        assert!(!arguments.iter().any(|held| held.contains("vfs")));
     }
 
     #[test]
@@ -721,6 +773,46 @@ mod tests {
         let held = fs::read_to_string(&log).unwrap();
         assert!(held.contains("spoken"), "{held}");
         assert!(held.contains("aside"), "{held}");
+    }
+
+    #[test]
+    fn a_disk_grows_to_the_size_it_is_given() {
+        let scratch = Scratch::new("resize");
+        let overlay = scratch.0.join("disk.qcow2");
+        let made = Command::new("qemu-img")
+            .args(["create", "-q", "-f", "qcow2"])
+            .arg(&overlay)
+            .arg("64M")
+            .status();
+        if !made.is_ok_and(|status| status.success()) {
+            return; // qemu-img is not installed here; the CLI reports that itself.
+        }
+        resize_overlay(&overlay, "128M").unwrap();
+        let info = Command::new("qemu-img")
+            .args(["info", "--output=json"])
+            .arg(&overlay)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&info.stdout);
+        assert!(text.contains("134217728"), "{text}");
+    }
+
+    /// Shrinking would leave the guest's filesystem past the end of its disk.
+    #[test]
+    fn a_disk_is_not_shrunk_by_asking_for_less() {
+        let scratch = Scratch::new("shrink");
+        let overlay = scratch.0.join("disk.qcow2");
+        let made = Command::new("qemu-img")
+            .args(["create", "-q", "-f", "qcow2"])
+            .arg(&overlay)
+            .arg("128M")
+            .status();
+        if !made.is_ok_and(|status| status.success()) {
+            return;
+        }
+        let error = resize_overlay(&overlay, "64M").unwrap_err();
+        assert_eq!(error.kind(), "overlay-failed");
+        assert!(error.to_string().contains("shrink"), "{error}");
     }
 
     #[test]

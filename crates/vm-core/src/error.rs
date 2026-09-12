@@ -105,6 +105,14 @@ pub enum Error {
     UnheldImage {
         reference: String,
     },
+    ImageInUse {
+        reference: String,
+        instances: Vec<String>,
+    },
+    ChangeWhileRunning {
+        name: String,
+    },
+    FollowNeedsText,
     InstanceRunning {
         name: String,
     },
@@ -173,6 +181,9 @@ impl Error {
             Self::NotFetchable => "image-not-fetchable",
             Self::Commit { .. } => "commit-failed",
             Self::UnheldImage { .. } => "image-not-held",
+            Self::ImageInUse { .. } => "image-in-use",
+            Self::ChangeWhileRunning { .. } => "change-while-running",
+            Self::FollowNeedsText => "follow-needs-text",
             Self::InstanceRunning { .. } => "instance-running",
             Self::InstanceStopped { .. } => "instance-stopped",
             Self::NoGuestAccess { .. } => "no-guest-access",
@@ -304,6 +315,25 @@ impl fmt::Display for Error {
                 f,
                 "'{reference}' is not in the local store and pulling is disabled; \
                  run 'vm pull {reference}' first"
+            ),
+            Self::ImageInUse {
+                reference,
+                instances,
+            } => write!(
+                f,
+                "'{reference}' is the disk behind {}; \
+                 remove them first, or use --force to break them",
+                instances.join(", ")
+            ),
+            Self::ChangeWhileRunning { name } => write!(
+                f,
+                "'{name}' is running, and these settings are read when a machine starts; \
+                 stop it first"
+            ),
+            Self::FollowNeedsText => write!(
+                f,
+                "a console cannot be followed in a document format; \
+                 drop --follow, or read it as text"
             ),
             Self::InstanceRunning { name } => {
                 write!(f, "'{name}' is running; stop it first, or use --force")

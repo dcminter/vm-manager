@@ -65,17 +65,28 @@ impl Seed {
             ("disable_root", Value::Bool(true)),
         ];
         if !self.mounts.is_empty() {
+            // Mounted per boot rather than written into the guest's fstab. A
+            // share belongs to the run, not to the disk: an fstab entry would
+            // outlive the share it names, fail at the next boot without it,
+            // and take the guest's local-fs.target down with it. cloud-init
+            // will not take an entry out again once it has written one.
             fields.push((
-                "mounts",
-                Value::list(self.mounts.iter().map(|mount| {
-                    Value::list([
-                        Value::string(&mount.tag),
-                        Value::string(&mount.target),
-                        Value::string("virtiofs"),
-                        Value::string("defaults"),
-                        Value::string("0"),
-                        Value::string("0"),
-                    ])
+                "bootcmd",
+                Value::list(self.mounts.iter().flat_map(|mount| {
+                    [
+                        Value::list([
+                            Value::string("mkdir"),
+                            Value::string("-p"),
+                            Value::string(&mount.target),
+                        ]),
+                        Value::list([
+                            Value::string("mount"),
+                            Value::string("-t"),
+                            Value::string("virtiofs"),
+                            Value::string(&mount.tag),
+                            Value::string(&mount.target),
+                        ]),
+                    ]
                 })),
             ));
         }
@@ -240,17 +251,34 @@ mod tests {
     }
 
     #[test]
-    fn a_mount_becomes_a_virtiofs_fstab_line() {
+    fn a_mount_becomes_a_virtiofs_mount() {
         let mut seed = seed();
         seed.mounts.push(Mount {
             tag: "work".to_owned(),
             target: "/mnt/work".to_owned(),
         });
         let text = seed.user_data();
-        assert!(text.contains("mounts:"), "{text}");
+        assert!(text.contains("bootcmd:"), "{text}");
         assert!(text.contains("- work"), "{text}");
         assert!(text.contains("- /mnt/work"), "{text}");
         assert!(text.contains("- virtiofs"), "{text}");
+        assert!(text.contains("- mkdir"), "{text}");
+    }
+
+    /// Nothing is written to the guest's fstab: an entry there would outlive
+    /// the share and fail the next boot that went without it.
+    #[test]
+    fn a_mount_leaves_nothing_behind_in_the_guest() {
+        let mut seed = seed();
+        seed.mounts.push(Mount {
+            tag: "work".to_owned(),
+            target: "/mnt/work".to_owned(),
+        });
+        assert!(
+            !seed.user_data().contains("mounts:"),
+            "{}",
+            seed.user_data()
+        );
     }
 
     #[test]
