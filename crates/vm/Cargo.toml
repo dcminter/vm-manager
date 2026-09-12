@@ -1,0 +1,16 @@
+[package]
+name = "vm"
+description = "Create and manage QEMU virtual machines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+vm-core = { path = "../vm-core" }
+clap.workspace = true
+
+[lints]
+workspace = true

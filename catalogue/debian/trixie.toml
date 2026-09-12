@@ -1,0 +1,17 @@
+name = "debian"
+tag = "trixie"
+aliases = ["13", "latest"]
+description = "Debian 13 (Trixie) generic cloud image"
+login = "cloud-init"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+url = "https://cloud.debian.org/images/cloud/trixie/20260831-2587/debian-13-genericcloud-amd64-20260831-2587.qcow2"
+digest = "sha512:8ea9faae810043a0b35b0149f05014f26705c2339ffb11ead308f33e844a87cc3ef46ec81d5262b38817b6a88af404874d48a5857ebe072ef6a31dfb6e371f50"
+
+[[image]]
+arch = "arm64"
+format = "qcow2"
+url = "https://cloud.debian.org/images/cloud/trixie/20260831-2587/debian-13-genericcloud-arm64-20260831-2587.qcow2"
+digest = "sha512:321adcf21b6d2941e09e96f333af0c8f35b0865904834a4eb8149cfd2286b902d4868494ddfc863052a3267886533796aa3e21db24a243c0fc56a49c753471be"

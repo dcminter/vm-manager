@@ -1,0 +1,17 @@
+name = "debian"
+tag = "trixie-nocloud"
+aliases = ["13-nocloud"]
+description = "Debian 13 (Trixie) nocloud image; console login, no cloud-init"
+login = "none"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+url = "https://cloud.debian.org/images/cloud/trixie/20260831-2587/debian-13-nocloud-amd64-20260831-2587.qcow2"
+digest = "sha512:e4f716b1fb48be24085c0907bd1a0a31f03b7bf2adfbd46d9f39595a225dc38741a4b5d79910e61fa1d885ac043e5ea0663fe805f26944e1dc1211a3206022c2"
+
+[[image]]
+arch = "arm64"
+format = "qcow2"
+url = "https://cloud.debian.org/images/cloud/trixie/20260831-2587/debian-13-nocloud-arm64-20260831-2587.qcow2"
+digest = "sha512:c0b029f10443b864156b9dcdccb0338ced5c5d3816fe74f52c5b1b7e27357118bdadd16bced739ef4783e3690a3e5ca255a814de28bdea09148097b3e5bb9a35"

@@ -1,0 +1,18 @@
+[package]
+name = "vm-core"
+description = "Core library for the vm virtual machine manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+basic-toml.workspace = true
+sha2.workspace = true
+ureq.workspace = true
+
+[lints]
+workspace = true
