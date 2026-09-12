@@ -115,6 +115,17 @@ pub fn instances_directory() -> Option<PathBuf> {
     instances_directory_in(&SystemEnvironment)
 }
 
+/// The user's own SSH configuration, where `ssh` looks for it.
+pub fn ssh_config_in(environment: &impl Environment) -> Option<PathBuf> {
+    environment
+        .var("HOME")
+        .map(|home| PathBuf::from(home).join(".ssh").join("config"))
+}
+
+pub fn ssh_config() -> Option<PathBuf> {
+    ssh_config_in(&SystemEnvironment)
+}
+
 /// The catalogue to read: an explicit override, then the copy `vm update`
 /// fetches, then the copy shipped with the package, then a checkout's own.
 pub fn catalogue_directory() -> PathBuf {
@@ -210,6 +221,10 @@ mod tests {
             config_directory_in(&held).unwrap(),
             PathBuf::from("/home/x/.config/vm")
         );
+        assert_eq!(
+            ssh_config_in(&held).unwrap(),
+            PathBuf::from("/home/x/.ssh/config")
+        );
     }
 
     #[test]
@@ -217,6 +232,7 @@ mod tests {
         let held = environment(&[]);
         assert!(data_directory_in(&held).is_none());
         assert!(instances_directory_in(&held).is_none());
+        assert!(ssh_config_in(&held).is_none());
     }
 
     #[test]

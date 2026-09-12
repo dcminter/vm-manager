@@ -94,6 +94,20 @@ A host port is forwarded to its SSH port whether or not one was published, so
 wraps `ssh` rather than replacing it, so `~/.ssh/config`, the agent and
 `ProxyCommand` all still apply, and each machine keeps its own `known_hosts`
 so that rebuilding one never touches yours.
+
+`--add-ssh-config` lets plain `ssh`, `scp` and `rsync` reach the machine by
+name, with no `vm` in front:
+
+```bash
+vm run debian:trixie --name mytestvm --add-ssh-config
+ssh mytestvm
+```
+
+The machine's entry is kept in its own directory, rewritten whenever it starts
+in case its port has moved, and removed by `vm rm`. The first machine given one
+puts a single `Include` line at the top of `~/.ssh/config` that reads them all;
+nothing else there is changed. A name `~/.ssh/config` already uses for a `Host`
+is refused. `vm start --no-ssh-config` takes an entry away.
 Everything a machine owns — its disk, its key, its console log and its record —
 lives in one directory under `$XDG_STATE_HOME/vm/instances`, and `vm rm` takes
 the lot.
@@ -112,8 +126,8 @@ terminal, or as one line of standard input, and never taken as an argument. SSH
 still takes only the machine's key.
 
 `vm start` takes the same `--memory`, `--cpus`, `--publish`, `--volume`,
-`--user`, `--disk-size`, `--firmware`, `--cpu`, `--machine`, `--disk` and
-`--password` as `vm run`,
+`--user`, `--disk-size`, `--firmware`, `--cpu`, `--machine`, `--disk`,
+`--password` and `--add-ssh-config` as `vm run`,
 and each changes the machine from then on; what is not given is left as it was.
 Forwards and shares are replaced as a list, `--no-publish` or `--no-volume`
 leaves the machine with none, and `--no-password` takes the password away. A
@@ -195,7 +209,9 @@ COMPLETE=fish vm | source
 archive `vm update` fetches, and `catalogue_path`, the directory within that
 archive holding the entries. Point both at an internal server to run a curated
 catalogue. Setting `auto_pull = false` makes `vm run` refuse an image that is
-not already held rather than fetching it.
+not already held rather than fetching it, and `add_ssh_config = true` makes
+`vm run` act as though `--add-ssh-config` were given. `man vm-config` describes
+every setting.
 
 A refreshed catalogue is staged and parsed before it replaces the one in use,
 so an unreachable or malformed source leaves the working catalogue untouched.

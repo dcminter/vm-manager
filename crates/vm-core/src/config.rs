@@ -20,6 +20,9 @@ pub struct Config {
     /// makes a missing image an error rather than a download.
     #[serde(default = "default_auto_pull")]
     pub auto_pull: bool,
+    /// Whether `vm run` adds an SSH configuration entry without being asked to.
+    #[serde(default)]
+    pub add_ssh_config: bool,
 }
 
 const fn default_auto_pull() -> bool {
@@ -40,6 +43,7 @@ impl Default for Config {
             catalogue_url: default_catalogue_url(),
             catalogue_path: default_catalogue_path(),
             auto_pull: default_auto_pull(),
+            add_ssh_config: false,
         }
     }
 }
@@ -147,6 +151,16 @@ mod tests {
         let scratch = Scratch::new("autopull");
         let path = scratch.write("auto_pull = false\n");
         assert!(!Config::read(&path).unwrap().auto_pull);
+    }
+
+    #[test]
+    fn ssh_configuration_entries_are_off_by_default_and_can_be_turned_on() {
+        assert!(!Config::default().add_ssh_config);
+        let scratch = Scratch::new("sshconfig");
+        let path = scratch.write("add_ssh_config = true\n");
+        let config = Config::read(&path).unwrap();
+        assert!(config.add_ssh_config);
+        assert!(config.auto_pull);
     }
 
     #[test]

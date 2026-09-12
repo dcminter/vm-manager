@@ -201,6 +201,7 @@ mod tests {
                     pid: handle.as_ref().map(|held| held.pid),
                     started: handle.as_ref().map(|held| held.started),
                     generation: 0,
+                    ssh_config: false,
                     password: None,
                     ports: Vec::new(),
                     shares: Vec::new(),

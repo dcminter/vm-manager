@@ -103,6 +103,9 @@ pub struct Instance {
     /// The account's console password as a `$6$` hash, or `*` once one has been taken away.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
+    /// Whether plain `ssh` reaches the machine by name, through an entry in its directory.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ssh_config: bool,
     /// An empty list is left out rather than written as `[]`: TOML has no way
     /// to write a bare key after a table, so a written-out empty list after a
     /// populated one makes the file unwritable.
@@ -352,6 +355,11 @@ impl Directory {
         self.path.join("known_hosts")
     }
 
+    /// The entry that lets plain `ssh` reach this machine by name.
+    pub fn ssh_config(&self) -> PathBuf {
+        self.path.join("ssh_config")
+    }
+
     pub fn read(&self) -> Result<Instance> {
         let path = self.record();
         let text = fs::read_to_string(&path).map_err(|source| Error::State {
@@ -591,6 +599,7 @@ mod tests {
             pid: None,
             started: None,
             generation: 0,
+            ssh_config: false,
             password: None,
             ports: Vec::new(),
             shares: Vec::new(),
@@ -675,11 +684,23 @@ mod tests {
             let mut held = instance(&name);
             held.pid = Some(9);
             held.started = Some(7);
+            held.ssh_config = true;
             held.ports = ports;
             held.shares = shares;
             directory.write(&held).unwrap();
             assert_eq!(directory.read().unwrap(), held, "combination {index}");
         }
+    }
+
+    #[test]
+    fn an_ssh_configuration_entry_is_recorded_only_when_there_is_one() {
+        let scratch = Scratch::new("sshconfig");
+        let directory = scratch.instances().create("one").unwrap();
+        let held = instance("one");
+        directory.write(&held).unwrap();
+        let text = std::fs::read_to_string(directory.record()).unwrap();
+        assert!(!text.contains("ssh_config"), "{text}");
+        assert!(!directory.read().unwrap().ssh_config);
     }
 
     #[test]

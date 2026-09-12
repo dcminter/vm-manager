@@ -310,6 +310,10 @@ pub struct Run {
     pub disk: Disk,
     /// Set when this start moved the machine to other firmware.
     pub firmware_changed: bool,
+    /// Whether plain `ssh` reaches the machine by name.
+    pub ssh_config: bool,
+    /// The user's SSH configuration, when this run or start added the `Include` line to it.
+    pub ssh_config_changed: Option<String>,
 }
 
 fn ports_value(ports: &[Port]) -> Value {
@@ -358,6 +362,13 @@ impl Report for Run {
             ("machine", Value::string(self.machine.name())),
             ("disk", Value::string(self.disk.name())),
             ("firmware_changed", Value::Bool(self.firmware_changed)),
+            ("ssh_config", Value::Bool(self.ssh_config)),
+            (
+                "ssh_config_changed",
+                self.ssh_config_changed
+                    .clone()
+                    .map_or(Value::Null, Value::string),
+            ),
         ])
     }
 
@@ -379,7 +390,14 @@ impl Report for Run {
             if self.cpus == 1 { "" } else { "s" }
         )];
         if let Some(port) = self.ssh_port {
-            lines.push(format!("  ssh      vm ssh {} (port {port})", self.name));
+            if self.ssh_config {
+                lines.push(format!(
+                    "  ssh      vm ssh {0}, or ssh {0} (port {port})",
+                    self.name
+                ));
+            } else {
+                lines.push(format!("  ssh      vm ssh {} (port {port})", self.name));
+            }
         }
         lines.push(format!("  console  vm console {}", self.name));
         if !self.seeded {
@@ -396,6 +414,11 @@ impl Report for Run {
                 "  The firmware is now {}; a disk prepared only for the other will not boot, \
                  and changing it back restores it.",
                 self.firmware.name()
+            )));
+        }
+        if let Some(path) = &self.ssh_config_changed {
+            lines.push(style.dim(&format!(
+                "  Added an Include line to {path}, so ssh reads the entries of machines that have one."
             )));
         }
         if self.accelerated == Some(false) {
@@ -1348,7 +1371,33 @@ mod tests {
             machine: Chipset::Q35,
             disk: Disk::Virtio,
             firmware_changed,
+            ssh_config: false,
+            ssh_config_changed: None,
         }
+    }
+
+    #[test]
+    fn a_machine_with_an_ssh_entry_says_plain_ssh_reaches_it() {
+        let mut report = run(Firmware::Bios, "max", false);
+        report.seeded = true;
+        report.ssh_port = Some(2222);
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(text.contains("ssh      vm ssh pd (port 2222)"), "{text}");
+        assert!(!text.contains("Include"), "{text}");
+        report.ssh_config = true;
+        report.ssh_config_changed = Some("/home/x/.ssh/config".to_owned());
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(text.contains("vm ssh pd, or ssh pd (port 2222)"), "{text}");
+        assert!(
+            text.contains("Include line to /home/x/.ssh/config"),
+            "{text}"
+        );
+        let document = to_json(&report.to_value());
+        assert!(document.contains(r#""ssh_config": true"#), "{document}");
+        assert!(
+            document.contains(r#""ssh_config_changed": "/home/x/.ssh/config""#),
+            "{document}"
+        );
     }
 
     #[test]

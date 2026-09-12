@@ -17,6 +17,7 @@ pub mod process;
 pub mod qmp;
 pub mod reference;
 pub mod seed;
+pub mod ssh_config;
 pub mod store;
 pub mod tar;
 pub mod update;

@@ -50,6 +50,8 @@ pub struct Request {
     pub disk: Option<Disk>,
     /// A `$6$` hash for console login.
     pub password: Option<String>,
+    /// Whether to add an SSH configuration entry; absent means as the configuration file says.
+    pub ssh_config: Option<bool>,
 }
 
 pub fn run(
@@ -70,9 +72,18 @@ pub fn run(
             name: request.reference.clone(),
         });
     }
+    if request.ssh_config == Some(true) && !entry.login.is_seedable() {
+        return Err(Error::NoGuestAccess {
+            name: request.reference.clone(),
+        });
+    }
+    let config = vm_core::config::Config::load()?;
+    let ssh_config = request
+        .ssh_config
+        .unwrap_or_else(|| config.add_ssh_config && entry.login.is_seedable());
     let pull = match request.pull {
         Some(held) => held,
-        None if vm_core::config::Config::load()?.auto_pull => Pull::Missing,
+        None if config.auto_pull => Pull::Missing,
         None => Pull::Never,
     };
     let held = store.contains(&artifact.digest);
@@ -106,10 +117,16 @@ pub fn run(
             taken.iter().any(|held| held == candidate)
         })
     });
+    // Refused before a name is claimed.
+    if ssh_config {
+        vm_core::ssh_config::check_name(&user_ssh_config()?, &name)?;
+    }
     let directory = instances.create(&name)?;
     // Everything after this point owns a claimed name, so a failure has to
     // give it back rather than leave a directory nothing can start.
-    match build(store, &directory, entry, artifact, request, &name) {
+    match build(
+        store, &directory, entry, artifact, request, &instances, ssh_config,
+    ) {
         Ok(report) => Ok(report),
         Err(error) => {
             let _ = directory.remove();
@@ -124,8 +141,10 @@ fn build(
     entry: &vm_core::catalogue::Entry,
     artifact: &vm_core::catalogue::Artifact,
     request: &Request,
-    name: &str,
+    instances: &Instances,
+    ssh_config: bool,
 ) -> Result<reports::Run> {
+    let name = directory.name();
     let mut held = Instance {
         name: name.to_owned(),
         image: request.reference.clone(),
@@ -148,6 +167,7 @@ fn build(
         pid: None,
         started: None,
         generation: 0,
+        ssh_config,
         password: request.password.clone(),
         ports: request.ports.clone(),
         shares: request.shares.clone(),
@@ -175,6 +195,7 @@ fn build(
         instance::seed_for(&held, &public).write(&directory.seed())?;
     }
     directory.write(&held)?;
+    let included = publish(directory, &held, instances.root())?;
 
     let accelerated = launch(directory, &mut held)?;
     Ok(report(
@@ -183,6 +204,7 @@ fn build(
         accelerated,
         reports::RunStatus::Created,
         false,
+        included,
     ))
 }
 
@@ -282,14 +304,35 @@ fn reap_shares(held: &mut Instance) {
     }
 }
 
+/// Writes the machine's SSH configuration entry, returning the user's configuration if it gained the `Include` line.
+fn publish(
+    directory: &Directory,
+    held: &Instance,
+    instances: &Path,
+) -> Result<Option<std::path::PathBuf>> {
+    if !held.ssh_config {
+        return Ok(None);
+    }
+    vm_core::ssh_config::write(held, directory)?;
+    let user = user_ssh_config()?;
+    Ok(vm_core::ssh_config::ensure_include(&user, instances)?.then_some(user))
+}
+
+fn user_ssh_config() -> Result<std::path::PathBuf> {
+    vm_core::paths::ssh_config().ok_or(Error::NoHome)
+}
+
 fn report(
     held: &Instance,
     directory: &Directory,
     accelerated: Option<bool>,
     status: reports::RunStatus,
     firmware_changed: bool,
+    included: Option<std::path::PathBuf>,
 ) -> reports::Run {
     reports::Run {
+        ssh_config: held.ssh_config,
+        ssh_config_changed: included.map(|path| path.display().to_string()),
         firmware: held.firmware,
         cpu: held.cpu.clone(),
         machine: held.machine,
@@ -331,16 +374,22 @@ pub fn start(name: &str, changes: &Changes) -> Result<reports::Run> {
             None,
             reports::RunStatus::AlreadyRunning,
             false,
+            None,
         ));
     }
     held.forget_process();
     let firmware = held.firmware;
+    if changes.ssh_config == Some(true) && !held.ssh_config {
+        vm_core::ssh_config::check_name(&user_ssh_config()?, name)?;
+    }
     apply(&directory, &mut held, changes)?;
     // The port it used last time may belong to something else by now, and a
     // forward that cannot bind would take the whole machine down with it.
     if held.seeded && !held.ssh_port.is_some_and(port_is_free) {
         held.ssh_port = Some(free_port()?);
     }
+    // The port may have moved, so the entry is written afresh.
+    let included = publish(&directory, &held, instances.root())?;
     let accelerated = launch(&directory, &mut held)?;
     Ok(report(
         &held,
@@ -348,6 +397,7 @@ pub fn start(name: &str, changes: &Changes) -> Result<reports::Run> {
         accelerated,
         reports::RunStatus::Restarted,
         held.firmware != firmware,
+        included,
     ))
 }
 
@@ -367,6 +417,8 @@ pub struct Changes {
     pub disk: Option<Disk>,
     /// A `$6$` hash, or `*` to take the password away.
     pub password: Option<String>,
+    /// Whether plain `ssh` reaches the machine by name.
+    pub ssh_config: Option<bool>,
 }
 
 impl Changes {
@@ -382,6 +434,7 @@ impl Changes {
             || self.shares.is_some()
             || self.user.is_some()
             || self.disk_size.is_some()
+            || self.ssh_config.is_some()
     }
 }
 
@@ -457,6 +510,17 @@ fn apply(directory: &Directory, held: &mut Instance, changes: &Changes) -> Resul
         renew = true;
         held.password = Some(password.clone());
         directory.restrict()?;
+    }
+    if let Some(wanted) = changes.ssh_config {
+        if wanted && !held.seeded {
+            return Err(Error::NoGuestAccess {
+                name: held.name.clone(),
+            });
+        }
+        held.ssh_config = wanted;
+        if !wanted {
+            vm_core::ssh_config::remove(directory)?;
+        }
     }
     if let Some(size) = &changes.disk_size {
         hypervisor::resize_overlay(&directory.overlay(), size)?;
@@ -1288,6 +1352,7 @@ mod tests {
                 pid: None,
                 started: None,
                 generation: 0,
+                ssh_config: false,
                 password: None,
                 ports: Vec::new(),
                 shares: Vec::new(),
@@ -1494,6 +1559,60 @@ mod tests {
         let stored = directory.read().unwrap();
         assert_eq!(stored.password, None);
         assert_eq!(stored.memory, 2048);
+    }
+
+    #[test]
+    fn an_ssh_configuration_entry_is_asked_for_and_taken_away() {
+        let scratch = Scratch::new("sshconfig");
+        let (directory, mut held) = scratch.machine("one");
+        let before = held.generation;
+        let on = Changes {
+            ssh_config: Some(true),
+            ..Changes::default()
+        };
+        apply(&directory, &mut held, &on).unwrap();
+        assert!(directory.read().unwrap().ssh_config);
+        // The guest reads nothing of this, so it is not told it is new.
+        assert_eq!(held.generation, before);
+        vm_core::ssh_config::write(&held, &directory).unwrap();
+        assert!(directory.ssh_config().exists());
+        let off = Changes {
+            ssh_config: Some(false),
+            ..Changes::default()
+        };
+        apply(&directory, &mut held, &off).unwrap();
+        assert!(!directory.read().unwrap().ssh_config);
+        assert!(!directory.ssh_config().exists());
+    }
+
+    #[test]
+    fn an_ssh_configuration_entry_for_a_machine_with_no_seed_is_refused() {
+        let scratch = Scratch::new("unseededsshconfig");
+        let (directory, mut held) = scratch.machine("one");
+        held.seeded = false;
+        directory.write(&held).unwrap();
+        let changes = Changes {
+            ssh_config: Some(true),
+            ..Changes::default()
+        };
+        let error = apply(&directory, &mut held, &changes).unwrap_err();
+        assert_eq!(error.kind(), "no-guest-access");
+        assert!(!directory.read().unwrap().ssh_config);
+        // Taking away what is not there is not an error.
+        let changes = Changes {
+            ssh_config: Some(false),
+            ..Changes::default()
+        };
+        apply(&directory, &mut held, &changes).unwrap();
+    }
+
+    #[test]
+    fn an_ssh_configuration_change_counts_as_a_change() {
+        let changes = Changes {
+            ssh_config: Some(false),
+            ..Changes::default()
+        };
+        assert!(changes.any());
     }
 
     /// Firmware and processor are the hypervisor's, so the guest is not told it is new.

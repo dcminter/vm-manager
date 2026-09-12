@@ -1,0 +1,82 @@
+.TH VM-CONFIG 5 "2026" "vm-manager" "File Formats"
+.SH NAME
+vm-config \- configuration file for vm
+.SH SYNOPSIS
+.I $XDG_CONFIG_HOME/vm/config.toml
+.SH DESCRIPTION
+The configuration file for
+.BR vm (1)
+is optional. Where
+.I XDG_CONFIG_HOME
+is not set, it is
+.IR ~/.config/vm/config.toml .
+An absent file, and any setting it leaves out, takes the default. A file that
+cannot be read, is not TOML, or names a setting not listed here is reported as
+an error rather than ignored, so a misspelt setting is not silently without
+effect.
+.PP
+It is TOML: one
+.IR key " = " value
+per line, with strings in double quotes and
+.BR true " or " false
+for the rest.
+.SH SETTINGS
+.TP
+.BR catalogue_url " (string)"
+The archive
+.B vm update
+fetches the catalogue from, a gzipped tar. The default is the project's own
+repository on GitHub.
+.TP
+.BR catalogue_path " (string)"
+The directory within that archive holding the catalogue entries. Default
+.BR catalogue .
+Set both this and
+.B catalogue_url
+to run a catalogue kept on an internal server.
+.TP
+.BR auto_pull " (boolean)"
+Whether
+.B vm run
+fetches an image that is not already held. Default
+.BR true .
+With
+.BR false ,
+an image that is not held is an error unless
+.B \-\-pull
+says otherwise.
+.TP
+.BR add_ssh_config " (boolean)"
+Whether
+.B vm run
+gives a machine an entry that lets plain
+.BR ssh (1),
+.BR scp (1)
+and
+.BR rsync (1)
+reach it by name, as though
+.B \-\-add\-ssh\-config
+had been given. Default
+.BR false .
+.B \-\-no\-ssh\-config
+turns it off for one machine, and an image that takes no cloud-init seed has no
+account to reach, so it gets no entry. This setting is read by
+.B vm run
+only: a machine that already exists keeps what it was given, and
+.B vm start
+changes it with
+.B \-\-add\-ssh\-config
+or
+.BR \-\-no\-ssh\-config .
+.SH EXAMPLE
+.RS
+.nf
+catalogue_url = "https://mirror.example.com/vm/catalogue.tar.gz"
+catalogue_path = "catalogue"
+auto_pull = false
+add_ssh_config = true
+.fi
+.RE
+.SH SEE ALSO
+.BR vm (1),
+.BR ssh_config (5)

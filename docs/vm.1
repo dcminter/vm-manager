@@ -51,9 +51,10 @@ below.
 .BI start " NAME"
 Start a machine that exists but is not running. It takes the same
 .BR \-\-memory ", " \-\-cpus ", " \-\-publish ", " \-\-volume ", " \-\-user ,
-.BR \-\-disk\-size ", " \-\-firmware ", " \-\-cpu ", " \-\-machine ", " \-\-disk
-and
+.BR \-\-disk\-size ", " \-\-firmware ", " \-\-cpu ", " \-\-machine ", " \-\-disk ,
 .B \-\-password
+and
+.B \-\-add\-ssh\-config
 options as
 .BR run ,
 each of which changes the machine for this start and every one after it;
@@ -64,7 +65,9 @@ or
 .B \-\-no\-volume
 leaves it with none;
 .B \-\-no\-password
-takes the account's password away. A running machine is not changed: these are
+takes the account's password away, and
+.B \-\-no\-ssh\-config
+takes the machine's SSH configuration entry away. A running machine is not changed: these are
 read when a machine starts, so it must be stopped first.
 .IP
 A disk prepared for only one firmware does not boot under the other, and a guest
@@ -82,7 +85,14 @@ so
 .IR ~/.ssh/config ,
 the agent and
 .B ProxyCommand
-all still apply.
+all still apply. A machine given
+.B \-\-add\-ssh\-config
+is also reached by plain
+.BR ssh (1),
+.BR scp (1)
+or
+.BR rsync (1)
+under its own name.
 .TP
 .BI cp " FROM TO"
 Copy files to or from a machine. One side is written as
@@ -251,6 +261,40 @@ It is asked for twice on a terminal and read as one line of standard input
 otherwise, and never taken as an argument, where other users could read it.
 SSH still takes only the machine's key. Refused for an image that takes no
 seed.
+.TP
+.B \-\-add\-ssh\-config
+Let plain
+.BR ssh (1),
+.BR scp (1)
+and
+.BR rsync (1)
+reach the machine by its name, as in
+.BR "ssh NAME" .
+The entry holding the port, account, key and host keys that
+.B vm ssh
+would pass is written to
+.I ssh_config
+in the machine's directory, rewritten each time the machine starts, since its
+port may change, and removed with the machine. The first time, a line
+including every machine's entry is put at the top of
+.IR ~/.ssh/config ,
+which is created if it is not there; nothing else in that file is changed,
+and a file that is a link is changed where it points. A name that
+.I ~/.ssh/config
+already gives to a
+.B Host
+is refused, since the machine's entry would take it over. Refused for an image
+that takes no seed.
+.B add_ssh_config
+in
+.BR vm\-config (5)
+turns this on for every
+.BR run .
+.TP
+.B \-\-no\-ssh\-config
+Add no entry, whatever
+.BR vm\-config (5)
+says.
 .SH OUTPUT
 Every command writes a table by default and machine-readable output on request:
 .B \-\-format json
@@ -301,15 +345,12 @@ for bash, zsh and fish respectively.
 .SH FILES
 .TP
 .I $XDG_CONFIG_HOME/vm/config.toml
-Optional.
-.B catalogue_url
-and
-.B catalogue_path
-say where
+Optional settings: where
 .B vm update
-fetches from;
-.B auto_pull
-turns on-demand fetching off.
+fetches from, whether
+.B vm run
+fetches on demand, and whether it adds SSH configuration entries. See
+.BR vm\-config (5).
 .TP
 .I $XDG_DATA_HOME/vm/images
 The image store, addressed by digest.
@@ -323,9 +364,16 @@ Catalogue entries for images made here by
 .TP
 .I $XDG_STATE_HOME/vm/instances
 One directory per machine, readable only by its owner: its disk, key, console
-log, record and, for a UEFI machine, the firmware's variable store. The console
+log, record, SSH configuration entry if it has one and, for a UEFI machine, the
+firmware's variable store. The console
 log is appended to, so a machine that failed to boot and was started again
 keeps the evidence.
+.TP
+.I ~/.ssh/config
+Gains one
+.B Include
+line, the first time a machine is given
+.BR \-\-add\-ssh\-config .
 .TP
 .I $XDG_RUNTIME_DIR/vm
 Monitor, console, screen and share sockets, kept short because the kernel
@@ -345,7 +393,9 @@ Overrides the catalogue directory.
 .SH EXIT STATUS
 0 on success, 1 on failure.
 .SH SEE ALSO
+.BR vm\-config (5),
 .BR ssh (1),
+.BR ssh_config (5),
 .BR scp (1),
 .BR qemu\-system\-x86_64 (1),
 .BR qemu\-img (1),

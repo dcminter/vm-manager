@@ -106,6 +106,12 @@ enum Command {
         /// Ask for a password the account can log in with at the console
         #[arg(long)]
         password: bool,
+        /// Let plain ssh reach the machine by name, through ~/.ssh/config
+        #[arg(long, conflicts_with = "no_ssh_config")]
+        add_ssh_config: bool,
+        /// Add no SSH configuration entry, whatever the configuration file says
+        #[arg(long)]
+        no_ssh_config: bool,
     },
     /// Start an instance that is not running, changing how it is set up
     Start {
@@ -156,6 +162,12 @@ enum Command {
         /// Take the account's console password away
         #[arg(long)]
         no_password: bool,
+        /// Let plain ssh reach the machine by name, through ~/.ssh/config
+        #[arg(long, conflicts_with = "no_ssh_config")]
+        add_ssh_config: bool,
+        /// Remove the machine's SSH configuration entry
+        #[arg(long)]
+        no_ssh_config: bool,
     },
     /// Open a shell on an instance, or run a command in it
     Ssh {
@@ -362,6 +374,8 @@ fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> 
             disk,
             password,
             no_password,
+            add_ssh_config,
+            no_ssh_config,
         } => {
             let changes = machines::Changes {
                 machine: *machine,
@@ -379,6 +393,7 @@ fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> 
                 disk_size: disk_size.clone(),
                 firmware: *firmware,
                 cpu: cpu.clone(),
+                ssh_config: toggle(*add_ssh_config, *no_ssh_config),
             };
             Box::new(machines::start(name, &changes)?)
         }
@@ -469,6 +484,8 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
             machine,
             disk,
             password,
+            add_ssh_config,
+            no_ssh_config,
         } => Ok(Box::new(machines::run(
             &catalogue,
             &store,
@@ -487,6 +504,7 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
                 machine: *machine,
                 disk: *disk,
                 password: asked_password(*password)?,
+                ssh_config: toggle(*add_ssh_config, *no_ssh_config),
             },
             style,
             cli.format.is_text(),
@@ -505,6 +523,15 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
         | Command::Screen { .. }
         | Command::Screenshot { .. }
         | Command::Rm { .. } => unreachable!("handled above"),
+    }
+}
+
+/// A pair of opposing flags, where neither means as it was.
+const fn toggle(on: bool, off: bool) -> Option<bool> {
+    match (on, off) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
     }
 }
 
@@ -745,6 +772,33 @@ mod tests {
         assert!(Cli::try_parse_from(["vm", "start", "x", "--cpu", ""]).is_err());
         assert!(Cli::try_parse_from(["vm", "run", "x", "--machine", "isapc"]).is_err());
         assert!(Cli::try_parse_from(["vm", "start", "x", "--disk", "scsi"]).is_err());
+    }
+
+    #[test]
+    fn ssh_configuration_is_asked_for_turned_off_or_left_alone() {
+        use clap::Parser as _;
+        let asked = |arguments: &[&str]| match Cli::try_parse_from(arguments).unwrap().command {
+            Command::Run {
+                add_ssh_config,
+                no_ssh_config,
+                ..
+            }
+            | Command::Start {
+                add_ssh_config,
+                no_ssh_config,
+                ..
+            } => toggle(add_ssh_config, no_ssh_config),
+            _ => panic!("neither a run nor a start"),
+        };
+        assert_eq!(asked(&["vm", "run", "x", "--add-ssh-config"]), Some(true));
+        assert_eq!(asked(&["vm", "run", "x", "--no-ssh-config"]), Some(false));
+        assert_eq!(asked(&["vm", "run", "x"]), None);
+        assert_eq!(asked(&["vm", "start", "x", "--add-ssh-config"]), Some(true));
+        assert_eq!(asked(&["vm", "start", "x", "--no-ssh-config"]), Some(false));
+        assert_eq!(asked(&["vm", "start", "x"]), None);
+        assert!(
+            Cli::try_parse_from(["vm", "run", "x", "--add-ssh-config", "--no-ssh-config"]).is_err()
+        );
     }
 
     /// Every command is reachable, and none of them collides with another over

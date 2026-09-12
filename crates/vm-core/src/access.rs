@@ -56,29 +56,35 @@ fn is_name(text: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
-/// The options both commands share.
+/// The settings both commands share, and the ones an SSH configuration entry holds.
 ///
 /// The instance keeps its own `known_hosts`, so rebuilding a machine never
 /// provokes a warning about the user's, and `IdentitiesOnly` stops an agent
 /// holding many keys from offering all of them and being refused for it.
-fn options(instance: &Instance, directory: &Directory, port: u16) -> Vec<String> {
-    [
-        "-i".to_owned(),
-        directory.key().display().to_string(),
-        "-o".to_owned(),
-        "IdentitiesOnly=yes".to_owned(),
-        "-o".to_owned(),
-        format!("UserKnownHostsFile={}", directory.known_hosts().display()),
-        "-o".to_owned(),
-        "GlobalKnownHostsFile=/dev/null".to_owned(),
-        "-o".to_owned(),
-        "StrictHostKeyChecking=accept-new".to_owned(),
-        "-o".to_owned(),
-        format!("Port={port}"),
-        "-o".to_owned(),
-        format!("User={}", instance.user),
+pub fn settings(
+    instance: &Instance,
+    directory: &Directory,
+    port: u16,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("IdentityFile", directory.key().display().to_string()),
+        ("IdentitiesOnly", "yes".to_owned()),
+        (
+            "UserKnownHostsFile",
+            directory.known_hosts().display().to_string(),
+        ),
+        ("GlobalKnownHostsFile", "/dev/null".to_owned()),
+        ("StrictHostKeyChecking", "accept-new".to_owned()),
+        ("Port", port.to_string()),
+        ("User", instance.user.clone()),
     ]
-    .into()
+}
+
+fn options(instance: &Instance, directory: &Directory, port: u16) -> Vec<String> {
+    settings(instance, directory, port)
+        .into_iter()
+        .flat_map(|(key, value)| ["-o".to_owned(), format!("{key}={value}")])
+        .collect()
 }
 
 /// The arguments for `ssh`, optionally running a command rather than a shell.
@@ -178,6 +184,7 @@ mod tests {
             pid: Some(handle.pid),
             started: Some(handle.started),
             generation: 0,
+            ssh_config: false,
             password: None,
             ports: Vec::new(),
             shares: Vec::new(),
@@ -198,8 +205,8 @@ mod tests {
         let directory = scratch.directory("one");
         let arguments = ssh(&instance("one"), &directory, &[]).unwrap();
         assert_eq!(
-            value(&arguments, "-i", ""),
-            Some(directory.key().display().to_string())
+            value(&arguments, "-o", "IdentityFile="),
+            Some(format!("IdentityFile={}", directory.key().display()))
         );
         assert!(arguments.iter().any(|held| held == "IdentitiesOnly=yes"));
     }

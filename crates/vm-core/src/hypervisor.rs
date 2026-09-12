@@ -444,6 +444,7 @@ mod tests {
             pid: None,
             started: None,
             generation: 0,
+            ssh_config: false,
             password: None,
             ports: Vec::new(),
             shares: Vec::new(),

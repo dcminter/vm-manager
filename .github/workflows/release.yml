@@ -76,6 +76,7 @@ jobs:
           vm --version
           vm images
           man -w vm
+          man -w 5 vm-config
       - uses: actions/upload-artifact@v4
         with:
           name: vm-manager-${{ matrix.distribution }}

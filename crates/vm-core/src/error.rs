@@ -159,6 +159,11 @@ pub enum Error {
     NoGuestAccess {
         name: String,
     },
+    SshHostTaken {
+        name: String,
+        path: PathBuf,
+    },
+    NoHome,
     CopyBetweenGuests,
     CopyWithoutGuest,
     Signal {
@@ -235,6 +240,8 @@ impl Error {
             Self::InstanceStopped { .. } => "instance-stopped",
             Self::InstancePaused { .. } => "instance-paused",
             Self::NoGuestAccess { .. } => "no-guest-access",
+            Self::SshHostTaken { .. } => "ssh-host-taken",
+            Self::NoHome => "no-home",
             Self::CopyBetweenGuests => "copy-between-guests",
             Self::CopyWithoutGuest => "copy-without-guest",
             Self::Launch { .. } => "launch-failed",
@@ -447,6 +454,16 @@ impl fmt::Display for Error {
                 f,
                 "'{name}' has no account of ours to connect to: its image takes no \
                  cloud-init seed, so no key was installed"
+            ),
+            Self::SshHostTaken { name, path } => write!(
+                f,
+                "{} already has a Host entry for '{name}', which the machine's entry would take over; \
+                 choose another --name, or leave out --add-ssh-config",
+                path.display()
+            ),
+            Self::NoHome => write!(
+                f,
+                "HOME is not set, so there is no SSH configuration to add to"
             ),
             Self::CopyBetweenGuests => write!(
                 f,
