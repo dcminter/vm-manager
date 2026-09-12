@@ -2,11 +2,15 @@ pub mod catalogue;
 pub mod config;
 pub mod digest;
 pub mod error;
+pub mod fat;
 pub mod paths;
+pub mod qmp;
 pub mod reference;
+pub mod seed;
 pub mod store;
 pub mod tar;
 pub mod update;
+pub mod value;
 
 pub use error::{Error, Result};
 pub use reference::Reference;

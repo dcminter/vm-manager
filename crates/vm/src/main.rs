@@ -3,7 +3,6 @@ mod progress;
 mod reports;
 mod style;
 mod table;
-mod value;
 
 use clap::{Parser, Subcommand};
 use output::{Format, Report};

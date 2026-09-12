@@ -1,8 +1,8 @@
 use crate::progress::human;
 use crate::style::Style;
 use crate::table;
-use crate::value::Value;
 use vm_core::catalogue::{Artifact, Entry};
+use vm_core::value::Value;
 
 use crate::output::Report;
 
@@ -227,7 +227,7 @@ impl Report for Update {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::value::{to_json, to_yaml};
+    use vm_core::value::{to_json, to_yaml};
 
     fn images() -> Images {
         Images {

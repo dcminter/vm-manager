@@ -59,6 +59,34 @@ pub enum Error {
         url: String,
         path: String,
     },
+    SeedRefused {
+        reason: String,
+    },
+    SeedWrite {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    QmpConnect {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    QmpIo {
+        source: std::io::Error,
+    },
+    /// The far end went away. Expected after `quit`, and after a guest powers
+    /// itself down, so it is not a fault by itself.
+    QmpClosed,
+    QmpTimeout {
+        seconds: u64,
+    },
+    QmpProtocol {
+        reason: String,
+    },
+    QmpCommand {
+        command: String,
+        class: String,
+        description: String,
+    },
 }
 
 impl Error {
@@ -80,11 +108,23 @@ impl Error {
             Self::DigestMismatch { .. } => "digest-mismatch",
             Self::MalformedArchive { .. } => "malformed-archive",
             Self::EmptyCatalogue { .. } => "empty-catalogue",
+            Self::SeedRefused { .. } => "seed-invalid",
+            Self::SeedWrite { .. } => "seed-unwritable",
+            Self::QmpConnect { .. } => "qmp-unreachable",
+            Self::QmpIo { .. } => "qmp-io-error",
+            Self::QmpClosed => "qmp-closed",
+            Self::QmpTimeout { .. } => "qmp-timeout",
+            Self::QmpProtocol { .. } => "qmp-protocol-error",
+            Self::QmpCommand { .. } => "qmp-command-failed",
         }
     }
 }
 
 impl fmt::Display for Error {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per variant; splitting it would only hide the list"
+    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Reference { input, reason } => {
@@ -152,6 +192,33 @@ impl fmt::Display for Error {
                 f,
                 "the archive at {url} holds no catalogue entries under '{path}'"
             ),
+            Self::SeedRefused { reason } => {
+                write!(f, "cannot build the cloud-init seed: {reason}")
+            }
+            Self::SeedWrite { path, source } => {
+                write!(f, "cannot write the seed to {}: {source}", path.display())
+            }
+            Self::QmpConnect { path, source } => write!(
+                f,
+                "cannot reach the monitor socket at {}: {source}",
+                path.display()
+            ),
+            Self::QmpIo { source } => write!(f, "the monitor connection failed: {source}"),
+            Self::QmpClosed => write!(f, "the monitor connection ended"),
+            Self::QmpTimeout { seconds } => {
+                write!(f, "the monitor did not answer within {seconds} seconds")
+            }
+            Self::QmpProtocol { reason } => {
+                write!(f, "the monitor said something unexpected: {reason}")
+            }
+            Self::QmpCommand {
+                command,
+                class,
+                description,
+            } => write!(
+                f,
+                "the monitor refused '{command}' ({class}): {description}"
+            ),
             Self::MissingTool {
                 binary,
                 package,
@@ -170,7 +237,11 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::CatalogueRead { source, .. } | Self::Store { source, .. } => Some(source),
+            Self::CatalogueRead { source, .. }
+            | Self::Store { source, .. }
+            | Self::SeedWrite { source, .. }
+            | Self::QmpConnect { source, .. }
+            | Self::QmpIo { source, .. } => Some(source),
             Self::CatalogueParse { source, .. } => Some(source),
             Self::Download { source, .. } => Some(source.as_ref()),
             _ => None,

@@ -1,7 +1,7 @@
 use crate::style::Style;
-use crate::value::{Value, to_json, to_yaml};
 use clap::ValueEnum;
 use std::io::{self, Write};
+use vm_core::value::{Value, to_json, to_yaml};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Format {
