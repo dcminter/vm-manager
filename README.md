@@ -31,10 +31,21 @@ cargo run -p vm -- images
 | `vm images` | List the images in the local catalogue |
 | `vm inspect <image>` | Show where an image comes from and how its guest is reached |
 | `vm pull <image>` | Fetch an image into the local store |
+| `vm update` | Refresh the local catalogue from its remote source |
 
 An image is named `repository:tag`, as in `debian:trixie`. The tag may be
 omitted, in which case `latest` is used, and a specific build may be pinned by
 appending `@sha512:...`.
+
+## Configuration
+
+`$XDG_CONFIG_HOME/vm/config.toml` is optional. It holds `catalogue_url`, the
+archive `vm update` fetches, and `catalogue_path`, the directory within that
+archive holding the entries. Point both at an internal server to run a curated
+catalogue.
+
+A refreshed catalogue is staged and parsed before it replaces the one in use,
+so an unreachable or malformed source leaves the working catalogue untouched.
 
 ## Output
 

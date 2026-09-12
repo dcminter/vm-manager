@@ -197,6 +197,33 @@ impl Report for Pull {
     }
 }
 
+pub struct Update {
+    pub url: String,
+    pub path: String,
+    pub files: usize,
+    pub entries: usize,
+}
+
+impl Report for Update {
+    fn to_value(&self) -> Value {
+        Value::map([
+            ("url", Value::string(self.url.clone())),
+            ("path", Value::string(self.path.clone())),
+            ("files", Value::Integer(self.files as u64)),
+            ("entries", Value::Integer(self.entries as u64)),
+        ])
+    }
+
+    fn render_text(&self, style: Style) -> Vec<String> {
+        vec![format!(
+            "Updated from {} ({} entries in {} files)",
+            style.name(&self.url),
+            self.entries,
+            self.files
+        )]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,6 +325,21 @@ mod tests {
             "{lines:?}"
         );
         assert!(to_json(&report.to_value()).contains(r#""aliases": []"#));
+    }
+
+    #[test]
+    fn an_update_counts_entries_and_files() {
+        let report = Update {
+            url: "https://example.test/c.tar.gz".to_owned(),
+            path: "/home/x/.local/share/vm/catalogue".to_owned(),
+            files: 4,
+            entries: 3,
+        };
+        let text = to_json(&report.to_value());
+        assert!(text.contains(r#""entries": 3"#), "{text}");
+        assert!(text.contains(r#""files": 4"#), "{text}");
+        let lines = report.render_text(Style::plain());
+        assert!(lines[0].contains("3 entries in 4 files"), "{lines:?}");
     }
 
     #[test]

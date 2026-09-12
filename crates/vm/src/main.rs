@@ -53,6 +53,8 @@ enum Command {
         /// Image reference, such as debian:trixie
         reference: String,
     },
+    /// Refresh the local catalogue from its remote source
+    Update,
 }
 
 fn main() -> ExitCode {
@@ -89,7 +91,22 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
         Command::Pull { reference } => Ok(Box::new(pull(
             &catalogue, &store, style, cli.output, reference,
         )?)),
+        Command::Update => Ok(Box::new(update()?)),
     }
+}
+
+fn update() -> vm_core::Result<reports::Update> {
+    let config = vm_core::config::Config::load()?;
+    let destination = paths::data_directory()
+        .ok_or(vm_core::Error::NoImageStore)?
+        .join("catalogue");
+    let updated = vm_core::update::run(&config, &destination, &vm_core::store::http_agent())?;
+    Ok(reports::Update {
+        url: updated.url,
+        path: updated.path.display().to_string(),
+        files: updated.files,
+        entries: updated.entries,
+    })
 }
 
 fn images(catalogue: &Catalogue, store: &Store, all_architectures: bool) -> reports::Images {

@@ -756,6 +756,7 @@ name = "vm-core"
 version = "0.1.0"
 dependencies = [
  "basic-toml",
+ "flate2",
  "serde",
  "sha2",
  "ureq",

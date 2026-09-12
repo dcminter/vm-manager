@@ -1,9 +1,12 @@
 pub mod catalogue;
+pub mod config;
 pub mod digest;
 pub mod error;
 pub mod paths;
 pub mod reference;
 pub mod store;
+pub mod tar;
+pub mod update;
 
 pub use error::{Error, Result};
 pub use reference::Reference;

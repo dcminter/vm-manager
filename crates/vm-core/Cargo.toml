@@ -12,6 +12,7 @@ repository.workspace = true
 serde.workspace = true
 basic-toml.workspace = true
 sha2.workspace = true
+flate2 = "1"
 ureq.workspace = true
 
 [lints]

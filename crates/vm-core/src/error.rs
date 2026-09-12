@@ -51,6 +51,14 @@ pub enum Error {
         expected: String,
         actual: String,
     },
+    MalformedArchive {
+        url: String,
+        reason: String,
+    },
+    EmptyCatalogue {
+        url: String,
+        path: String,
+    },
 }
 
 impl Error {
@@ -70,6 +78,8 @@ impl Error {
             Self::Download { .. } => "download-failed",
             Self::HttpStatus { .. } => "http-error",
             Self::DigestMismatch { .. } => "digest-mismatch",
+            Self::MalformedArchive { .. } => "malformed-archive",
+            Self::EmptyCatalogue { .. } => "empty-catalogue",
         }
     }
 }
@@ -134,6 +144,13 @@ impl fmt::Display for Error {
                 "{url} does not match the catalogue digest.\n  expected {expected}\n  \
                  received {actual}\nThe image was not kept; run 'vm update' in case the \
                  catalogue is stale."
+            ),
+            Self::MalformedArchive { url, reason } => {
+                write!(f, "the archive at {url} is not readable: {reason}")
+            }
+            Self::EmptyCatalogue { url, path } => write!(
+                f,
+                "the archive at {url} holds no catalogue entries under '{path}'"
             ),
             Self::MissingTool {
                 binary,
