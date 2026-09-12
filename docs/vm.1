@@ -278,6 +278,26 @@ and
 .B user
 from
 .BR "vm ps \-\-format json" .
+.SH SHELL COMPLETION
+Completion for
+.BR bash ,
+.B zsh
+and
+.B fish
+is installed with the package. It offers machine names fitting the command,
+image references from the catalogue, held images for
+.BR "vm rmi" ,
+and machine settings. Each shell script asks
+.B vm
+for its completions, so it loads with
+.RS
+.nf
+source <(COMPLETE=bash vm)
+source <(COMPLETE=zsh vm)
+COMPLETE=fish vm | source
+.fi
+.RE
+for bash, zsh and fish respectively.
 .SH FILES
 .TP
 .I $XDG_CONFIG_HOME/vm/config.toml
@@ -314,6 +334,11 @@ bounds the length of a socket path.
 .TP
 .B VM_FORMAT
 The default output format.
+.TP
+.B COMPLETE
+Set to a shell name, makes
+.B vm
+print completion for that shell instead of running a command.
 .TP
 .B VM_CATALOGUE
 Overrides the catalogue directory.

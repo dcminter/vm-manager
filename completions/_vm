@@ -1,0 +1,4 @@
+#compdef vm
+# Asks vm for its completion script, so the script always matches the installed vm.
+source <(COMPLETE=zsh vm)
+_clap_dynamic_completer_vm "$@"

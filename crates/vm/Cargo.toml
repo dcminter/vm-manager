@@ -11,6 +11,7 @@ repository.workspace = true
 [dependencies]
 vm-core = { path = "../vm-core" }
 clap.workspace = true
+clap_complete.workspace = true
 rustix = { version = "1", features = ["event", "termios"] }
 
 [lints]

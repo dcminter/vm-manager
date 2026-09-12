@@ -18,6 +18,8 @@ pub enum Firmware {
 }
 
 impl Firmware {
+    pub const ALL: [Self; 2] = [Self::Bios, Self::Uefi];
+
     pub const fn is_default(&self) -> bool {
         matches!(self, Self::Bios)
     }
@@ -56,6 +58,8 @@ pub enum Chipset {
 }
 
 impl Chipset {
+    pub const ALL: [Self; 2] = [Self::Q35, Self::Pc];
+
     pub const fn is_default(&self) -> bool {
         matches!(self, Self::Q35)
     }
@@ -95,6 +99,8 @@ pub enum Disk {
 }
 
 impl Disk {
+    pub const ALL: [Self; 3] = [Self::Virtio, Self::Ide, Self::Sata];
+
     pub const fn is_default(&self) -> bool {
         matches!(self, Self::Virtio)
     }
@@ -243,6 +249,39 @@ mod tests {
 
     use super::*;
     use std::fs;
+
+    /// A new variant breaks these matches, as a reminder to add it to its list.
+    #[test]
+    fn every_setting_is_listed_and_parses_back_from_its_name() {
+        for firmware in Firmware::ALL {
+            match firmware {
+                Firmware::Bios | Firmware::Uefi => {}
+            }
+            assert_eq!(firmware.name().parse::<Firmware>().unwrap(), firmware);
+        }
+        for chipset in Chipset::ALL {
+            match chipset {
+                Chipset::Q35 | Chipset::Pc => {}
+            }
+            assert_eq!(chipset.name().parse::<Chipset>().unwrap(), chipset);
+        }
+        for disk in Disk::ALL {
+            match disk {
+                Disk::Virtio | Disk::Ide | Disk::Sata => {}
+            }
+            assert_eq!(disk.name().parse::<Disk>().unwrap(), disk);
+        }
+        let distinct = |names: Vec<&str>| {
+            names
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                == names.len()
+        };
+        assert!(distinct(Firmware::ALL.map(Firmware::name).to_vec()));
+        assert!(distinct(Chipset::ALL.map(Chipset::name).to_vec()));
+        assert!(distinct(Disk::ALL.map(Disk::name).to_vec()));
+    }
 
     struct Scratch(PathBuf);
 

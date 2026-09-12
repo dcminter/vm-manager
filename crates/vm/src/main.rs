@@ -1,3 +1,4 @@
+mod completion;
 mod console;
 mod machines;
 mod output;
@@ -10,6 +11,7 @@ mod terminal;
 mod units;
 
 use clap::{Parser, Subcommand};
+use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
 use output::{Format, Report};
 use std::process::ExitCode;
 use style::Style;
@@ -49,11 +51,13 @@ enum Command {
     /// Show what an image reference resolves to
     Inspect {
         /// Image reference, such as debian:trixie
+        #[arg(add = ArgValueCandidates::new(completion::catalogue_image))]
         reference: String,
     },
     /// Fetch an image into the local store
     Pull {
         /// Image reference, such as debian:trixie
+        #[arg(add = ArgValueCandidates::new(completion::catalogue_image))]
         reference: String,
     },
     /// Refresh the local catalogue from its remote source
@@ -61,6 +65,7 @@ enum Command {
     /// Create and start a virtual machine
     Run {
         /// Image reference, such as debian:trixie
+        #[arg(add = ArgValueCandidates::new(completion::catalogue_image))]
         reference: String,
         /// Name for the instance; one is invented if this is omitted
         #[arg(long)]
@@ -87,16 +92,16 @@ enum Command {
         #[arg(long, value_enum)]
         pull: Option<machines::Pull>,
         /// Firmware, bios or uefi, instead of what the image asks for
-        #[arg(long, value_parser = machines::parse_firmware)]
+        #[arg(long, value_parser = machines::parse_firmware, add = ArgValueCandidates::new(completion::firmware))]
         firmware: Option<vm_core::machine::Firmware>,
         /// QEMU CPU model instead of what the image asks for, such as Penryn,+avx
         #[arg(long, value_parser = machines::parse_cpu)]
         cpu: Option<String>,
         /// Machine type, q35 or pc, instead of what the image asks for
-        #[arg(long, value_parser = machines::parse_machine)]
+        #[arg(long, value_parser = machines::parse_machine, add = ArgValueCandidates::new(completion::chipset))]
         machine: Option<vm_core::machine::Chipset>,
         /// Disk controller, virtio, ide (pc only) or sata (q35 only), instead of what the image asks for
-        #[arg(long, value_parser = machines::parse_disk)]
+        #[arg(long, value_parser = machines::parse_disk, add = ArgValueCandidates::new(completion::disk))]
         disk: Option<vm_core::machine::Disk>,
         /// Ask for a password the account can log in with at the console
         #[arg(long)]
@@ -105,6 +110,7 @@ enum Command {
     /// Start an instance that is not running, changing how it is set up
     Start {
         /// Instance name
+        #[arg(add = ArgValueCandidates::new(completion::stopped_instance))]
         name: String,
         /// Memory, in mebibytes unless suffixed with M or G
         #[arg(long, short, value_parser = machines::parse_memory)]
@@ -133,16 +139,16 @@ enum Command {
         #[arg(long)]
         disk_size: Option<String>,
         /// Firmware, bios or uefi; a disk prepared for only the other will not boot
-        #[arg(long, value_parser = machines::parse_firmware)]
+        #[arg(long, value_parser = machines::parse_firmware, add = ArgValueCandidates::new(completion::firmware))]
         firmware: Option<vm_core::machine::Firmware>,
         /// QEMU CPU model, such as Penryn,+avx
         #[arg(long, value_parser = machines::parse_cpu)]
         cpu: Option<String>,
         /// Machine type, q35 or pc
-        #[arg(long, value_parser = machines::parse_machine)]
+        #[arg(long, value_parser = machines::parse_machine, add = ArgValueCandidates::new(completion::chipset))]
         machine: Option<vm_core::machine::Chipset>,
         /// Disk controller, virtio, ide (pc only) or sata (q35 only); a guest without its driver will not boot
-        #[arg(long, value_parser = machines::parse_disk)]
+        #[arg(long, value_parser = machines::parse_disk, add = ArgValueCandidates::new(completion::disk))]
         disk: Option<vm_core::machine::Disk>,
         /// Ask for a new console password for the account
         #[arg(long, conflicts_with = "no_password")]
@@ -154,6 +160,7 @@ enum Command {
     /// Open a shell on an instance, or run a command in it
     Ssh {
         /// Instance name
+        #[arg(add = ArgValueCandidates::new(completion::running_instance))]
         name: String,
         /// Command to run instead of a shell
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -162,8 +169,10 @@ enum Command {
     /// Copy files to or from an instance, naming one side as name:path
     Cp {
         /// Source, as a path or name:path
+        #[arg(add = ArgValueCompleter::new(completion::copy_side))]
         from: String,
         /// Destination, as a path or name:path
+        #[arg(add = ArgValueCompleter::new(completion::copy_side))]
         to: String,
     },
     /// List instances
@@ -178,6 +187,7 @@ enum Command {
     /// Shut an instance down
     Stop {
         /// Instance name
+        #[arg(add = ArgValueCandidates::new(completion::running_instance))]
         name: String,
         /// Seconds to wait for the guest before insisting
         #[arg(long, short, default_value_t = 30)]
@@ -186,21 +196,25 @@ enum Command {
     /// Stop an instance's processors without telling the guest
     Pause {
         /// Instance name
+        #[arg(add = ArgValueCandidates::new(completion::running_instance))]
         name: String,
     },
     /// Let a paused instance carry on
     Resume {
         /// Instance name
+        #[arg(add = ArgValueCandidates::new(completion::running_instance))]
         name: String,
     },
     /// Stop an instance without telling the guest
     Kill {
         /// Instance name
+        #[arg(add = ArgValueCandidates::new(completion::running_instance))]
         name: String,
     },
     /// Save an instance's disk as a new image
     Clone {
         /// Instance name
+        #[arg(add = ArgValueCandidates::new(completion::any_instance))]
         name: String,
         /// Name for the new image, as repository:tag
         image: String,
@@ -211,6 +225,7 @@ enum Command {
     /// Show an instance's console
     Logs {
         /// Instance name
+        #[arg(add = ArgValueCandidates::new(completion::any_instance))]
         name: String,
         /// Write new output as it arrives, until the instance stops
         #[arg(long, short)]
@@ -222,23 +237,28 @@ enum Command {
     /// Attach this terminal to an instance's serial console; Ctrl-] detaches
     Console {
         /// Instance name
+        #[arg(add = ArgValueCandidates::new(completion::running_instance))]
         name: String,
     },
     /// Open a VNC viewer on an instance's screen
     Screen {
         /// Instance name
+        #[arg(add = ArgValueCandidates::new(completion::running_instance))]
         name: String,
     },
     /// Save a picture of an instance's screen as PNG
     Screenshot {
         /// Instance name
+        #[arg(add = ArgValueCandidates::new(completion::running_instance))]
         name: String,
         /// Where to save it; NAME.png in this directory if omitted
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
         file: Option<std::path::PathBuf>,
     },
     /// Delete an image from the local store
     Rmi {
         /// Image reference, such as debian:trixie
+        #[arg(add = ArgValueCandidates::new(completion::held_image))]
         reference: String,
         /// Delete it even though instances are built on it
         #[arg(long, short)]
@@ -247,6 +267,7 @@ enum Command {
     /// Delete an instance and its disk
     Rm {
         /// Instance name
+        #[arg(add = ArgValueCandidates::new(completion::any_instance))]
         name: String,
         /// Remove it even if it is running
         #[arg(long, short)]
@@ -255,6 +276,7 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    clap_complete::CompleteEnv::with_factory(<Cli as clap::CommandFactory>::command).complete();
     let cli = Cli::parse();
     let style = if cli.format.is_text() {
         Style::for_stdout()

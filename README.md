@@ -173,6 +173,22 @@ image rather than a copy of it, so an image still in use is refused unless
 Images that carry no cloud-init still run; they simply take no key and no user,
 which `vm run` says at the time rather than leaving to be discovered.
 
+## Shell completion
+
+The package installs completion for bash, zsh and fish. It completes commands
+and flags, the names of machines a command can act on (`vm start` offers the
+stopped ones, `vm ssh` the running ones), image references from the catalogue,
+the images held for `vm rmi`, and machine settings such as `--firmware`.
+
+Without the package, and with `vm` on the `PATH`, load it into the current shell
+with one of:
+
+```bash
+source <(COMPLETE=bash vm)
+source <(COMPLETE=zsh vm)
+COMPLETE=fish vm | source
+```
+
 ## Configuration
 
 `$XDG_CONFIG_HOME/vm/config.toml` is optional. It holds `catalogue_url`, the
