@@ -1,7 +1,7 @@
 # VM Manager
 
 Create and manage QEMU virtual machines from prebuilt OS images, with a command
-set modelled on Docker.
+set modelled on Docker and various cloud clients.
 
 ```bash
 vm images
@@ -40,6 +40,7 @@ cargo run -p vm -- images
 | `vm ps` | List machines; `--all` includes those not running |
 | `vm stop <name>` | Ask the guest to shut down, then insist |
 | `vm kill <name>` | Stop a machine without telling the guest |
+| `vm commit <name> <image>` | Save a machine's disk as a new image |
 | `vm rm <name>` | Delete a machine and its disk |
 
 An image is named `repository:tag`, as in `debian:trixie`. The tag may be
@@ -63,6 +64,16 @@ so that rebuilding one never touches yours.
 Everything a machine owns — its disk, its key, its console log and its record —
 lives in one directory under `$XDG_STATE_HOME/vm/instances`, and `vm rm` takes
 the lot.
+
+`-v /host/path:/guest/path` shares a directory over virtiofs. Each share is
+served by a `virtiofsd` of its own, started before the machine and reaped with
+it.
+
+`vm commit` flattens a machine's disk into a standalone image in the store and
+gives it a name. A running guest is paused for the duration, because a disk
+taken from under one is crash-consistent at best; `--force` skips the pause and
+says so. Committed images are listed by `vm images` alongside the catalogue's
+own, and `vm update` does not disturb them.
 
 Images that carry no cloud-init still run; they simply take no key and no user,
 which `vm run` says at the time rather than leaving to be discovered.
@@ -89,6 +100,18 @@ requested format too, carrying a stable `kind` alongside the message.
 Fetched images are verified against the digest the catalogue records and are
 stored under `$XDG_DATA_HOME/vm/images`, addressed by that digest, so tags
 naming the same build share one file.
+
+## Releases
+
+`scripts/release` walks through cutting one: it runs the checks, asks for the
+version and the release notes, asks whether the things a workflow cannot test
+have been tested by hand, and pushes the tag. The tag starts a workflow that
+builds a package for Debian Trixie and one for Ubuntu 24.04 and attaches both
+to the release.
+
+`scripts/package <trixie|noble> <version>` builds one locally. It checks that
+every dependency it claims exists in the distribution it is building for, so a
+package `apt` would refuse fails the build rather than a user's install.
 
 ## Licence
 

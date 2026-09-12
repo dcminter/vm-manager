@@ -73,6 +73,9 @@ enum Command {
         /// Account to create in the guest
         #[arg(long, default_value = "vm", value_parser = machines::parse_user)]
         user: String,
+        /// Share a host directory with the guest, as host:guest
+        #[arg(long, short = 'v', value_parser = machines::parse_share)]
+        volume: Vec<vm_core::instance::Share>,
         /// Grow the disk to this size, such as 40G
         #[arg(long)]
         disk_size: Option<String>,
@@ -118,6 +121,16 @@ enum Command {
     Kill {
         /// Instance name
         name: String,
+    },
+    /// Save an instance's disk as a new image
+    Commit {
+        /// Instance name
+        name: String,
+        /// Name for the new image, as repository:tag
+        image: String,
+        /// Commit without pausing a running guest
+        #[arg(long, short)]
+        force: bool,
     },
     /// Delete an instance and its disk
     Rm {
@@ -182,9 +195,12 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
             )?));
         }
         Command::Rm { name, force } => return Ok(Box::new(machines::remove(name, *force)?)),
+        Command::Commit { name, image, force } => {
+            return Ok(Box::new(machines::commit(name, image, *force)?));
+        }
         _ => {}
     }
-    let catalogue = Catalogue::load(&paths::catalogue_directory())?;
+    let catalogue = Catalogue::load_layered(&catalogue_layers())?;
     let store = Store::discover()?;
     match &cli.command {
         Command::Images { all_architectures } => {
@@ -202,6 +218,7 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
             cpus,
             publish,
             user,
+            volume,
             disk_size,
             pull,
         } => Ok(Box::new(machines::run(
@@ -214,6 +231,7 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
                 cpus: *cpus,
                 ports: publish.clone(),
                 user: user.clone(),
+                shares: volume.clone(),
                 disk_size: disk_size.clone(),
                 pull: *pull,
             },
@@ -226,8 +244,17 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
         | Command::Cp { .. }
         | Command::Stop { .. }
         | Command::Kill { .. }
+        | Command::Commit { .. }
         | Command::Rm { .. } => unreachable!("handled above"),
     }
+}
+
+/// The catalogue as read: what was fetched, with anything committed here
+/// layered over it.
+fn catalogue_layers() -> Vec<std::path::PathBuf> {
+    let mut layers = vec![paths::catalogue_directory()];
+    layers.extend(paths::local_catalogue_directory());
+    layers
 }
 
 fn update() -> vm_core::Result<reports::Update> {
@@ -292,7 +319,9 @@ fn pull(
     let (entry, artifact) = catalogue.resolve(&reference, host_architecture())?;
     let mut bar = progress::Bar::new("  ", format.is_text());
     if format.is_text() && !store.contains(&artifact.digest) {
-        eprintln!("Fetching {}", style.name(&artifact.url));
+        if let Some(url) = &artifact.url {
+            eprintln!("Fetching {}", style.name(url));
+        }
     }
     let outcome = store.pull(artifact, &vm_core::store::http_agent(), &mut |update| {
         bar.update(update);

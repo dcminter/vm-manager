@@ -70,7 +70,7 @@ pub struct Inspect {
     pub description: String,
     pub arch: String,
     pub format: String,
-    pub url: String,
+    pub url: Option<String>,
     pub digest: String,
     pub seedable: bool,
     pub held: bool,
@@ -112,7 +112,7 @@ impl Report for Inspect {
             ("description", Value::string(self.description.clone())),
             ("arch", Value::string(self.arch.clone())),
             ("format", Value::string(self.format.clone())),
-            ("url", Value::string(self.url.clone())),
+            ("url", self.url.clone().map_or(Value::Null, Value::String)),
             ("digest", Value::string(self.digest.clone())),
             ("seedable", Value::Bool(self.seedable)),
             ("held", Value::Bool(self.held)),
@@ -131,7 +131,12 @@ impl Report for Inspect {
         fields.extend([
             ("Architecture", self.arch.clone()),
             ("Format", self.format.clone()),
-            ("URL", self.url.clone()),
+            (
+                "Source",
+                self.url
+                    .clone()
+                    .unwrap_or_else(|| "committed here; nowhere to fetch it from".to_owned()),
+            ),
             ("Digest", self.digest.clone()),
             ("Guest access", self.access().to_owned()),
             ("Pulled", if self.held { "yes" } else { "no" }.to_owned()),
@@ -533,6 +538,56 @@ impl Report for Stopped {
     }
 }
 
+pub struct Committed {
+    pub source: String,
+    pub name: String,
+    pub tag: String,
+    pub arch: String,
+    pub digest: String,
+    pub size: u64,
+    pub consistency: crate::machines::Consistency,
+}
+
+impl Committed {
+    const fn consistency(&self) -> &'static str {
+        match self.consistency {
+            crate::machines::Consistency::Stopped => "stopped",
+            crate::machines::Consistency::Paused => "paused",
+            crate::machines::Consistency::Running => "running",
+        }
+    }
+}
+
+impl Report for Committed {
+    fn to_value(&self) -> Value {
+        Value::map([
+            ("source", Value::string(self.source.clone())),
+            ("name", Value::string(self.name.clone())),
+            ("tag", Value::string(self.tag.clone())),
+            ("arch", Value::string(self.arch.clone())),
+            ("digest", Value::string(self.digest.clone())),
+            ("size", Value::Integer(self.size)),
+            ("consistency", Value::string(self.consistency())),
+        ])
+    }
+
+    fn render_text(&self, style: Style) -> Vec<String> {
+        let mut lines = vec![format!(
+            "Committed {} as {} ({})",
+            style.name(&self.source),
+            style.name(&format!("{}:{}", self.name, self.tag)),
+            human(self.size)
+        )];
+        if self.consistency == crate::machines::Consistency::Running {
+            lines.push(style.dim(
+                "  Taken from a running guest: anything it had not yet written is not in \
+                 the image.",
+            ));
+        }
+        lines
+    }
+}
+
 pub struct Removed {
     pub name: String,
 }
@@ -636,7 +691,7 @@ mod tests {
             description: "Debian 13".to_owned(),
             arch: "amd64".to_owned(),
             format: "qcow2".to_owned(),
-            url: "https://example.test/a.qcow2".to_owned(),
+            url: Some("https://example.test/a.qcow2".to_owned()),
             digest: "sha512:abc".to_owned(),
             seedable: false,
             held: false,
@@ -674,7 +729,7 @@ mod tests {
             description: String::new(),
             arch: "amd64".to_owned(),
             format: "qcow2".to_owned(),
-            url: String::new(),
+            url: None,
             digest: String::new(),
             seedable: true,
             held: false,

@@ -1,5 +1,6 @@
 pub mod access;
 pub mod catalogue;
+pub mod commit;
 pub mod config;
 pub mod digest;
 pub mod error;

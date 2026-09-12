@@ -35,6 +35,15 @@ impl Algorithm {
 }
 
 impl Digest {
+    /// Names bytes that have already been hashed, for an image made here
+    /// rather than fetched from somewhere that published a sum for it.
+    pub fn new(algorithm: Algorithm, hex: &str) -> Self {
+        Self {
+            algorithm,
+            hex: hex.to_ascii_lowercase(),
+        }
+    }
+
     pub const fn algorithm(&self) -> Algorithm {
         self.algorithm
     }

@@ -21,12 +21,32 @@ pub struct Port {
 }
 
 /// A host directory shared into the guest over virtiofs.
+///
+/// Each share is served by a `virtiofsd` of its own, so each carries the
+/// process serving it. They are children to reap alongside the hypervisor;
+/// left behind they would hold the share open against a machine that is gone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Share {
     pub tag: String,
     pub source: PathBuf,
     pub target: String,
+    pub pid: Option<u32>,
+    pub started: Option<u64>,
+}
+
+impl Share {
+    pub const fn handle(&self) -> Option<Handle> {
+        match (self.pid, self.started) {
+            (Some(pid), Some(started)) => Some(Handle { pid, started }),
+            _ => None,
+        }
+    }
+
+    pub const fn forget_process(&mut self) {
+        self.pid = None;
+        self.started = None;
+    }
 }
 
 /// What an instance is, as written to `instance.toml`.
@@ -242,6 +262,20 @@ impl Directory {
         self.path.join("id_ed25519.pub")
     }
 
+    /// Where the `virtiofsd` for one share listens. In the runtime directory
+    /// for the same reason the monitor is: the kernel's limit on the length
+    /// of a socket path does not care that this one is ours.
+    pub fn share_socket(&self, index: usize) -> PathBuf {
+        let mut path = self.monitor.clone();
+        path.set_extension(format!("fs{index}"));
+        path
+    }
+
+    /// Where that `virtiofsd` writes its complaints.
+    pub fn share_log(&self, index: usize) -> PathBuf {
+        self.path.join(format!("virtiofsd-{index}.log"))
+    }
+
     /// A host-key file of this instance's own, so that rebuilding a machine
     /// never provokes a warning about the user's own `known_hosts`.
     pub fn known_hosts(&self) -> PathBuf {
@@ -281,10 +315,37 @@ impl Directory {
         })
     }
 
-    /// Removes the instance, monitor socket included. The caller is
+    /// Removes everything this instance owns in the runtime directory: the
+    /// monitor socket, one socket per share, and the pid file `virtiofsd`
+    /// writes beside its own and leaves behind when it exits.
+    ///
+    /// They all begin with the same short identifier, so this is a sweep
+    /// rather than a count that would have to be kept in step with the record
+    /// and would miss anything a later version adds.
+    pub fn clear_runtime(&self) {
+        let (Some(parent), Some(stem)) = (self.monitor.parent(), self.monitor.file_stem()) else {
+            return;
+        };
+        let mut prefix = stem.to_os_string();
+        prefix.push(".");
+        let Ok(entries) = fs::read_dir(parent) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .as_encoded_bytes()
+                .starts_with(prefix.as_encoded_bytes())
+            {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    /// Removes the instance, runtime sockets included. The caller is
     /// responsible for having stopped it first.
     pub fn remove(&self) -> Result<()> {
-        let _ = fs::remove_file(&self.monitor);
+        self.clear_runtime();
         fs::remove_dir_all(&self.path).map_err(|source| Error::State {
             path: self.path.clone(),
             action: "remove the instance directory",
@@ -488,6 +549,8 @@ mod tests {
             tag: "work".to_owned(),
             source: PathBuf::from("/home/x/work"),
             target: "/mnt/work".to_owned(),
+            pid: None,
+            started: None,
         });
         directory.write(&held).unwrap();
         assert_eq!(directory.read().unwrap(), held);
@@ -507,6 +570,8 @@ mod tests {
             tag: "work".to_owned(),
             source: PathBuf::from("/home/x/work"),
             target: "/mnt/work".to_owned(),
+            pid: None,
+            started: None,
         };
         for (index, (ports, shares)) in [
             (vec![], vec![]),
@@ -587,6 +652,35 @@ mod tests {
         assert!(!directory.monitor().exists());
     }
 
+    /// `virtiofsd` writes a pid file beside its socket and leaves it there, so
+    /// removing the socket alone would fill the runtime directory with the
+    /// remains of every machine that ever had a share.
+    #[test]
+    fn removing_an_instance_takes_the_share_sockets_and_what_they_leave_behind() {
+        let scratch = Scratch::new("runtime");
+        let instances = scratch.instances();
+        let directory = instances.create("one").unwrap();
+        let runtime = directory.monitor().parent().unwrap().to_owned();
+        fs::create_dir_all(&runtime).unwrap();
+        fs::write(directory.monitor(), b"").unwrap();
+        for index in 0..2 {
+            let socket = directory.share_socket(index);
+            fs::write(&socket, b"").unwrap();
+            fs::write(format!("{}.pid", socket.display()), b"1").unwrap();
+        }
+        // Another machine's files, which are none of this one's business.
+        let stranger = runtime.join("ffffffffffffffff.sock");
+        fs::write(&stranger, b"").unwrap();
+        directory.remove().unwrap();
+        assert!(!directory.share_socket(0).exists());
+        assert!(!directory.share_socket(1).exists());
+        assert!(
+            !PathBuf::from(format!("{}.pid", directory.share_socket(0).display())).exists(),
+            "a pid file was left behind"
+        );
+        assert!(stranger.exists(), "another machine's socket was removed");
+    }
+
     /// The reason the socket does not live in the instance directory: this
     /// path would be well past the kernel's limit if it did.
     #[test]
@@ -605,6 +699,40 @@ mod tests {
             directory.path().as_os_str().len() > crate::qmp::MAX_SOCKET_PATH,
             "this test proves nothing unless the instance path is over the limit"
         );
+    }
+
+    #[test]
+    fn each_share_has_a_socket_of_its_own_inside_the_kernels_limit() {
+        let instances = Instances::at(
+            "/home/somebody-with-a-long-name/.local/state/vm/instances",
+            "/run/user/1000/vm",
+        );
+        let directory = instances.directory(&"a".repeat(63));
+        assert_ne!(directory.share_socket(0), directory.share_socket(1));
+        assert_ne!(directory.share_socket(0), directory.monitor());
+        for index in 0..10 {
+            assert!(
+                directory.share_socket(index).as_os_str().len() <= crate::qmp::MAX_SOCKET_PATH,
+                "{} is too long",
+                directory.share_socket(index).display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_share_with_no_process_has_no_handle() {
+        let mut share = Share {
+            tag: "work".to_owned(),
+            source: PathBuf::from("/home/x"),
+            target: "/mnt/work".to_owned(),
+            pid: Some(1),
+            started: None,
+        };
+        assert!(share.handle().is_none());
+        share.started = Some(2);
+        assert_eq!(share.handle().map(|held| held.pid), Some(1));
+        share.forget_process();
+        assert!(share.handle().is_none());
     }
 
     #[test]
@@ -699,6 +827,8 @@ mod tests {
             tag: "work".to_owned(),
             source: PathBuf::from("/home/x"),
             target: "/mnt/work".to_owned(),
+            pid: None,
+            started: None,
         });
         let seed = seed_for(&held, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKq7YQ== vm");
         assert_eq!(seed.hostname, "demo");

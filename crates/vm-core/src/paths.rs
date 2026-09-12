@@ -80,6 +80,17 @@ fn user_id() -> u32 {
     std::fs::metadata("/proc/self").map_or(0, |data| data.uid())
 }
 
+/// Where `vm commit` writes entries for images made here. Kept apart from the
+/// fetched catalogue, which `vm update` replaces wholesale and would otherwise
+/// take local images with it.
+pub fn local_catalogue_directory_in(environment: &impl Environment) -> Option<PathBuf> {
+    data_directory_in(environment).map(|path| path.join("local"))
+}
+
+pub fn local_catalogue_directory() -> Option<PathBuf> {
+    local_catalogue_directory_in(&SystemEnvironment)
+}
+
 pub fn instances_directory_in(environment: &impl Environment) -> Option<PathBuf> {
     state_directory_in(environment).map(|path| path.join("instances"))
 }

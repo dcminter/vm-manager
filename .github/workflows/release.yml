@@ -1,0 +1,104 @@
+name: Release
+
+# Only a tag builds a release. Pushes to main do not, by design: the checks
+# that matter here are the ones `scripts/release` runs before it tags.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  # Everything that can be checked without booting a machine. Nothing that
+  # boots one runs here; `scripts/release` asks for that to be done by hand.
+  test:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - name: Install the build environment
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git openssh-client qemu-utils
+      - uses: actions/checkout@v4
+      - name: Install the toolchain
+        # Neither distribution ships a Rust new enough for the 2024 edition,
+        # so the toolchain comes from rustup rather than from the archive.
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable --component clippy,rustfmt
+          echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Lints
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo test --locked
+
+  package:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      # One failing distribution should not hide the state of the other.
+      fail-fast: false
+      matrix:
+        include:
+          - distribution: trixie
+            container: debian:trixie
+          - distribution: noble
+            container: ubuntu:24.04
+    container: ${{ matrix.container }}
+    steps:
+      - name: Install the build environment
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates curl git dpkg-dev lintian
+      - uses: actions/checkout@v4
+      - name: Install the toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+      - name: Build the package
+        # The script checks that every dependency it claims exists in this
+        # distribution, so a package apt would refuse fails the build here.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          ./scripts/package "${{ matrix.distribution }}" "$version" packages
+      - name: Check it installs
+        # Building a package proves less than installing one. The dependencies
+        # come with it, so this also proves they resolve.
+        run: |
+          apt-get install -y ./packages/*.deb
+          vm --version
+          vm images
+          man -w vm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vm-manager-${{ matrix.distribution }}
+          path: packages/*.deb
+          if-no-files-found: error
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: packages
+          merge-multiple: true
+      - name: Attach the packages to the release
+        # The release itself is created as a draft by `scripts/release`, so
+        # this adds to what is already there rather than announcing anything.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" packages/*.deb --clobber \
+            --repo "$GITHUB_REPOSITORY" \
+            || gh release create "$GITHUB_REF_NAME" packages/*.deb \
+                 --repo "$GITHUB_REPOSITORY" \
+                 --title "${GITHUB_REF_NAME#v}" \
+                 --generate-notes --draft

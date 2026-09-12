@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+#
+# Builds a binary .deb for one distribution.
+#
+#   scripts/package <trixie|noble> <version> [output directory]
+#
+# A staged tree and dpkg-deb rather than debhelper: dh-cargo expects the
+# distribution's own packaged crates, and this tree needs a Rust newer than
+# either distribution ships. dpkg-deb is the same native tooling one layer
+# down, and what it produces is a package either can install.
+
+set -euo pipefail
+
+distribution="${1:?usage: package <trixie|noble> <version> [outdir]}"
+version="${2:?usage: package <trixie|noble> <version> [outdir]}"
+outdir="${3:-target/packages}"
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$here"
+
+# Dependencies differ between the two. virtiofsd is its own package on Trixie;
+# on Noble it has moved about between releases, so the build checks that what
+# is claimed actually exists rather than shipping a package that will not
+# install. See verify_dependencies below.
+case "$distribution" in
+trixie)
+    suffix="deb13"
+    depends="qemu-system-x86, qemu-utils, openssh-client, virtiofsd"
+    ;;
+noble)
+    suffix="ubuntu24.04"
+    depends="qemu-system-x86, qemu-utils, openssh-client, virtiofsd"
+    ;;
+*)
+    echo "package: unknown distribution '$distribution'; expected trixie or noble" >&2
+    exit 2
+    ;;
+esac
+
+# The tilde sorts before the bare version, so neither package outranks a later
+# plain release, and the two never compare equal to each other.
+full_version="${version}~${suffix}"
+architecture="$(dpkg --print-architecture)"
+package="vm-manager_${full_version}_${architecture}"
+staging="target/package/${package}"
+
+# Checks every dependency names a package that exists here. A .deb claiming a
+# package the distribution does not have is one apt refuses to install, and
+# finding that out from a user is finding it out too late.
+verify_dependencies() {
+    if ! command -v apt-cache >/dev/null 2>&1; then
+        echo "package: apt-cache is not here, so dependencies go unchecked" >&2
+        return 0
+    fi
+    local missing=()
+    local name
+    for name in ${depends//,/ }; do
+        name="${name//[[:space:]]/}"
+        [ -n "$name" ] || continue
+        if [ -z "$(apt-cache policy "$name" 2>/dev/null)" ]; then
+            missing+=("$name")
+        fi
+    done
+    if [ ${#missing[@]} -gt 0 ]; then
+        echo "package: these dependencies name nothing in $distribution: ${missing[*]}" >&2
+        echo "package: fix the dependency list rather than shipping a package apt will refuse" >&2
+        return 1
+    fi
+}
+
+echo "Building $package"
+verify_dependencies
+
+cargo build --release --locked
+
+rm -rf "$staging"
+install -d "$staging/DEBIAN"
+install -d "$staging/usr/bin"
+install -d "$staging/usr/share/vm"
+install -d "$staging/usr/share/man/man1"
+install -d "$staging/usr/share/doc/vm-manager"
+
+install -m 0755 target/release/vm "$staging/usr/bin/vm"
+cp -r catalogue "$staging/usr/share/vm/catalogue"
+gzip -9nc docs/vm.1 >"$staging/usr/share/man/man1/vm.1.gz"
+
+install -m 0644 LICENSE "$staging/usr/share/doc/vm-manager/copyright"
+
+{
+    echo "vm-manager ($full_version) unstable; urgency=medium"
+    echo
+    echo "  * Release $version."
+    echo
+    echo " -- Dave Minter <dave@paperstack.com>  $(date -R)"
+} | gzip -9nc >"$staging/usr/share/doc/vm-manager/changelog.Debian.gz"
+
+# umask decides what cp and gzip leave behind, and a package should not carry
+# whoever built it around with it.
+find "$staging/usr" -type d -exec chmod 0755 {} +
+find "$staging/usr" -type f -exec chmod 0644 {} +
+chmod 0755 "$staging/usr/bin/vm"
+
+installed_size="$(du -ks "$staging/usr" | cut -f1)"
+
+cat >"$staging/DEBIAN/control" <<CONTROL
+Package: vm-manager
+Version: $full_version
+Section: admin
+Priority: optional
+Architecture: $architecture
+Depends: $depends
+Conflicts: mgetty-voice, vmg
+Maintainer: Dave Minter <dave@paperstack.com>
+Homepage: https://github.com/dcminter/vm-manager
+Installed-Size: $installed_size
+Description: Run QEMU virtual machines with a Docker-like command set
+ Creates and manages virtual machines from prebuilt cloud images. Machines are
+ detached QEMU processes rather than the property of a daemon, each with its
+ own disk over a shared stored image, its own generated key, and a cloud-init
+ seed that makes it reachable over SSH without a password.
+ .
+ The binaries are installed as /usr/bin/vm and conflict with the unrelated
+ mgetty-voice and vmg packages, which claim the same paths.
+CONTROL
+
+install -d "$outdir"
+dpkg-deb --root-owner-group --build "$staging" "$outdir/$package.deb" >/dev/null
+echo "Wrote $outdir/$package.deb"
+
+# A package that does not satisfy lintian's structural checks is one to fix
+# before it reaches anybody, but lintian is not everywhere, so its absence is
+# reported rather than fatal.
+if command -v lintian >/dev/null 2>&1; then
+    lintian --suppress-tags \
+        changelog-file-missing-in-native-package,no-manual-page,maintainer-script-lacks-debhelper-token \
+        "$outdir/$package.deb" || echo "package: lintian had complaints, listed above" >&2
+else
+    echo "package: lintian is not here, so the package goes unchecked" >&2
+fi

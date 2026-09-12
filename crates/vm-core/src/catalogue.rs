@@ -38,7 +38,8 @@ struct RawEntry {
 struct RawImage {
     arch: String,
     format: String,
-    url: String,
+    /// Absent for an image made here: there is nowhere to fetch it from.
+    url: Option<String>,
     digest: String,
     size: Option<u64>,
 }
@@ -48,7 +49,8 @@ struct RawImage {
 pub struct Artifact {
     pub arch: String,
     pub format: String,
-    pub url: String,
+    /// Where to fetch it, or nothing if it was made here by `vm commit`.
+    pub url: Option<String>,
     pub digest: Digest,
     pub size: Option<u64>,
 }
@@ -99,6 +101,31 @@ impl Catalogue {
             catalogue.insert(read_entry(&path)?, &path)?;
         }
         Ok(catalogue)
+    }
+
+    /// Reads several directories in order, later ones winning. Local images
+    /// are read last, so committing over a name shadows the catalogue's own
+    /// entry rather than colliding with it.
+    pub fn load_layered(roots: &[PathBuf]) -> Result<Self> {
+        let mut catalogue = Self::default();
+        for root in roots {
+            let layer = Self::load(root)?;
+            for entry in layer.entries() {
+                catalogue.replace(entry);
+            }
+        }
+        Ok(catalogue)
+    }
+
+    /// Puts an entry in, displacing anything already under its names. Used by
+    /// a later layer over an earlier one; within one directory a collision is
+    /// still an error, because it is a mistake rather than an intention.
+    fn replace(&mut self, entry: &Entry) {
+        let mut keys = vec![key(&entry.name, &entry.tag)];
+        keys.extend(entry.aliases.iter().map(|alias| key(&entry.name, alias)));
+        for candidate in keys {
+            self.entries.insert(candidate, entry.clone());
+        }
     }
 
     fn insert(&mut self, entry: Entry, path: &Path) -> Result<()> {

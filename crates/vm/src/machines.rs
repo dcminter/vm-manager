@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use vm_core::catalogue::Catalogue;
 use vm_core::error::{Error, Result};
 use vm_core::hypervisor::Supervisor as _;
-use vm_core::instance::{Directory, Instance, Instances, Port};
+use vm_core::instance::{Directory, Instance, Instances, Port, Share};
 use vm_core::store::{Pulled, Store};
 use vm_core::value::Value;
 use vm_core::{host_architecture, hypervisor, instance, keys, process, qmp, seed};
@@ -40,6 +40,7 @@ pub struct Request {
     pub cpus: u32,
     pub ports: Vec<Port>,
     pub user: String,
+    pub shares: Vec<Share>,
     pub disk_size: Option<String>,
     pub pull: Option<Pull>,
 }
@@ -68,7 +69,9 @@ pub fn run(
         (Pull::Always, _) | (Pull::Missing, false) => {
             let mut bar = progress::Bar::new("  ", text);
             if text {
-                eprintln!("Fetching {}", style.name(&artifact.url));
+                if let Some(url) = &artifact.url {
+                    eprintln!("Fetching {}", style.name(url));
+                }
             }
             let outcome = store.pull(artifact, &vm_core::store::http_agent(), &mut |update| {
                 bar.update(update);
@@ -122,8 +125,9 @@ fn build(
         pid: None,
         started: None,
         ports: request.ports.clone(),
-        shares: Vec::new(),
+        shares: request.shares.clone(),
     };
+    distinguish(&mut held.shares);
 
     if held.seeded {
         // A published forward to the guest's SSH port is the one to use; only
@@ -162,11 +166,26 @@ fn build(
 /// started". What it says about acceleration comes free with the wait.
 fn launch(directory: &Directory, held: &mut Instance) -> Result<Option<bool>> {
     prepare_runtime(directory.monitor())?;
-    let handle = vm_core::hypervisor::Detached.start(&hypervisor::Launch {
+    // Sockets left behind by a machine that is gone would refuse the new one.
+    directory.clear_runtime();
+    // The hypervisor connects to these sockets, so something has to be
+    // listening on them before it starts.
+    if let Err(error) = serve_shares(directory, held) {
+        reap_shares(held);
+        return Err(error);
+    }
+    let handle = match vm_core::hypervisor::Detached.start(&hypervisor::Launch {
         program: hypervisor::binary_for(&held.arch).to_owned(),
         arguments: hypervisor::arguments(held, directory),
         log: directory.log(),
-    })?;
+    }) {
+        Ok(handle) => handle,
+        Err(error) => {
+            reap_shares(held);
+            let _ = directory.write(held);
+            return Err(error);
+        }
+    };
     held.pid = Some(handle.pid);
     held.started = Some(handle.started);
     directory.write(held)?;
@@ -175,10 +194,61 @@ fn launch(directory: &Directory, held: &mut Instance) -> Result<Option<bool>> {
         Ok(accelerated) => Ok(accelerated),
         Err(error) => {
             let _ = process::signal(&handle, process::Signal::Kill);
+            reap_shares(held);
             held.forget_process();
             let _ = directory.write(held);
             Err(refusal(directory, error))
         }
+    }
+}
+
+/// Starts one `virtiofsd` per share and records it.
+fn serve_shares(directory: &Directory, held: &mut Instance) -> Result<()> {
+    for index in 0..held.shares.len() {
+        let socket = directory.share_socket(index);
+        let launch = hypervisor::share_launch(
+            &held.shares[index].source,
+            &socket,
+            directory.share_log(index),
+        );
+        let handle = vm_core::hypervisor::Detached.start(&launch)?;
+        held.shares[index].pid = Some(handle.pid);
+        held.shares[index].started = Some(handle.started);
+        // The hypervisor refuses a socket that is not there yet, and the
+        // server takes a moment to create it.
+        await_socket(&socket, &handle)?;
+    }
+    Ok(())
+}
+
+fn await_socket(socket: &Path, handle: &process::Handle) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if socket.exists() {
+            return Ok(());
+        }
+        if !handle.is_running() {
+            return Err(Error::Launch {
+                program: "virtiofsd".to_owned(),
+                source: std::io::Error::other("it exited before it began serving"),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    Err(Error::Launch {
+        program: "virtiofsd".to_owned(),
+        source: std::io::Error::other("it did not open its socket"),
+    })
+}
+
+/// Ends every share server an instance owns. A server left behind holds its
+/// socket and its share open against a machine that is no longer there.
+fn reap_shares(held: &mut Instance) {
+    for share in &mut held.shares {
+        if let Some(handle) = share.handle() {
+            let _ = process::signal(&handle, process::Signal::Terminate);
+        }
+        share.forget_process();
     }
 }
 
@@ -319,8 +389,6 @@ fn prepare_runtime(monitor: &Path) -> Result<()> {
             source,
         })?;
     }
-    // A socket left behind by a machine that is gone would refuse the new one.
-    let _ = std::fs::remove_file(monitor);
     Ok(())
 }
 
@@ -374,8 +442,9 @@ pub fn list(all: bool) -> Result<reports::Machines> {
             continue;
         };
         let running = held.is_running();
-        if !running && held.handle().is_some() {
+        if !running && (held.handle().is_some() || held.shares.iter().any(|s| s.pid.is_some())) {
             held.forget_process();
+            reap_shares(&mut held);
             let _ = directory.write(&held);
         }
         if running || all {
@@ -437,8 +506,9 @@ pub fn stop(name: &str, timeout: Duration, force: bool, text: bool) -> Result<re
     }
 
     held.forget_process();
+    reap_shares(&mut held);
     directory.write(&held)?;
-    let _ = std::fs::remove_file(&held.monitor);
+    directory.clear_runtime();
     Ok(reports::Stopped {
         name: name.to_owned(),
         outcome,
@@ -455,6 +525,78 @@ fn wait_for_exit(handle: &process::Handle, timeout: Duration) -> bool {
         std::thread::sleep(Duration::from_millis(100));
     }
     !handle.is_running()
+}
+
+/// How consistent a committed disk is, which depends on what could be done
+/// about the guest at the time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Consistency {
+    /// The machine was not running. Nothing was in flight.
+    Stopped,
+    /// The guest was paused first, so no write was half-done.
+    Paused,
+    /// Taken from under a running guest. Whatever was in its page cache and
+    /// not yet on disk is simply absent.
+    Running,
+}
+
+/// Commits a machine's disk into the store as a new image.
+///
+/// A running guest is paused for the duration unless the user insists
+/// otherwise, because a disk taken from under one is crash-consistent at best
+/// and there is no guest agent here to freeze its filesystems properly.
+pub fn commit(name: &str, target: &str, force: bool) -> Result<reports::Committed> {
+    let reference: vm_core::Reference = target.parse()?;
+    let instances = Instances::discover()?;
+    let directory = instances.open(name)?;
+    let held = directory.read()?;
+    let store = Store::discover()?;
+    let local = vm_core::paths::local_catalogue_directory().ok_or(Error::NoImageStore)?;
+
+    let running = held.is_running();
+    let consistency = match (running, force) {
+        (false, _) => Consistency::Stopped,
+        (true, false) => Consistency::Paused,
+        (true, true) => Consistency::Running,
+    };
+
+    let committed = if consistency == Consistency::Paused {
+        let mut client = qmp::connect(&held.monitor)?;
+        client.pause()?;
+        // The guest stays paused until this returns, so resuming has to happen
+        // on the way out whether the commit worked or not.
+        let outcome = vm_core::commit::commit(
+            &store,
+            &local,
+            &held,
+            &directory.overlay(),
+            reference.repository(),
+            reference.tag(),
+            true,
+        );
+        client.resume()?;
+        outcome?
+    } else {
+        vm_core::commit::commit(
+            &store,
+            &local,
+            &held,
+            &directory.overlay(),
+            reference.repository(),
+            reference.tag(),
+            running,
+        )?
+    };
+
+    Ok(reports::Committed {
+        source: name.to_owned(),
+        name: committed.name,
+        tag: committed.tag,
+        arch: committed.arch,
+        digest: committed.digest.to_string(),
+        size: committed.size,
+        consistency,
+    })
 }
 
 /// Removes an instance and everything it owns.
@@ -494,6 +636,63 @@ pub fn parse_memory(text: &str) -> std::result::Result<u64, String> {
     Ok(total)
 }
 
+/// Turns `/host/path:/guest/path` into a share, with a tag taken from the
+/// host directory's own name so that the guest's fstab reads as something.
+pub fn parse_share(text: &str) -> std::result::Result<Share, String> {
+    let (source, target) = text
+        .rsplit_once(':')
+        .ok_or_else(|| format!("'{text}' is not a share; write it as host:guest"))?;
+    if source.is_empty() || target.is_empty() {
+        return Err(format!("'{text}' is not a share; write it as host:guest"));
+    }
+    if !target.starts_with('/') {
+        return Err(format!("'{target}' is not an absolute path in the guest"));
+    }
+    let source = std::path::PathBuf::from(source);
+    let source = source
+        .canonicalize()
+        .map_err(|error| format!("{}: {error}", source.display()))?;
+    if !source.is_dir() {
+        return Err(format!("{} is not a directory", source.display()));
+    }
+    Ok(Share {
+        tag: tag_for(&source),
+        source,
+        target: target.to_owned(),
+        pid: None,
+        started: None,
+    })
+}
+
+/// A tag the guest will accept: at most 36 bytes by virtiofs convention, and
+/// only the characters the seed's own rules allow.
+fn tag_for(source: &Path) -> String {
+    let stem: String = source
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+        .take(30)
+        .collect();
+    if stem.is_empty() {
+        "share".to_owned()
+    } else {
+        stem
+    }
+}
+
+/// Makes every tag its own, since two directories may share a name.
+fn distinguish(shares: &mut [Share]) {
+    for index in 1..shares.len() {
+        let (earlier, rest) = shares.split_at_mut(index);
+        let share = &mut rest[0];
+        if earlier.iter().any(|held| held.tag == share.tag) {
+            share.tag = format!("{}{index}", share.tag);
+        }
+    }
+}
+
 /// Turns `2222:22` into a forward.
 pub fn parse_port(text: &str) -> std::result::Result<Port, String> {
     let (host, guest) = text
@@ -527,6 +726,8 @@ pub fn parse_user(text: &str) -> std::result::Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     #[test]
@@ -570,6 +771,68 @@ mod tests {
         assert!(parse_port("2222:").is_err());
         assert!(parse_port("http:22").is_err());
         assert!(parse_port("99999:22").is_err());
+    }
+
+    #[test]
+    fn a_share_takes_its_tag_from_the_host_directory() {
+        let share = parse_share(&format!("{}:/mnt/tmp", std::env::temp_dir().display())).unwrap();
+        assert_eq!(share.target, "/mnt/tmp");
+        assert_eq!(share.tag, "tmp");
+    }
+
+    #[test]
+    fn a_share_that_is_not_one_is_refused() {
+        assert!(parse_share("/tmp").is_err());
+        assert!(parse_share("/tmp:").is_err());
+        assert!(parse_share(":/mnt").is_err());
+        assert!(
+            parse_share("/tmp:mnt").is_err(),
+            "the guest path must be absolute"
+        );
+        assert!(parse_share("/nonexistent/directory:/mnt").is_err());
+    }
+
+    /// A path is easier to get wrong than to get right, and a share that
+    /// silently does not appear in the guest is a bad way to learn that.
+    #[test]
+    fn a_share_of_something_that_is_not_a_directory_is_refused() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("vm-share-{}.txt", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        let outcome = parse_share(&format!("{}:/mnt/x", path.display()));
+        let _ = std::fs::remove_file(&path);
+        assert!(outcome.is_err());
+    }
+
+    fn share(tag: &str) -> Share {
+        Share {
+            tag: tag.to_owned(),
+            source: std::path::PathBuf::from("/home/x"),
+            target: "/mnt/x".to_owned(),
+            pid: None,
+            started: None,
+        }
+    }
+
+    /// Two directories can have the same name, and two shares cannot have the
+    /// same tag: the guest would mount one of them twice.
+    #[test]
+    fn tags_that_would_collide_are_made_distinct() {
+        let mut shares = vec![share("work"), share("work"), share("src"), share("work")];
+        distinguish(&mut shares);
+        let tags: Vec<&str> = shares.iter().map(|held| held.tag.as_str()).collect();
+        assert_eq!(tags, ["work", "work1", "src", "work3"]);
+        let mut sorted = tags.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), tags.len(), "every tag must be its own");
+    }
+
+    #[test]
+    fn a_single_share_keeps_its_plain_tag() {
+        let mut shares = vec![share("work")];
+        distinguish(&mut shares);
+        assert_eq!(shares[0].tag, "work");
     }
 
     #[test]

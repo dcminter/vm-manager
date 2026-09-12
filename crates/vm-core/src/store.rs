@@ -1,7 +1,7 @@
 use crate::catalogue::{Artifact, Entry};
 use crate::digest;
 use crate::error::{Error, Result};
-use crate::reference::Digest;
+use crate::reference::{Algorithm, Digest};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -57,6 +57,11 @@ impl Store {
 
     /// Fetches the artifact unless it is already held. The digest is verified
     /// in the same pass that writes the file, and a mismatch keeps nothing.
+    /// The address to fetch an artifact from, or a refusal if it has none.
+    fn source(artifact: &Artifact) -> Result<&String> {
+        artifact.url.as_ref().ok_or(Error::NotFetchable)
+    }
+
     pub fn pull(
         &self,
         artifact: &Artifact,
@@ -89,17 +94,15 @@ impl Store {
         partial: &Path,
         report: Reporter<'_>,
     ) -> Result<()> {
-        let response = agent
-            .get(&artifact.url)
-            .call()
-            .map_err(|source| Error::Download {
-                url: artifact.url.clone(),
-                source: Box::new(source),
-            })?;
+        let url = Self::source(artifact)?;
+        let response = agent.get(url).call().map_err(|source| Error::Download {
+            url: url.clone(),
+            source: Box::new(source),
+        })?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
             return Err(Error::HttpStatus {
-                url: artifact.url.clone(),
+                url: url.clone(),
                 status,
             });
         }
@@ -125,12 +128,49 @@ impl Store {
         })?;
         if !digest::matches(&artifact.digest, &actual) {
             return Err(Error::DigestMismatch {
-                url: artifact.url.clone(),
+                url: url.clone(),
                 expected: artifact.digest.to_string(),
                 actual: format!("{}:{actual}", artifact.digest.algorithm_name()),
             });
         }
         Ok(())
+    }
+
+    /// A path inside the store to build a new image at, so that adopting it
+    /// afterwards is a rename rather than a copy across filesystems.
+    pub fn staging(&self, label: &str) -> Result<PathBuf> {
+        let directory = self.root.join("blobs");
+        create_directory(&directory)?;
+        Ok(directory.join(format!(".building-{label}")))
+    }
+
+    /// Takes a file built at [`Store::staging`] into the store, naming it by
+    /// what it turned out to contain.
+    pub fn adopt(&self, staged: &Path, algorithm: Algorithm) -> Result<Digest> {
+        let mut file = fs::File::open(staged).map_err(|source| Error::Store {
+            path: staged.to_owned(),
+            action: "read",
+            source,
+        })?;
+        let mut sink = std::io::sink();
+        let (_, hash) = digest::copy_hashing(&mut file, &mut sink, algorithm, &mut |_| {})
+            .map_err(|source| Error::Store {
+                path: staged.to_owned(),
+                action: "read",
+                source,
+            })?;
+        let digest = Digest::new(algorithm, &hash);
+        let destination = self.path_for(&digest);
+        if destination.exists() {
+            // The same bytes are already held, so the new copy is redundant.
+            let _ = fs::remove_file(staged);
+            return Ok(digest);
+        }
+        if let Some(parent) = destination.parent() {
+            create_directory(parent)?;
+        }
+        rename(staged, &destination)?;
+        Ok(digest)
     }
 
     /// Records which reference a build was fetched for, so listings and later
@@ -141,7 +181,11 @@ impl Store {
         let path = directory.join(format!("{}-{}.toml", entry.tag, artifact.arch));
         let body = format!(
             "name = \"{}\"\ntag = \"{}\"\narch = \"{}\"\ndigest = \"{}\"\nurl = \"{}\"\n",
-            entry.name, entry.tag, artifact.arch, artifact.digest, artifact.url
+            entry.name,
+            entry.tag,
+            artifact.arch,
+            artifact.digest,
+            artifact.url.clone().unwrap_or_default()
         );
         fs::write(&path, body).map_err(|source| Error::Store {
             path,
@@ -224,7 +268,7 @@ mod tests {
         Artifact {
             arch: "amd64".to_owned(),
             format: "qcow2".to_owned(),
-            url: "https://example.invalid/image.qcow2".to_owned(),
+            url: Some("https://example.invalid/image.qcow2".to_owned()),
             digest: digest(),
             size: Some(1024),
         }

@@ -98,6 +98,10 @@ pub enum Error {
         path: PathBuf,
         reason: String,
     },
+    NotFetchable,
+    Commit {
+        reason: String,
+    },
     UnheldImage {
         reference: String,
     },
@@ -166,6 +170,8 @@ impl Error {
             Self::UnknownInstance { .. } => "unknown-instance",
             Self::InstanceName { .. } => "invalid-instance-name",
             Self::InstanceRecord { .. } => "instance-damaged",
+            Self::NotFetchable => "image-not-fetchable",
+            Self::Commit { .. } => "commit-failed",
             Self::UnheldImage { .. } => "image-not-held",
             Self::InstanceRunning { .. } => "instance-running",
             Self::InstanceStopped { .. } => "instance-stopped",
@@ -287,6 +293,13 @@ impl fmt::Display for Error {
                 "the instance record at {} is damaged: {reason}",
                 path.display()
             ),
+            Self::Commit { reason } => {
+                write!(f, "cannot commit the machine's disk: {reason}")
+            }
+            Self::NotFetchable => write!(
+                f,
+                "this image was made here by 'vm commit'; there is nowhere to fetch it from"
+            ),
             Self::UnheldImage { reference } => write!(
                 f,
                 "'{reference}' is not in the local store and pulling is disabled; \
@@ -356,7 +369,7 @@ impl fmt::Display for Error {
             } => {
                 write!(
                     f,
-                    "{operation} needs the '{binary}' command, which is not on PATH; \
+                    "{operation} needs the '{binary}' command, which is not installed; \
                      install it with 'apt install {package}'"
                 )
             }

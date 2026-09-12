@@ -1,0 +1,170 @@
+.TH VM 1 "2026" "vm-manager" "User Commands"
+.SH NAME
+vm \- create and manage QEMU virtual machines from prebuilt OS images
+.SH SYNOPSIS
+.B vm
+[\fB\-\-format\fR \fIFORMAT\fR]
+.I COMMAND
+[\fIARGS\fR]
+.SH DESCRIPTION
+.B vm
+runs virtual machines from prebuilt cloud images, with a command set modelled
+on Docker. There is no daemon: each machine is a detached QEMU process, and
+everything it owns lives in one directory under
+.IR $XDG_STATE_HOME/vm/instances .
+.PP
+A machine is given its own writable disk over the stored image, its own SSH key
+pair, and a cloud-init seed that installs that key for an account of its own.
+A host port is forwarded to its SSH port whether or not one was published, so
+.B vm ssh
+works on a machine started with no arguments at all.
+.SH COMMANDS
+.TP
+.B images
+List the images in the local catalogue.
+.TP
+.BI inspect " IMAGE"
+Show where an image comes from and how its guest is reached.
+.TP
+.BI pull " IMAGE"
+Fetch an image into the local store, verifying it against the catalogue digest.
+.TP
+.B update
+Refresh the local catalogue from its remote source.
+.TP
+.BI run " IMAGE"
+Create and start a machine. See
+.B OPTIONS FOR RUN
+below.
+.TP
+.BI start " NAME"
+Start a machine that exists but is not running.
+.TP
+.BI ssh " NAME " [\fICOMMAND\fR]
+Open a shell on a machine, or run a command in it. Wraps
+.BR ssh (1),
+so
+.IR ~/.ssh/config ,
+the agent and
+.B ProxyCommand
+all still apply.
+.TP
+.BI cp " FROM TO"
+Copy files to or from a machine. One side is written as
+.IR NAME:PATH .
+.TP
+.B ps
+List machines.
+.B \-\-all
+includes those that are not running.
+.TP
+.BI stop " NAME"
+Ask the guest to shut down, waiting
+.B \-\-timeout
+seconds before insisting.
+.TP
+.BI kill " NAME"
+Stop a machine without telling the guest.
+.TP
+.BI commit " NAME IMAGE"
+Save a machine's disk as a new image, named
+.IR repository:tag .
+A running guest is paused for the duration unless
+.B \-\-force
+is given.
+.TP
+.BI rm " NAME"
+Delete a machine and its disk.
+.B \-\-force
+removes one that is running.
+.SH OPTIONS FOR RUN
+.TP
+.BI \-\-name " NAME"
+Name the machine rather than take the one it invents.
+.TP
+.BI \-m ", " \-\-memory " AMOUNT"
+Memory, in mebibytes unless suffixed with M or G. Default 2G.
+.TP
+.BI \-\-cpus " COUNT"
+Processors. Default 2.
+.TP
+.BI \-p ", " \-\-publish " HOST:GUEST"
+Forward a host port to a guest port. May be repeated.
+.TP
+.BI \-v ", " \-\-volume " HOST:GUEST"
+Share a host directory with the guest over virtiofs. May be repeated.
+.TP
+.BI \-\-user " NAME"
+The account to create in the guest. Default
+.BR vm .
+.TP
+.BI \-\-disk\-size " SIZE"
+Grow the machine's disk to this size, such as 40G.
+.TP
+.BI \-\-pull " WHEN"
+.BR always ", " missing " (the default) or " never .
+.SH OUTPUT
+Every command writes a table by default and machine-readable output on request:
+.B \-\-format json
+or
+.BR "\-\-format yaml" .
+In those formats the document is the only thing on standard output, with
+progress and errors on standard error. Errors take the requested format too,
+carrying a stable
+.B kind
+alongside the message.
+.PP
+.B vm ssh
+is the exception: it replaces itself with
+.BR ssh (1),
+so what reaches the terminal is the guest's output and not this tool's. A
+script that needs to connect for itself should read
+.B ssh_port
+and
+.B user
+from
+.BR "vm ps \-\-format json" .
+.SH FILES
+.TP
+.I $XDG_CONFIG_HOME/vm/config.toml
+Optional.
+.B catalogue_url
+and
+.B catalogue_path
+say where
+.B vm update
+fetches from;
+.B auto_pull
+turns on-demand fetching off.
+.TP
+.I $XDG_DATA_HOME/vm/images
+The image store, addressed by digest.
+.TP
+.I $XDG_DATA_HOME/vm/catalogue
+The catalogue as last fetched.
+.TP
+.I $XDG_DATA_HOME/vm/local
+Catalogue entries for images made here by
+.BR "vm commit" .
+.TP
+.I $XDG_STATE_HOME/vm/instances
+One directory per machine: its disk, key, console log and record.
+.TP
+.I $XDG_RUNTIME_DIR/vm
+Monitor and share sockets, kept short because the kernel bounds the length of
+a socket path.
+.SH ENVIRONMENT
+.TP
+.B VM_FORMAT
+The default output format.
+.TP
+.B VM_CATALOGUE
+Overrides the catalogue directory.
+.SH EXIT STATUS
+0 on success, 1 on failure.
+.SH SEE ALSO
+.BR ssh (1),
+.BR scp (1),
+.BR qemu\-system\-x86_64 (1),
+.BR qemu\-img (1),
+.BR virtiofsd (1)

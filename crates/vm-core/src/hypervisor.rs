@@ -87,18 +87,26 @@ impl Supervisor for Detached {
 }
 
 fn missing(program: &str) -> Error {
-    Error::MissingTool {
-        binary: if program.starts_with("qemu-system") {
-            "qemu-system-x86_64"
-        } else {
-            "qemu-img"
+    // The program may be a full path: what identifies the tool is its name.
+    let program = Path::new(program)
+        .file_name()
+        .map_or(program, |name| name.to_str().unwrap_or(program));
+    match program {
+        "virtiofsd" => Error::MissingTool {
+            binary: "virtiofsd",
+            package: "virtiofsd",
+            operation: "sharing a directory with a virtual machine",
         },
-        package: if program.starts_with("qemu-system") {
-            "qemu-system-x86"
-        } else {
-            "qemu-utils"
+        held if held.starts_with("qemu-system") => Error::MissingTool {
+            binary: "qemu-system-x86_64",
+            package: "qemu-system-x86",
+            operation: "starting a virtual machine",
         },
-        operation: "starting a virtual machine",
+        _ => Error::MissingTool {
+            binary: "qemu-img",
+            package: "qemu-utils",
+            operation: "starting a virtual machine",
+        },
     }
 }
 
@@ -149,6 +157,20 @@ pub fn arguments(instance: &Instance, directory: &Directory) -> Vec<String> {
     // emulation is long enough to look like a hang.
     push("-device");
     push("virtio-rng-pci");
+    // Each share is a socket a `virtiofsd` is already listening on; the guest
+    // sees the tag, which is what its fstab line names.
+    for (index, share) in instance.shares.iter().enumerate() {
+        push("-chardev");
+        push(&format!(
+            "socket,id=vfs{index},path={}",
+            directory.share_socket(index).display()
+        ));
+        push("-device");
+        push(&format!(
+            "vhost-user-fs-pci,chardev=vfs{index},tag={}",
+            share.tag
+        ));
+    }
     push("-display");
     push("none");
     push("-serial");
@@ -184,6 +206,57 @@ fn network(instance: &Instance) -> String {
         let _ = write!(netdev, ",hostfwd=tcp:127.0.0.1:{port}-:22");
     }
     netdev
+}
+
+/// Where `virtiofsd` is installed when it is not on `PATH`.
+///
+/// Debian and Ubuntu both put it in `/usr/libexec`, which is on nobody's
+/// `PATH`, with a compatibility symlink under `/usr/lib/qemu`. That is a
+/// reasonable place for a daemon started by other programs rather than by
+/// people, so these are searched rather than treated as the user's problem.
+const VIRTIOFSD_DIRECTORIES: [&str; 3] = ["/usr/libexec", "/usr/lib/qemu", "/usr/lib/virtiofsd"];
+
+/// What to run to serve one share.
+///
+/// `PATH` wins where it has an answer, so a locally built or overridden
+/// `virtiofsd` is still the one used. Where nothing is found the bare name is
+/// returned, and the spawn fails with the message that names the package.
+pub fn virtiofsd() -> String {
+    let path = std::env::var("PATH").unwrap_or_default();
+    locate("virtiofsd", &path, &VIRTIOFSD_DIRECTORIES, &|at| {
+        at.is_file()
+    })
+}
+
+/// The search itself, with the filesystem passed in so it can be tested.
+fn locate(name: &str, path: &str, extras: &[&str], exists: &dyn Fn(&Path) -> bool) -> String {
+    let found = std::env::split_paths(path)
+        .chain(extras.iter().map(PathBuf::from))
+        .map(|directory| directory.join(name))
+        .find(|candidate| exists(candidate));
+    // Where nothing matched, the bare name goes back: spawning it fails with
+    // the error that names the package, which is the useful thing to say.
+    found.map_or_else(|| name.to_owned(), |at| at.display().to_string())
+}
+
+/// What to run to serve one share.
+///
+/// The sandbox is off because the alternative needs privileges this tool does
+/// not ask for: `virtiofsd` chroots by default, which wants `CAP_SYS_ADMIN`.
+/// What is shared is a directory the user already named, served to a guest the
+/// same user started, so the sandbox would be guarding them from themselves.
+pub fn share_launch(source: &Path, socket: &Path, log: PathBuf) -> Launch {
+    Launch {
+        program: virtiofsd(),
+        arguments: vec![
+            format!("--socket-path={}", socket.display()),
+            "--shared-dir".to_owned(),
+            source.display().to_string(),
+            "--sandbox".to_owned(),
+            "none".to_owned(),
+        ],
+        log,
+    }
 }
 
 /// Creates the instance's writable disk over an image in the store. The image
@@ -232,7 +305,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use crate::instance::{Instances, Port};
+    use crate::instance::{Instances, Port, Share};
     use std::fs;
     use std::sync::Mutex;
 
@@ -445,6 +518,137 @@ mod tests {
             pair(&arguments, "-serial"),
             Some(format!("file:{}", directory.console().display()))
         );
+    }
+
+    fn share(tag: &str, target: &str) -> Share {
+        Share {
+            tag: tag.to_owned(),
+            source: PathBuf::from("/home/x/work"),
+            target: target.to_owned(),
+            pid: None,
+            started: None,
+        }
+    }
+
+    #[test]
+    fn a_share_becomes_a_socket_and_a_tagged_device() {
+        let scratch = Scratch::new("share");
+        let directory = scratch.directory("one");
+        let mut held = instance("one");
+        held.shares.push(share("work", "/mnt/work"));
+        let arguments = arguments(&held, &directory);
+        assert_eq!(
+            pair(&arguments, "-chardev"),
+            Some(format!(
+                "socket,id=vfs0,path={}",
+                directory.share_socket(0).display()
+            ))
+        );
+        assert!(
+            arguments
+                .iter()
+                .any(|held| held == "vhost-user-fs-pci,chardev=vfs0,tag=work"),
+            "{arguments:?}"
+        );
+    }
+
+    #[test]
+    fn several_shares_are_numbered_apart() {
+        let scratch = Scratch::new("shares");
+        let mut held = instance("one");
+        held.shares.push(share("work", "/mnt/work"));
+        held.shares.push(share("src", "/mnt/src"));
+        let arguments = arguments(&held, &scratch.directory("one"));
+        let devices: Vec<&String> = arguments
+            .iter()
+            .filter(|held| held.starts_with("vhost-user-fs-pci"))
+            .collect();
+        assert_eq!(devices.len(), 2);
+        assert!(devices[0].contains("chardev=vfs0,tag=work"), "{devices:?}");
+        assert!(devices[1].contains("chardev=vfs1,tag=src"), "{devices:?}");
+    }
+
+    #[test]
+    fn an_instance_with_no_shares_has_no_share_devices() {
+        let scratch = Scratch::new("noshares");
+        let arguments = arguments(&instance("one"), &scratch.directory("one"));
+        assert!(!arguments.iter().any(|held| held.contains("vhost-user-fs")));
+        assert!(!arguments.iter().any(|held| held == "-chardev"));
+    }
+
+    #[test]
+    fn a_share_is_served_from_the_directory_it_names() {
+        let launch = share_launch(
+            Path::new("/home/x/work"),
+            Path::new("/run/user/1000/vm/abc.fs0"),
+            PathBuf::from("/dev/null"),
+        );
+        assert_eq!(Path::new(&launch.program).file_name().unwrap(), "virtiofsd");
+        assert!(
+            launch
+                .arguments
+                .contains(&"--socket-path=/run/user/1000/vm/abc.fs0".to_owned()),
+            "{:?}",
+            launch.arguments
+        );
+        assert!(launch.arguments.contains(&"/home/x/work".to_owned()));
+    }
+
+    /// `virtiofsd` is its own package, and a share asked for without it is the
+    /// most likely way to meet a missing tool, so the message has to name it.
+    /// The absence is staged with a path that is certainly not there, so this
+    /// says the same thing on a machine that has it installed and one that
+    /// does not.
+    #[test]
+    fn a_share_server_that_is_not_installed_names_its_package() {
+        let scratch = Scratch::new("novirtiofsd");
+        let launch = Launch {
+            program: scratch.0.join("nowhere/virtiofsd").display().to_string(),
+            arguments: Vec::new(),
+            log: scratch.0.join("log"),
+        };
+        let error = Detached.start(&launch).unwrap_err();
+        assert_eq!(error.kind(), "missing-tool");
+        assert!(
+            error.to_string().contains("apt install virtiofsd"),
+            "{error}"
+        );
+    }
+
+    /// Debian keeps it out of PATH, so a search that only consulted PATH would
+    /// report a package that is installed as missing.
+    #[test]
+    fn a_tool_off_the_path_is_found_where_the_distribution_puts_it() {
+        let found = locate("virtiofsd", "/usr/bin:/bin", &["/usr/libexec"], &|at| {
+            at == Path::new("/usr/libexec/virtiofsd")
+        });
+        assert_eq!(found, "/usr/libexec/virtiofsd");
+    }
+
+    /// PATH is searched first, so a build of one's own is still the one run.
+    #[test]
+    fn the_path_is_preferred_to_the_places_the_distribution_uses() {
+        let found = locate("virtiofsd", "/opt/mine/bin", &["/usr/libexec"], &|_| true);
+        assert_eq!(found, "/opt/mine/bin/virtiofsd");
+    }
+
+    /// Nothing found means the bare name, which fails with the message that
+    /// names the package rather than one naming a path nobody asked for.
+    #[test]
+    fn a_tool_that_is_nowhere_is_left_as_a_name() {
+        assert_eq!(
+            locate("virtiofsd", "/usr/bin", &["/usr/libexec"], &|_| false),
+            "virtiofsd"
+        );
+    }
+
+    /// The search order is PATH, then each extra directory in turn.
+    #[test]
+    fn the_distribution_directories_are_tried_in_order() {
+        let found = locate("virtiofsd", "", &["/a", "/b"], &|at| {
+            at.starts_with("/a") || at.starts_with("/b")
+        });
+        assert_eq!(found, "/a/virtiofsd");
     }
 
     #[test]
