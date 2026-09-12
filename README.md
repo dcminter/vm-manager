@@ -43,7 +43,7 @@ cargo run -p vm -- images
 | `vm resume <name>` | Let a paused machine carry on |
 | `vm kill <name>` | Stop a machine without telling the guest |
 | `vm logs <name>` | Show a machine's console; `--follow` writes it as it arrives |
-| `vm commit <name> <image>` | Save a machine's disk as a new image |
+| `vm clone <name> <image>` | Save a machine's disk as a new image |
 | `vm rm <name>` | Delete a machine and its disk |
 | `vm rmi <image>` | Delete an image from the local store |
 
@@ -97,12 +97,12 @@ guest sees. A machine that is not running holds no memory, so only the figure
 it was given is shown. `--follow` lists them again every second; on a terminal
 each listing replaces the last, and in a document format one follows another.
 
-`vm commit` flattens a machine's disk into a standalone image in the store and
+`vm clone` flattens a machine's disk into a standalone image in the store and
 gives it a name. It runs in two passes and shows both: the disk is flattened,
 and the result is read back and verified, because an image is addressed by its
 digest and the digest cannot be known before the bytes exist. A running guest
 is paused for the duration, because a disk taken from under one is
-crash-consistent at best; `--force` skips the pause and says so. Committed
+crash-consistent at best; `--force` skips the pause and says so. Cloned
 images are listed by `vm images` alongside the catalogue's own, and `vm update`
 does not disturb them.
 
@@ -116,7 +116,7 @@ first so that it can take the power button.
 
 `vm rmi` takes a name back out of the store. One the catalogue provides is
 listed again as unfetched; one made here has nowhere to be fetched from, so its
-entry goes with it. Images are held by digest, so two commits of an unchanged
+entry goes with it. Images are held by digest, so two clones of an unchanged
 disk are one file under two names: the file goes with the last name for it, and
 until then `vm rmi` says which names are keeping it. A machine is built on its
 image rather than a copy of it, so an image still in use is refused unless

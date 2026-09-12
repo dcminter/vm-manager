@@ -739,7 +739,7 @@ fn wait_for_exit(handle: &process::Handle, timeout: Duration) -> bool {
     !handle.is_running()
 }
 
-/// How consistent a committed disk is, which depends on what could be done
+/// How consistent a cloned disk is, which depends on what could be done
 /// about the guest at the time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Consistency {
@@ -752,12 +752,12 @@ pub enum Consistency {
     Running,
 }
 
-/// Commits a machine's disk into the store as a new image.
+/// Clones a machine's disk into the store as a new image.
 ///
 /// A running guest is paused for the duration unless the user insists
 /// otherwise, because a disk taken from under one is crash-consistent at best
 /// and there is no guest agent here to freeze its filesystems properly.
-pub fn commit(name: &str, target: &str, force: bool, text: bool) -> Result<reports::Committed> {
+pub fn clone(name: &str, target: &str, force: bool, text: bool) -> Result<reports::Cloned> {
     let reference: vm_core::Reference = target.parse()?;
     let instances = Instances::discover()?;
     let directory = instances.open(name)?;
@@ -772,20 +772,20 @@ pub fn commit(name: &str, target: &str, force: bool, text: bool) -> Result<repor
         (true, true) => Consistency::Running,
     };
 
-    // A commit reads the whole backing chain and then reads the result back to
+    // A clone reads the whole backing chain and then reads the result back to
     // hash it, either of which on a large image is long enough that a silent
     // tool looks like a wedged one. Both passes are named, because a bar that
     // reaches the end and starts again otherwise reads as a stall.
     let mut bar = progress::Bar::new("", text);
-    let committed = if consistency == Consistency::Paused {
+    let cloned = if consistency == Consistency::Paused {
         let mut client = qmp::connect(&held.monitor)?;
         // A machine the user paused is left paused; only one paused here is
         // let go again.
         let was_running = client.status()? == "running";
         client.pause()?;
         // The guest stays paused until this returns, so resuming has to happen
-        // on the way out whether the commit worked or not.
-        let outcome = vm_core::commit::commit(
+        // on the way out whether the clone worked or not.
+        let outcome = vm_core::clone::image(
             &store,
             &local,
             &held,
@@ -793,7 +793,7 @@ pub fn commit(name: &str, target: &str, force: bool, text: bool) -> Result<repor
             &reference,
             true,
             Some(&mut |stage, percent| {
-                bar.naming(&format!("  {:<10}", vm_core::commit::Stage::label(stage)));
+                bar.naming(&format!("  {:<10}", vm_core::clone::Stage::label(stage)));
                 bar.portion(percent);
             }),
         );
@@ -803,7 +803,7 @@ pub fn commit(name: &str, target: &str, force: bool, text: bool) -> Result<repor
         }
         outcome?
     } else {
-        let outcome = vm_core::commit::commit(
+        let outcome = vm_core::clone::image(
             &store,
             &local,
             &held,
@@ -811,7 +811,7 @@ pub fn commit(name: &str, target: &str, force: bool, text: bool) -> Result<repor
             &reference,
             running,
             Some(&mut |stage, percent| {
-                bar.naming(&format!("  {:<10}", vm_core::commit::Stage::label(stage)));
+                bar.naming(&format!("  {:<10}", vm_core::clone::Stage::label(stage)));
                 bar.portion(percent);
             }),
         );
@@ -819,13 +819,13 @@ pub fn commit(name: &str, target: &str, force: bool, text: bool) -> Result<repor
         outcome?
     };
 
-    Ok(reports::Committed {
+    Ok(reports::Cloned {
         source: name.to_owned(),
-        name: committed.name,
-        tag: committed.tag,
-        arch: committed.arch,
-        digest: committed.digest.to_string(),
-        size: committed.size,
+        name: cloned.name,
+        tag: cloned.tag,
+        arch: cloned.arch,
+        digest: cloned.digest.to_string(),
+        size: cloned.size,
         consistency,
     })
 }
@@ -852,12 +852,12 @@ pub fn remove(name: &str, force: bool) -> Result<reports::Removed> {
 /// Removes an image from the store.
 ///
 /// What is removed is the name. A reference from the fetched catalogue survives
-/// and simply shows as unheld again; one made here by `vm commit` has nowhere
+/// and simply shows as unheld again; one made here by `vm clone` has nowhere
 /// to be fetched from, so its entry goes with it rather than naming an image
 /// nothing could ever produce.
 ///
 /// The bytes go with the last name for them. Images are addressed by digest, so
-/// two commits of an unchanged disk are one file under two names, and removing
+/// two clones of an unchanged disk are one file under two names, and removing
 /// the file out from under the other one would strand an image that cannot be
 /// fetched back.
 pub fn remove_image(

@@ -80,7 +80,7 @@ fn user_id() -> u32 {
     std::fs::metadata("/proc/self").map_or(0, |data| data.uid())
 }
 
-/// Where `vm commit` writes entries for images made here. Kept apart from the
+/// Where `vm clone` writes entries for images made here. Kept apart from the
 /// fetched catalogue, which `vm update` replaces wholesale and would otherwise
 /// take local images with it.
 pub fn local_catalogue_directory_in(environment: &impl Environment) -> Option<PathBuf> {

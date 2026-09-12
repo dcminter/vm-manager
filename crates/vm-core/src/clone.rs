@@ -1,6 +1,6 @@
 //! Turning a machine's disk back into an image.
 //!
-//! An instance writes to an overlay over the image it was built from. A commit
+//! An instance writes to an overlay over the image it was built from. A clone
 //! flattens the two into one standalone file, hashes it, and puts it in the
 //! store under a name of the user's choosing.
 
@@ -15,7 +15,7 @@ use std::process::Command;
 /// How far along a conversion is, in whole percent.
 pub type Converting<'a> = &'a mut dyn FnMut(u8);
 
-/// Which pass a commit is in the middle of.
+/// Which pass a clone is in the middle of.
 ///
 /// There are two, and they take comparable time on a large image: the disk is
 /// flattened, and then read back to be hashed, because an image is addressed
@@ -38,16 +38,16 @@ impl Stage {
     }
 }
 
-/// How far along a commit is: which pass, and how much of it is done.
+/// How far along a clone is: which pass, and how much of it is done.
 pub type Reporter<'a> = &'a mut dyn FnMut(Stage, u8);
 
 /// Local images are hashed with SHA-256. Nothing external publishes a sum for
 /// them, so the only requirement is that it names the bytes.
 pub const ALGORITHM: Algorithm = Algorithm::Sha256;
 
-/// What a commit produced.
+/// What a clone produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Committed {
+pub struct Cloned {
     pub name: String,
     pub tag: String,
     pub arch: String,
@@ -103,7 +103,7 @@ pub fn convert(
                 Error::MissingTool {
                     binary: "qemu-img",
                     package: "qemu-utils",
-                    operation: "committing a virtual machine",
+                    operation: "cloning a virtual machine",
                 }
             } else {
                 Error::Launch {
@@ -123,7 +123,7 @@ pub fn convert(
         return Ok(());
     }
     let _ = fs::remove_file(destination);
-    Err(Error::Commit {
+    Err(Error::Clone {
         reason: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
     })
 }
@@ -172,11 +172,11 @@ fn proportion(progress: &crate::store::Progress) -> u8 {
     u8::try_from(percent.min(100)).unwrap_or(100)
 }
 
-/// Commits an instance's disk into the store under `name:tag`.
+/// Clones an instance's disk into the store as the image `name:tag`.
 ///
 /// Whether the guest was paused first is the caller's business; by the time
 /// this runs, the disk is as consistent as it is going to be.
-pub fn commit(
+pub fn image(
     store: &Store,
     local: &Path,
     instance: &Instance,
@@ -184,7 +184,7 @@ pub fn commit(
     target: &Reference,
     in_use: bool,
     mut report: Option<Reporter<'_>>,
-) -> Result<Committed> {
+) -> Result<Cloned> {
     let (name, tag) = (target.repository(), target.tag());
     let staged = store.staging(&format!("{name}-{tag}"))?;
     let _ = fs::remove_file(&staged);
@@ -205,7 +205,7 @@ pub fn commit(
     let path = store.path_for(&digest);
     let size = fs::metadata(&path).map_or(0, |data| data.len());
     let entry = write_entry(local, instance, name, tag, &digest, size)?;
-    Ok(Committed {
+    Ok(Cloned {
         name: name.to_owned(),
         tag: tag.to_owned(),
         arch: instance.arch.clone(),
@@ -216,7 +216,7 @@ pub fn commit(
     })
 }
 
-/// Writes the catalogue entry that makes a committed image nameable.
+/// Writes the catalogue entry that makes a cloned image nameable.
 ///
 /// The scalars come before the `[[image]]` table because TOML has no way to
 /// write a bare key after one.
@@ -242,7 +242,7 @@ fn write_entry(
     let body = format!(
         "name = \"{name}\"\n\
          tag = \"{tag}\"\n\
-         description = \"Committed from '{}'\"\n\
+         description = \"Cloned from '{}'\"\n\
          login = \"{login}\"\n\
          \n\
          [[image]]\n\
@@ -273,7 +273,7 @@ mod tests {
     impl Scratch {
         fn new(label: &str) -> Self {
             let mut path = std::env::temp_dir();
-            path.push(format!("vm-commit-{label}-{}", std::process::id()));
+            path.push(format!("vm-clone-{label}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&path);
             fs::create_dir_all(&path).unwrap();
             Self(path)
@@ -453,7 +453,7 @@ mod tests {
     /// There is nowhere to fetch a local image from, and the absence has to
     /// survive being written out and read back.
     #[test]
-    fn a_committed_entry_has_no_address_to_fetch_from() {
+    fn a_cloned_entry_has_no_address_to_fetch_from() {
         let scratch = Scratch::new("nourl");
         let digest = Digest::new(ALGORITHM, &"b".repeat(64));
         write_entry(&scratch.0, &instance("demo"), "mine", "latest", &digest, 1).unwrap();
@@ -464,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn an_instance_that_takes_no_seed_commits_to_an_image_that_takes_none() {
+    fn an_instance_that_takes_no_seed_clones_to_an_image_that_takes_none() {
         let scratch = Scratch::new("login");
         let mut held = instance("demo");
         held.seeded = false;
@@ -477,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn committing_again_over_the_same_tag_replaces_the_entry() {
+    fn cloning_again_over_the_same_tag_replaces_the_entry() {
         let scratch = Scratch::new("again");
         let held = instance("demo");
         let first = Digest::new(ALGORITHM, &"d".repeat(64));
@@ -514,7 +514,7 @@ mod tests {
         let outcome = convert(&overlay, &scratch.0.join("out.qcow2"), false, None);
         match outcome {
             Err(error) => assert!(
-                matches!(error.kind(), "commit-failed" | "missing-tool"),
+                matches!(error.kind(), "clone-failed" | "missing-tool"),
                 "{error}"
             ),
             Ok(()) => panic!("a text file should not convert to an image"),

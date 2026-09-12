@@ -121,17 +121,17 @@ shows only the last few lines.
 .BI rmi " IMAGE"
 Delete an image from the local store. An image the catalogue provides is listed
 again as unfetched; one made here by
-.B vm commit
+.B vm clone
 has nowhere to be fetched from, so its catalogue entry goes with it. Machines
 are built on their image, so one that is still in use is refused unless
 .B \-\-force
 is given.
 .IP
-What is removed is the name. Images are held by digest, so two commits of an
+What is removed is the name. Images are held by digest, so two clones of an
 unchanged disk are one file under two names, and the file goes only with the
 last name for it; until then the command says which names are keeping it.
 .TP
-.BI commit " NAME IMAGE"
+.BI clone " NAME IMAGE"
 Save a machine's disk as a new image, named
 .IR repository:tag .
 A running guest is paused for the duration unless
@@ -222,7 +222,7 @@ The catalogue as last fetched.
 .TP
 .I $XDG_DATA_HOME/vm/local
 Catalogue entries for images made here by
-.BR "vm commit" .
+.BR "vm clone" .
 .TP
 .I $XDG_STATE_HOME/vm/instances
 One directory per machine: its disk, key, console log and record. The console

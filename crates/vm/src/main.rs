@@ -163,12 +163,12 @@ enum Command {
         name: String,
     },
     /// Save an instance's disk as a new image
-    Commit {
+    Clone {
         /// Instance name
         name: String,
         /// Name for the new image, as repository:tag
         image: String,
-        /// Commit without pausing a running guest
+        /// Clone without pausing a running guest
         #[arg(long, short)]
         force: bool,
     },
@@ -319,8 +319,8 @@ fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> 
             cli.format.is_text(),
         )?),
         Command::Rm { name, force } => Box::new(machines::remove(name, *force)?),
-        Command::Commit { name, image, force } => {
-            Box::new(machines::commit(name, image, *force, cli.format.is_text())?)
+        Command::Clone { name, image, force } => {
+            Box::new(machines::clone(name, image, *force, cli.format.is_text())?)
         }
         _ => return Ok(None),
     };
@@ -378,13 +378,13 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
         | Command::Kill { .. }
         | Command::Pause { .. }
         | Command::Resume { .. }
-        | Command::Commit { .. }
+        | Command::Clone { .. }
         | Command::Logs { .. }
         | Command::Rm { .. } => unreachable!("handled above"),
     }
 }
 
-/// The catalogue as read: what was fetched, with anything committed here
+/// The catalogue as read: what was fetched, with anything cloned here
 /// layered over it.
 fn catalogue_layers() -> Vec<std::path::PathBuf> {
     let mut layers = vec![paths::catalogue_directory()];

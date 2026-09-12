@@ -99,7 +99,7 @@ pub enum Error {
         reason: String,
     },
     NotFetchable,
-    Commit {
+    Clone {
         reason: String,
     },
     UnheldImage {
@@ -182,7 +182,7 @@ impl Error {
             Self::InstanceName { .. } => "invalid-instance-name",
             Self::InstanceRecord { .. } => "instance-damaged",
             Self::NotFetchable => "image-not-fetchable",
-            Self::Commit { .. } => "commit-failed",
+            Self::Clone { .. } => "clone-failed",
             Self::UnheldImage { .. } => "image-not-held",
             Self::ImageInUse { .. } => "image-in-use",
             Self::ChangeWhileRunning { .. } => "change-while-running",
@@ -308,12 +308,12 @@ impl fmt::Display for Error {
                 "the instance record at {} is damaged: {reason}",
                 path.display()
             ),
-            Self::Commit { reason } => {
-                write!(f, "cannot commit the machine's disk: {reason}")
+            Self::Clone { reason } => {
+                write!(f, "cannot clone the machine's disk: {reason}")
             }
             Self::NotFetchable => write!(
                 f,
-                "this image was made here by 'vm commit'; there is nowhere to fetch it from"
+                "this image was made here by 'vm clone'; there is nowhere to fetch it from"
             ),
             Self::UnheldImage { reference } => write!(
                 f,

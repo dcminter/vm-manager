@@ -141,7 +141,7 @@ impl Report for Inspect {
                 "Source",
                 self.url
                     .clone()
-                    .unwrap_or_else(|| "committed here; nowhere to fetch it from".to_owned()),
+                    .unwrap_or_else(|| "cloned here; nowhere to fetch it from".to_owned()),
             ),
             ("Digest", self.digest.clone()),
             (
@@ -609,7 +609,7 @@ impl Report for Stopped {
     }
 }
 
-pub struct Committed {
+pub struct Cloned {
     pub source: String,
     pub name: String,
     pub tag: String,
@@ -619,7 +619,7 @@ pub struct Committed {
     pub consistency: crate::machines::Consistency,
 }
 
-impl Committed {
+impl Cloned {
     const fn consistency(&self) -> &'static str {
         match self.consistency {
             crate::machines::Consistency::Stopped => "stopped",
@@ -629,7 +629,7 @@ impl Committed {
     }
 }
 
-impl Report for Committed {
+impl Report for Cloned {
     fn to_value(&self) -> Value {
         Value::map([
             ("source", Value::string(self.source.clone())),
@@ -644,7 +644,7 @@ impl Report for Committed {
 
     fn render_text(&self, style: Style) -> Vec<String> {
         let mut lines = vec![format!(
-            "Committed {} as {} ({})",
+            "Cloned {} as {} ({})",
             style.name(&self.source),
             style.name(&format!("{}:{}", self.name, self.tag)),
             human(self.size)
@@ -1031,7 +1031,7 @@ mod tests {
         assert!(document.contains(r#""one""#), "{document}");
     }
 
-    /// Two commits of an unchanged disk are one file under two names. Taking
+    /// Two clones of an unchanged disk are one file under two names. Taking
     /// one name away must not take the file, and saying nothing would leave
     /// the user thinking they had reclaimed the space.
     #[test]

@@ -49,7 +49,7 @@ struct RawImage {
 pub struct Artifact {
     pub arch: String,
     pub format: String,
-    /// Where to fetch it, or nothing if it was made here by `vm commit`.
+    /// Where to fetch it, or nothing if it was made here by `vm clone`.
     pub url: Option<String>,
     pub digest: Digest,
     pub size: Option<u64>,
@@ -104,7 +104,7 @@ impl Catalogue {
     }
 
     /// Reads several directories in order, later ones winning. Local images
-    /// are read last, so committing over a name shadows the catalogue's own
+    /// are read last, so cloning over a name shadows the catalogue's own
     /// entry rather than colliding with it.
     pub fn load_layered(roots: &[PathBuf]) -> Result<Self> {
         let mut catalogue = Self::default();
