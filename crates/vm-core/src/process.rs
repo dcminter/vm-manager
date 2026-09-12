@@ -30,14 +30,32 @@ impl Handle {
     /// Whether this exact process is still running. A pid that has been
     /// reused answers no, which is the point, and so does one that has exited
     /// but not yet been reaped.
+    ///
+    /// Its first thread can exit before the rest, and those still hold its open
+    /// files, a disk's lock among them, so it is running until every thread is gone.
     pub fn is_running(&self) -> bool {
-        read_stat(self.pid)
-            .is_some_and(|stat| start_time(&stat) == Some(self.started) && !is_dead(&stat))
+        read_stat(self.pid).is_some_and(|stat| {
+            start_time(&stat) == Some(self.started) && alive(&stat, thread_stats(self.pid))
+        })
     }
+}
+
+/// Whether the first thread, or failing that any thread, has yet to exit.
+fn alive(leader: &str, threads: impl IntoIterator<Item = String>) -> bool {
+    !is_dead(leader) || threads.into_iter().any(|task| !is_dead(&task))
 }
 
 fn read_stat(pid: u32) -> Option<String> {
     fs::read_to_string(format!("/proc/{pid}/stat")).ok()
+}
+
+/// The stat line of each of a process's threads, skipping any that end while being read.
+fn thread_stats(pid: u32) -> impl Iterator<Item = String> {
+    fs::read_dir(format!("/proc/{pid}/task"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|task| fs::read_to_string(task.path().join("stat")).ok())
 }
 
 /// The second field of the line is the executable name in parentheses, and it
@@ -236,6 +254,37 @@ mod tests {
         child.kill().unwrap();
         assert!(wait_until_gone(&handle), "a zombie was reported as running");
         child.wait().unwrap();
+    }
+
+    #[test]
+    fn a_process_is_running_while_any_of_its_threads_is() {
+        let leader = "42 (qemu) Z 1 42 42 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 555 0 0";
+        let exiting = "43 (worker) R 1 42 42 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 556 0 0";
+        let running = "42 (qemu) S 1 42 42 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 555 0 0";
+        assert!(alive(leader, [leader, exiting].map(str::to_owned)));
+        assert!(!alive(leader, [leader.to_owned()]));
+        assert!(!alive(leader, []));
+        assert!(alive(running, []));
+    }
+
+    #[test]
+    fn every_thread_of_a_process_is_read() {
+        let (sender, receiver) = std::sync::mpsc::channel::<()>();
+        let worker = std::thread::spawn(move || receiver.recv());
+        let threads: Vec<String> = thread_stats(std::process::id()).collect();
+        sender.send(()).unwrap();
+        worker.join().unwrap().unwrap();
+        assert!(threads.len() > 1, "{threads:?}");
+        let leader = format!("{} (", std::process::id());
+        assert!(
+            threads.iter().any(|task| task.starts_with(&leader)),
+            "{threads:?}"
+        );
+    }
+
+    #[test]
+    fn a_pid_that_is_not_there_has_no_threads() {
+        assert_eq!(thread_stats(4_194_303).count(), 0);
     }
 
     #[test]
