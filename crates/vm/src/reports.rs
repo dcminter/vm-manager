@@ -2,6 +2,7 @@ use crate::progress::human;
 use crate::style::Style;
 use crate::table;
 use vm_core::catalogue::{Artifact, Entry};
+use vm_core::instance::{self, Instance, Port};
 use vm_core::value::Value;
 
 use crate::output::Report;
@@ -221,6 +222,258 @@ impl Report for Update {
             self.entries,
             self.files
         )]
+    }
+}
+
+/// What `vm run` started.
+pub struct Run {
+    pub name: String,
+    pub image: String,
+    pub arch: String,
+    pub memory: u64,
+    pub cpus: u32,
+    pub ports: Vec<Port>,
+    pub user: String,
+    pub seeded: bool,
+    pub pid: u32,
+    /// Whether the machine got KVM; absent when the monitor would not say.
+    pub accelerated: Option<bool>,
+    pub console: String,
+}
+
+fn ports_value(ports: &[Port]) -> Value {
+    Value::list(ports.iter().map(|port| {
+        Value::map([
+            ("host", Value::Integer(u64::from(port.host))),
+            ("guest", Value::Integer(u64::from(port.guest))),
+        ])
+    }))
+}
+
+fn ports_text(ports: &[Port]) -> String {
+    ports
+        .iter()
+        .map(|port| format!("{}->{}", port.host, port.guest))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+impl Report for Run {
+    fn to_value(&self) -> Value {
+        Value::map([
+            ("name", Value::string(self.name.clone())),
+            ("image", Value::string(self.image.clone())),
+            ("arch", Value::string(self.arch.clone())),
+            ("memory", Value::Integer(self.memory)),
+            ("cpus", Value::Integer(u64::from(self.cpus))),
+            ("ports", ports_value(&self.ports)),
+            ("user", Value::string(self.user.clone())),
+            ("seeded", Value::Bool(self.seeded)),
+            ("pid", Value::Integer(u64::from(self.pid))),
+            (
+                "accelerated",
+                self.accelerated.map_or(Value::Null, Value::Bool),
+            ),
+            ("console", Value::string(self.console.clone())),
+        ])
+    }
+
+    fn render_text(&self, style: Style) -> Vec<String> {
+        let mut lines = vec![format!(
+            "Started {} from {} ({} MiB, {} CPU{})",
+            style.name(&self.name),
+            self.image,
+            self.memory,
+            self.cpus,
+            if self.cpus == 1 { "" } else { "s" }
+        )];
+        if !self.ports.is_empty() {
+            lines.push(format!("  ports    {}", ports_text(&self.ports)));
+        }
+        if self.accelerated == Some(false) {
+            lines.push(
+                style.dim(
+                    "  This machine is emulated, not accelerated: /dev/kvm was not available.",
+                ),
+            );
+        }
+        if !self.seeded {
+            lines.push(style.dim(
+                "  This image takes no cloud-init seed, so it has no key and no user of ours.",
+            ));
+        }
+        lines
+    }
+}
+
+/// One instance, as `vm ps` lists it.
+pub struct MachineRow {
+    pub name: String,
+    pub image: String,
+    pub running: bool,
+    pub created: u64,
+    pub ports: Vec<Port>,
+    pub pid: Option<u32>,
+    pub damaged: bool,
+}
+
+impl MachineRow {
+    pub fn of(instance: &Instance, running: bool) -> Self {
+        Self {
+            name: instance.name.clone(),
+            image: instance.image.clone(),
+            running,
+            created: instance.created,
+            ports: instance.ports.clone(),
+            pid: instance.pid,
+            damaged: false,
+        }
+    }
+
+    /// An instance whose record cannot be read is still listed, because the
+    /// user needs to know it is there in order to remove it.
+    pub fn damaged(name: &str) -> Self {
+        Self {
+            name: name.to_owned(),
+            image: String::new(),
+            running: false,
+            created: 0,
+            ports: Vec::new(),
+            pid: None,
+            damaged: true,
+        }
+    }
+
+    const fn status(&self) -> &'static str {
+        if self.damaged {
+            "damaged"
+        } else if self.running {
+            "running"
+        } else {
+            "stopped"
+        }
+    }
+}
+
+pub struct Machines {
+    pub rows: Vec<MachineRow>,
+    pub all: bool,
+}
+
+/// Ages rather than timestamps: a list is read to see what is there now, and
+/// a date needs a calendar to interpret.
+fn age(created: u64) -> String {
+    if created == 0 {
+        return String::new();
+    }
+    let seconds = instance::now().saturating_sub(created);
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3599 => format!("{}m", seconds / 60),
+        3600..=86_399 => format!("{}h", seconds / 3600),
+        _ => format!("{}d", seconds / 86_400),
+    }
+}
+
+impl Report for Machines {
+    fn to_value(&self) -> Value {
+        Value::list(self.rows.iter().map(|row| {
+            Value::map([
+                ("name", Value::string(row.name.clone())),
+                ("image", Value::string(row.image.clone())),
+                ("status", Value::string(row.status())),
+                ("created", Value::Integer(row.created)),
+                ("ports", ports_value(&row.ports)),
+                (
+                    "pid",
+                    row.pid
+                        .map_or(Value::Null, |pid| Value::Integer(u64::from(pid))),
+                ),
+            ])
+        }))
+    }
+
+    fn render_text(&self, style: Style) -> Vec<String> {
+        if self.rows.is_empty() {
+            return vec![style.dim(if self.all {
+                "No instances. Try 'vm run debian:trixie'."
+            } else {
+                "No instances running. Try 'vm ps --all'."
+            })];
+        }
+        let cells: Vec<Vec<String>> = self
+            .rows
+            .iter()
+            .map(|row| {
+                vec![
+                    style.name(&row.name),
+                    row.image.clone(),
+                    row.status().to_owned(),
+                    age(row.created),
+                    ports_text(&row.ports),
+                ]
+            })
+            .collect();
+        let headings = ["NAME", "IMAGE", "STATUS", "AGE", "PORTS"];
+        let mut lines = table::render(&headings, &cells);
+        if let Some(first) = lines.first_mut() {
+            *first = style.heading(first);
+        }
+        lines
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopOutcome {
+    PoweredDown,
+    Killed,
+    AlreadyStopped,
+}
+
+impl StopOutcome {
+    const fn slug(self) -> &'static str {
+        match self {
+            Self::PoweredDown => "powered-down",
+            Self::Killed => "killed",
+            Self::AlreadyStopped => "already-stopped",
+        }
+    }
+}
+
+pub struct Stopped {
+    pub name: String,
+    pub outcome: StopOutcome,
+}
+
+impl Report for Stopped {
+    fn to_value(&self) -> Value {
+        Value::map([
+            ("name", Value::string(self.name.clone())),
+            ("outcome", Value::string(self.outcome.slug())),
+        ])
+    }
+
+    fn render_text(&self, style: Style) -> Vec<String> {
+        let name = style.name(&self.name);
+        vec![match self.outcome {
+            StopOutcome::PoweredDown => format!("Stopped {name}"),
+            StopOutcome::Killed => format!("Killed {name}"),
+            StopOutcome::AlreadyStopped => format!("{name} was not running"),
+        }]
+    }
+}
+
+pub struct Removed {
+    pub name: String,
+}
+
+impl Report for Removed {
+    fn to_value(&self) -> Value {
+        Value::map([("name", Value::string(self.name.clone()))])
+    }
+
+    fn render_text(&self, style: Style) -> Vec<String> {
+        vec![format!("Removed {}", style.name(&self.name))]
     }
 }
 

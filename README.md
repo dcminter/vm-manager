@@ -5,8 +5,9 @@ set modelled on Docker.
 
 ```bash
 vm images
-vm pull debian:trixie
-vm inspect debian:trixie --output json
+vm run --name demo -p 2222:22 debian:trixie
+vm ps
+vm stop demo
 ```
 
 ## Building and running
@@ -32,17 +33,39 @@ cargo run -p vm -- images
 | `vm inspect <image>` | Show where an image comes from and how its guest is reached |
 | `vm pull <image>` | Fetch an image into the local store |
 | `vm update` | Refresh the local catalogue from its remote source |
+| `vm run <image>` | Create and start a machine |
+| `vm ps` | List machines; `--all` includes those not running |
+| `vm stop <name>` | Ask the guest to shut down, then insist |
+| `vm kill <name>` | Stop a machine without telling the guest |
+| `vm rm <name>` | Delete a machine and its disk |
 
 An image is named `repository:tag`, as in `debian:trixie`. The tag may be
 omitted, in which case `latest` is used, and a specific build may be pinned by
 appending `@sha512:...`.
+
+## Machines
+
+`vm run` fetches the image if it is not already held, gives the machine its own
+writable disk over the stored image, and starts it detached. Use `-p
+host:guest` to forward a port, `-m` for memory and `--cpus` for processors, and
+`--name` to choose a name rather than take the one it invents.
+
+Each machine gets a key pair of its own and a cloud-init seed that installs it
+for the account named by `--user`, so no password is set and none is needed.
+Everything a machine owns — its disk, its key, its console log and its record —
+lives in one directory under `$XDG_STATE_HOME/vm/instances`, and `vm rm` takes
+the lot.
+
+Images that carry no cloud-init still run; they simply take no key and no user,
+which `vm run` says at the time rather than leaving to be discovered.
 
 ## Configuration
 
 `$XDG_CONFIG_HOME/vm/config.toml` is optional. It holds `catalogue_url`, the
 archive `vm update` fetches, and `catalogue_path`, the directory within that
 archive holding the entries. Point both at an internal server to run a curated
-catalogue.
+catalogue. Setting `auto_pull = false` makes `vm run` refuse an image that is
+not already held rather than fetching it.
 
 A refreshed catalogue is staged and parsed before it replaces the one in use,
 so an unreachable or malformed source leaves the working catalogue untouched.

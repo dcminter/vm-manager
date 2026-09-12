@@ -16,6 +16,14 @@ pub struct Config {
     /// The directory inside that archive holding the entries.
     #[serde(default = "default_catalogue_path")]
     pub catalogue_path: String,
+    /// Whether `vm run` fetches an image it does not hold. Turning this off
+    /// makes a missing image an error rather than a download.
+    #[serde(default = "default_auto_pull")]
+    pub auto_pull: bool,
+}
+
+const fn default_auto_pull() -> bool {
+    true
 }
 
 fn default_catalogue_url() -> String {
@@ -31,6 +39,7 @@ impl Default for Config {
         Self {
             catalogue_url: default_catalogue_url(),
             catalogue_path: default_catalogue_path(),
+            auto_pull: default_auto_pull(),
         }
     }
 }
@@ -130,6 +139,14 @@ mod tests {
         let path = scratch.write("catalogue_yurl = \"typo\"\n");
         let error = Config::read(&path).unwrap_err();
         assert!(error.to_string().contains("config.toml"), "{error}");
+    }
+
+    #[test]
+    fn pulling_on_demand_is_the_default_and_can_be_turned_off() {
+        assert!(Config::default().auto_pull);
+        let scratch = Scratch::new("autopull");
+        let path = scratch.write("auto_pull = false\n");
+        assert!(!Config::read(&path).unwrap().auto_pull);
     }
 
     #[test]

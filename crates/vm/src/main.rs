@@ -1,3 +1,4 @@
+mod machines;
 mod output;
 mod progress;
 mod reports;
@@ -54,6 +55,59 @@ enum Command {
     },
     /// Refresh the local catalogue from its remote source
     Update,
+    /// Create and start a virtual machine
+    Run {
+        /// Image reference, such as debian:trixie
+        reference: String,
+        /// Name for the instance; one is invented if this is omitted
+        #[arg(long)]
+        name: Option<String>,
+        /// Memory, in mebibytes unless suffixed with M or G
+        #[arg(long, short, default_value = "2G", value_parser = machines::parse_memory)]
+        memory: u64,
+        /// Processors
+        #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(1..=255))]
+        cpus: u32,
+        /// Forward a host port to a guest port, as host:guest
+        #[arg(long, short, value_parser = machines::parse_port)]
+        publish: Vec<vm_core::instance::Port>,
+        /// Account to create in the guest
+        #[arg(long, default_value = "vm", value_parser = machines::parse_user)]
+        user: String,
+        /// Grow the disk to this size, such as 40G
+        #[arg(long)]
+        disk_size: Option<String>,
+        /// When to fetch the image
+        #[arg(long, value_enum)]
+        pull: Option<machines::Pull>,
+    },
+    /// List instances
+    Ps {
+        /// Include instances that are not running
+        #[arg(long, short)]
+        all: bool,
+    },
+    /// Shut an instance down
+    Stop {
+        /// Instance name
+        name: String,
+        /// Seconds to wait for the guest before insisting
+        #[arg(long, short, default_value_t = 30)]
+        timeout: u64,
+    },
+    /// Stop an instance without telling the guest
+    Kill {
+        /// Instance name
+        name: String,
+    },
+    /// Delete an instance and its disk
+    Rm {
+        /// Instance name
+        name: String,
+        /// Remove it even if it is running
+        #[arg(long, short)]
+        force: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -80,6 +134,27 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
+    // These commands read no catalogue and no store, so they work even when
+    // neither is in place.
+    match &cli.command {
+        Command::Ps { all } => return Ok(Box::new(machines::list(*all)?)),
+        Command::Stop { name, timeout } => {
+            return Ok(Box::new(machines::stop(
+                name,
+                std::time::Duration::from_secs(*timeout),
+                false,
+            )?));
+        }
+        Command::Kill { name } => {
+            return Ok(Box::new(machines::stop(
+                name,
+                std::time::Duration::from_secs(10),
+                true,
+            )?));
+        }
+        Command::Rm { name, force } => return Ok(Box::new(machines::remove(name, *force)?)),
+        _ => {}
+    }
     let catalogue = Catalogue::load(&paths::catalogue_directory())?;
     let store = Store::discover()?;
     match &cli.command {
@@ -91,6 +166,34 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
             &catalogue, &store, style, cli.output, reference,
         )?)),
         Command::Update => Ok(Box::new(update()?)),
+        Command::Run {
+            reference,
+            name,
+            memory,
+            cpus,
+            publish,
+            user,
+            disk_size,
+            pull,
+        } => Ok(Box::new(machines::run(
+            &catalogue,
+            &store,
+            &machines::Request {
+                reference: reference.clone(),
+                name: name.clone(),
+                memory: *memory,
+                cpus: *cpus,
+                ports: publish.clone(),
+                user: user.clone(),
+                disk_size: disk_size.clone(),
+                pull: *pull,
+            },
+            style,
+            cli.output.is_text(),
+        )?)),
+        Command::Ps { .. } | Command::Stop { .. } | Command::Kill { .. } | Command::Rm { .. } => {
+            unreachable!("handled above")
+        }
     }
 }
 

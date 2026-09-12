@@ -66,6 +66,48 @@ pub enum Error {
         path: PathBuf,
         source: std::io::Error,
     },
+    NoStateDirectory,
+    State {
+        path: PathBuf,
+        action: &'static str,
+        source: std::io::Error,
+    },
+    InstanceExists {
+        name: String,
+    },
+    UnknownInstance {
+        name: String,
+    },
+    InstanceName {
+        name: String,
+        reason: &'static str,
+    },
+    InstanceRecord {
+        path: PathBuf,
+        reason: String,
+    },
+    Launch {
+        program: String,
+        source: std::io::Error,
+    },
+    Overlay {
+        path: PathBuf,
+        reason: String,
+    },
+    KeyGeneration {
+        path: PathBuf,
+        reason: String,
+    },
+    UnheldImage {
+        reference: String,
+    },
+    InstanceRunning {
+        name: String,
+    },
+    Signal {
+        pid: u32,
+        source: std::io::Error,
+    },
     QmpConnect {
         path: PathBuf,
         source: std::io::Error,
@@ -110,6 +152,18 @@ impl Error {
             Self::EmptyCatalogue { .. } => "empty-catalogue",
             Self::SeedRefused { .. } => "seed-invalid",
             Self::SeedWrite { .. } => "seed-unwritable",
+            Self::NoStateDirectory => "no-state-directory",
+            Self::State { .. } => "state-unusable",
+            Self::InstanceExists { .. } => "instance-exists",
+            Self::UnknownInstance { .. } => "unknown-instance",
+            Self::InstanceName { .. } => "invalid-instance-name",
+            Self::InstanceRecord { .. } => "instance-damaged",
+            Self::UnheldImage { .. } => "image-not-held",
+            Self::InstanceRunning { .. } => "instance-running",
+            Self::Launch { .. } => "launch-failed",
+            Self::Overlay { .. } => "overlay-failed",
+            Self::KeyGeneration { .. } => "key-generation-failed",
+            Self::Signal { .. } => "signal-failed",
             Self::QmpConnect { .. } => "qmp-unreachable",
             Self::QmpIo { .. } => "qmp-io-error",
             Self::QmpClosed => "qmp-closed",
@@ -198,6 +252,51 @@ impl fmt::Display for Error {
             Self::SeedWrite { path, source } => {
                 write!(f, "cannot write the seed to {}: {source}", path.display())
             }
+            Self::NoStateDirectory => write!(
+                f,
+                "cannot locate the state directory: neither HOME nor XDG_STATE_HOME is set"
+            ),
+            Self::State {
+                path,
+                action,
+                source,
+            } => write!(f, "cannot {action} at {}: {source}", path.display()),
+            Self::InstanceExists { name } => {
+                write!(f, "an instance named '{name}' already exists")
+            }
+            Self::UnknownInstance { name } => {
+                write!(f, "no instance named '{name}'; try 'vm ps --all'")
+            }
+            Self::InstanceName { name, reason } => {
+                write!(f, "'{name}' is not a usable instance name: {reason}")
+            }
+            Self::InstanceRecord { path, reason } => write!(
+                f,
+                "the instance record at {} is damaged: {reason}",
+                path.display()
+            ),
+            Self::UnheldImage { reference } => write!(
+                f,
+                "'{reference}' is not in the local store and pulling is disabled; \
+                 run 'vm pull {reference}' first"
+            ),
+            Self::InstanceRunning { name } => {
+                write!(f, "'{name}' is running; stop it first, or use --force")
+            }
+            Self::Launch { program, source } => {
+                write!(f, "cannot start {program}: {source}")
+            }
+            Self::Overlay { path, reason } => {
+                write!(f, "cannot create the disk at {}: {reason}", path.display())
+            }
+            Self::KeyGeneration { path, reason } => write!(
+                f,
+                "cannot create the instance key at {}: {reason}",
+                path.display()
+            ),
+            Self::Signal { pid, source } => {
+                write!(f, "cannot signal process {pid}: {source}")
+            }
             Self::QmpConnect { path, source } => write!(
                 f,
                 "cannot reach the monitor socket at {}: {source}",
@@ -240,6 +339,9 @@ impl std::error::Error for Error {
             Self::CatalogueRead { source, .. }
             | Self::Store { source, .. }
             | Self::SeedWrite { source, .. }
+            | Self::State { source, .. }
+            | Self::Launch { source, .. }
+            | Self::Signal { source, .. }
             | Self::QmpConnect { source, .. }
             | Self::QmpIo { source, .. } => Some(source),
             Self::CatalogueParse { source, .. } => Some(source),

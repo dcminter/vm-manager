@@ -50,6 +50,36 @@ pub fn images_directory_in(environment: &impl Environment) -> Option<PathBuf> {
     data_directory_in(environment).map(|path| path.join("images"))
 }
 
+/// Where monitor sockets live.
+///
+/// Deliberately not under the instance directory: a Unix socket path is
+/// bounded at 107 bytes by the kernel, and a state directory under a long home
+/// plus a long instance name crosses that. The runtime directory is short by
+/// convention and the socket names are short by construction, so the bound is
+/// met rather than hoped for.
+pub fn runtime_directory_in(environment: &impl Environment) -> PathBuf {
+    environment
+        .var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .map_or_else(
+            || PathBuf::from(format!("/tmp/vm-{}", user_id())),
+            |path| path.join("vm"),
+        )
+}
+
+pub fn runtime_directory() -> PathBuf {
+    runtime_directory_in(&SystemEnvironment)
+}
+
+/// Taken from the filesystem rather than from a C library, so that the tree
+/// stays free of unsafe code. A failure here only costs a shared fallback
+/// directory, which the sticky bit on `/tmp` still keeps private per user.
+fn user_id() -> u32 {
+    use std::os::unix::fs::MetadataExt as _;
+    std::fs::metadata("/proc/self").map_or(0, |data| data.uid())
+}
+
 pub fn instances_directory_in(environment: &impl Environment) -> Option<PathBuf> {
     state_directory_in(environment).map(|path| path.join("instances"))
 }
@@ -218,5 +248,53 @@ mod tests {
             catalogue_directory_in(&held, &nothing_exists),
             PathBuf::from(PACKAGED_CATALOGUE)
         );
+    }
+
+    #[test]
+    fn the_runtime_directory_follows_its_variable() {
+        let held = environment(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+        assert_eq!(
+            runtime_directory_in(&held),
+            PathBuf::from("/run/user/1000/vm")
+        );
+    }
+
+    #[test]
+    fn a_missing_runtime_variable_falls_back_to_a_private_directory() {
+        let held = environment(&[("HOME", "/home/x")]);
+        let path = runtime_directory_in(&held);
+        assert!(
+            path.to_string_lossy().starts_with("/tmp/vm-"),
+            "{}",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn a_relative_runtime_variable_is_ignored() {
+        let held = environment(&[("XDG_RUNTIME_DIR", "run/user/1000")]);
+        assert!(
+            runtime_directory_in(&held)
+                .to_string_lossy()
+                .starts_with("/tmp/vm-")
+        );
+    }
+
+    /// The reason this directory exists at all: whatever it resolves to must
+    /// leave room for a socket name inside the kernel's limit.
+    #[test]
+    fn the_runtime_directory_leaves_room_for_a_socket_name() {
+        for held in [
+            environment(&[("XDG_RUNTIME_DIR", "/run/user/1000")]),
+            environment(&[("HOME", "/home/somebody-with-a-long-name")]),
+        ] {
+            let path = runtime_directory_in(&held);
+            assert!(
+                path.as_os_str().len() + "/0123456789abcdef.sock".len()
+                    <= crate::qmp::MAX_SOCKET_PATH,
+                "{} is already too long",
+                path.display()
+            );
+        }
     }
 }
