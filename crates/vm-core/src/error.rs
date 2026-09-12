@@ -99,6 +99,29 @@ pub enum Error {
         reason: String,
     },
     NotFetchable,
+    Password {
+        reason: &'static str,
+    },
+    PasswordUnseeded {
+        name: String,
+    },
+    MachineSetting {
+        setting: &'static str,
+        value: String,
+        expected: &'static str,
+    },
+    MachineMismatch {
+        chipset: &'static str,
+        disk: &'static str,
+        instead: &'static str,
+    },
+    MissingFirmware {
+        path: PathBuf,
+        package: &'static str,
+    },
+    NoFirmware {
+        arch: String,
+    },
     Decompress {
         scheme: &'static str,
         reason: String,
@@ -117,6 +140,13 @@ pub enum Error {
         name: String,
     },
     FollowNeedsText,
+    ConsoleNeedsText,
+    NoConsole {
+        name: String,
+    },
+    NoScreen {
+        name: String,
+    },
     InstanceRunning {
         name: String,
     },
@@ -187,11 +217,20 @@ impl Error {
             Self::InstanceRecord { .. } => "instance-damaged",
             Self::NotFetchable => "image-not-fetchable",
             Self::Decompress { .. } => "decompression-failed",
+            Self::MachineSetting { .. } => "invalid-machine-setting",
+            Self::Password { .. } => "unusable-password",
+            Self::PasswordUnseeded { .. } => "password-needs-seed",
+            Self::MachineMismatch { .. } => "machine-mismatch",
+            Self::MissingFirmware { .. } => "missing-firmware",
+            Self::NoFirmware { .. } => "no-uefi-firmware",
             Self::Clone { .. } => "clone-failed",
             Self::UnheldImage { .. } => "image-not-held",
             Self::ImageInUse { .. } => "image-in-use",
             Self::ChangeWhileRunning { .. } => "change-while-running",
             Self::FollowNeedsText => "follow-needs-text",
+            Self::ConsoleNeedsText => "console-needs-text",
+            Self::NoConsole { .. } => "no-console",
+            Self::NoScreen { .. } => "no-screen",
             Self::InstanceRunning { .. } => "instance-running",
             Self::InstanceStopped { .. } => "instance-stopped",
             Self::InstancePaused { .. } => "instance-paused",
@@ -316,6 +355,35 @@ impl fmt::Display for Error {
             Self::Clone { reason } => {
                 write!(f, "cannot clone the machine's disk: {reason}")
             }
+            Self::Password { reason } => write!(f, "cannot use that password: {reason}"),
+            Self::PasswordUnseeded { name } => write!(
+                f,
+                "'{name}' takes no cloud-init seed, so there is no account of ours to give a password"
+            ),
+            Self::MachineSetting {
+                setting,
+                value,
+                expected,
+            } => write!(
+                f,
+                "'{value}' is not a usable {setting}; expected {expected}"
+            ),
+            Self::MachineMismatch {
+                chipset,
+                disk,
+                instead,
+            } => write!(
+                f,
+                "the '{chipset}' machine has no {disk} controller; {instead}"
+            ),
+            Self::MissingFirmware { path, package } => write!(
+                f,
+                "UEFI firmware is not installed at {}; install it with 'apt install {package}'",
+                path.display()
+            ),
+            Self::NoFirmware { arch } => {
+                write!(f, "there is no known UEFI firmware for {arch} guests")
+            }
             Self::Decompress { scheme, reason } => {
                 write!(f, "cannot expand the {scheme} image: {reason}")
             }
@@ -341,6 +409,20 @@ impl fmt::Display for Error {
                 f,
                 "'{name}' is running, and these settings are read when a machine starts; \
                  stop it first"
+            ),
+            Self::ConsoleNeedsText => write!(
+                f,
+                "a console is a conversation, which no document format can hold; use text output"
+            ),
+            Self::NoConsole { name } => write!(
+                f,
+                "'{name}' was started without a console to attach to; \
+                 restart it with 'vm stop {name}' and 'vm start {name}'"
+            ),
+            Self::NoScreen { name } => write!(
+                f,
+                "'{name}' was started without a screen to show; \
+                 restart it with 'vm stop {name}' and 'vm start {name}'"
             ),
             Self::FollowNeedsText => write!(
                 f,

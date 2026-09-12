@@ -387,6 +387,10 @@ mod tests {
             digest: digest(),
             size: Some(1024),
             compression: Compression::None,
+            firmware: crate::machine::Firmware::Bios,
+            cpu: None,
+            machine: crate::machine::Chipset::Q35,
+            disk: crate::machine::Disk::Virtio,
         }
     }
 

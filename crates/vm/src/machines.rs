@@ -13,6 +13,7 @@ use vm_core::catalogue::Catalogue;
 use vm_core::error::{Error, Result};
 use vm_core::hypervisor::Supervisor as _;
 use vm_core::instance::{Directory, Instance, Instances, Port, Share};
+use vm_core::machine::{self, Chipset, Disk, Firmware};
 use vm_core::store::{Pulled, Store};
 use vm_core::value::Value;
 use vm_core::{host_architecture, hypervisor, instance, keys, process, qmp, seed};
@@ -43,6 +44,12 @@ pub struct Request {
     pub shares: Vec<Share>,
     pub disk_size: Option<String>,
     pub pull: Option<Pull>,
+    pub firmware: Option<Firmware>,
+    pub cpu: Option<String>,
+    pub machine: Option<Chipset>,
+    pub disk: Option<Disk>,
+    /// A `$6$` hash for console login.
+    pub password: Option<String>,
 }
 
 pub fn run(
@@ -54,6 +61,15 @@ pub fn run(
 ) -> Result<reports::Run> {
     let reference: vm_core::Reference = request.reference.parse()?;
     let (entry, artifact) = catalogue.resolve(&reference, host_architecture())?;
+    machine::check_disk(
+        request.machine.unwrap_or(artifact.machine),
+        request.disk.unwrap_or(artifact.disk),
+    )?;
+    if request.password.is_some() && !entry.login.is_seedable() {
+        return Err(Error::PasswordUnseeded {
+            name: request.reference.clone(),
+        });
+    }
     let pull = match request.pull {
         Some(held) => held,
         None if vm_core::config::Config::load()?.auto_pull => Pull::Missing,
@@ -118,6 +134,13 @@ fn build(
         created: instance::now(),
         memory: request.memory,
         cpus: request.cpus,
+        firmware: request.firmware.unwrap_or(artifact.firmware),
+        cpu: request
+            .cpu
+            .clone()
+            .unwrap_or_else(|| artifact.cpu().to_owned()),
+        machine: request.machine.unwrap_or(artifact.machine),
+        disk: request.disk.unwrap_or(artifact.disk),
         user: request.user.clone(),
         seeded: entry.login.is_seedable(),
         monitor: directory.monitor().to_owned(),
@@ -125,6 +148,7 @@ fn build(
         pid: None,
         started: None,
         generation: 0,
+        password: request.password.clone(),
         ports: request.ports.clone(),
         shares: request.shares.clone(),
     };
@@ -158,6 +182,7 @@ fn build(
         directory,
         accelerated,
         reports::RunStatus::Created,
+        false,
     ))
 }
 
@@ -168,6 +193,9 @@ fn build(
 /// started". What it says about acceleration comes free with the wait.
 fn launch(directory: &Directory, held: &mut Instance) -> Result<Option<bool>> {
     prepare_runtime(directory.monitor())?;
+    if held.firmware == Firmware::Uefi {
+        machine::prepare_uefi(&held.arch, &directory.firmware_variables())?;
+    }
     // Sockets left behind by a machine that is gone would refuse the new one.
     directory.clear_runtime();
     // The hypervisor connects to these sockets, so something has to be
@@ -259,8 +287,14 @@ fn report(
     directory: &Directory,
     accelerated: Option<bool>,
     status: reports::RunStatus,
+    firmware_changed: bool,
 ) -> reports::Run {
     reports::Run {
+        firmware: held.firmware,
+        cpu: held.cpu.clone(),
+        machine: held.machine,
+        disk: held.disk,
+        firmware_changed,
         name: held.name.clone(),
         image: held.image.clone(),
         arch: held.arch.clone(),
@@ -273,6 +307,7 @@ fn report(
         pid: held.pid.unwrap_or_default(),
         accelerated,
         console: directory.console().display().to_string(),
+        screen: directory.screen_socket().display().to_string(),
         status,
     }
 }
@@ -295,9 +330,11 @@ pub fn start(name: &str, changes: &Changes) -> Result<reports::Run> {
             &directory,
             None,
             reports::RunStatus::AlreadyRunning,
+            false,
         ));
     }
     held.forget_process();
+    let firmware = held.firmware;
     apply(&directory, &mut held, changes)?;
     // The port it used last time may belong to something else by now, and a
     // forward that cannot bind would take the whole machine down with it.
@@ -310,6 +347,7 @@ pub fn start(name: &str, changes: &Changes) -> Result<reports::Run> {
         &directory,
         accelerated,
         reports::RunStatus::Restarted,
+        held.firmware != firmware,
     ))
 }
 
@@ -323,12 +361,23 @@ pub struct Changes {
     pub shares: Option<Vec<Share>>,
     pub user: Option<String>,
     pub disk_size: Option<String>,
+    pub firmware: Option<Firmware>,
+    pub cpu: Option<String>,
+    pub machine: Option<Chipset>,
+    pub disk: Option<Disk>,
+    /// A `$6$` hash, or `*` to take the password away.
+    pub password: Option<String>,
 }
 
 impl Changes {
     pub const fn any(&self) -> bool {
         self.memory.is_some()
+            || self.password.is_some()
             || self.cpus.is_some()
+            || self.firmware.is_some()
+            || self.cpu.is_some()
+            || self.machine.is_some()
+            || self.disk.is_some()
             || self.ports.is_some()
             || self.shares.is_some()
             || self.user.is_some()
@@ -346,11 +395,28 @@ fn apply(directory: &Directory, held: &mut Instance, changes: &Changes) -> Resul
     if !changes.any() {
         return Ok(());
     }
+    machine::check_disk(
+        changes.machine.unwrap_or(held.machine),
+        changes.disk.unwrap_or(held.disk),
+    )?;
     if let Some(memory) = changes.memory {
         held.memory = memory;
     }
     if let Some(cpus) = changes.cpus {
         held.cpus = cpus;
+    }
+    // The variable store is kept across a switch to BIOS so a return to UEFI finds its boot entries.
+    if let Some(firmware) = changes.firmware {
+        held.firmware = firmware;
+    }
+    if let Some(cpu) = &changes.cpu {
+        held.cpu.clone_from(cpu);
+    }
+    if let Some(chipset) = changes.machine {
+        held.machine = chipset;
+    }
+    if let Some(disk) = changes.disk {
+        held.disk = disk;
     }
     // Two different things: the seed's contents changing, and the guest being
     // told it is a machine it has not seen before.
@@ -380,6 +446,17 @@ fn apply(directory: &Directory, held: &mut Instance, changes: &Changes) -> Resul
         // met. The one it already has is left where it is.
         renew |= user != held.user;
         held.user = user;
+    }
+    if let Some(password) = &changes.password {
+        if !held.seeded {
+            return Err(Error::PasswordUnseeded {
+                name: held.name.clone(),
+            });
+        }
+        // cloud-init applies chpasswd once per instance id, so the guest must think itself new.
+        renew = true;
+        held.password = Some(password.clone());
+        directory.restrict()?;
     }
     if let Some(size) = &changes.disk_size {
         hypervisor::resize_overlay(&directory.overlay(), size)?;
@@ -1134,6 +1211,24 @@ pub fn parse_port(text: &str) -> std::result::Result<Port, String> {
 
 /// The seed's own rules apply to the user name, so they are checked here
 /// rather than at the point where the machine is about to boot.
+pub fn parse_firmware(text: &str) -> std::result::Result<Firmware, String> {
+    text.parse().map_err(|error: Error| error.to_string())
+}
+
+pub fn parse_machine(text: &str) -> std::result::Result<Chipset, String> {
+    text.parse().map_err(|error: Error| error.to_string())
+}
+
+pub fn parse_disk(text: &str) -> std::result::Result<Disk, String> {
+    text.parse().map_err(|error: Error| error.to_string())
+}
+
+pub fn parse_cpu(text: &str) -> std::result::Result<String, String> {
+    machine::check_cpu(text)
+        .map(|()| text.to_owned())
+        .map_err(|error| error.to_string())
+}
+
 pub fn parse_user(text: &str) -> std::result::Result<String, String> {
     let trial = seed::Seed {
         instance_id: "check".to_owned(),
@@ -1141,6 +1236,7 @@ pub fn parse_user(text: &str) -> std::result::Result<String, String> {
         user: text.to_owned(),
         authorized_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKq7YQ== check".to_owned(),
         mounts: Vec::new(),
+        password: None,
     };
     trial
         .image()
@@ -1181,6 +1277,10 @@ mod tests {
                 created: 1_700_000_000,
                 memory: 2048,
                 cpus: 2,
+                firmware: vm_core::machine::Firmware::Bios,
+                cpu: "max".to_owned(),
+                machine: vm_core::machine::Chipset::Q35,
+                disk: vm_core::machine::Disk::Virtio,
                 user: "vm".to_owned(),
                 seeded: true,
                 monitor: directory.monitor().to_owned(),
@@ -1188,6 +1288,7 @@ mod tests {
                 pid: None,
                 started: None,
                 generation: 0,
+                password: None,
                 ports: Vec::new(),
                 shares: Vec::new(),
             };
@@ -1336,6 +1437,135 @@ mod tests {
         );
     }
 
+    const HASH: &str = "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1";
+
+    /// cloud-init applies a password once per instance id, so a new one needs a new id.
+    #[test]
+    fn a_new_password_is_recorded_seeded_and_acted_on() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let scratch = Scratch::new("password");
+        let (directory, mut held) = scratch.machine("one");
+        let changes = Changes {
+            password: Some(HASH.to_owned()),
+            ..Changes::default()
+        };
+        apply(&directory, &mut held, &changes).unwrap();
+        assert_eq!(held.generation, 1);
+        assert_eq!(directory.read().unwrap().password.as_deref(), Some(HASH));
+        let seed = String::from_utf8_lossy(&std::fs::read(directory.seed()).unwrap()).into_owned();
+        assert!(seed.contains("chpasswd:"), "{seed}");
+        assert!(seed.contains(HASH), "{seed}");
+        let mode = std::fs::metadata(directory.path())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+    }
+
+    #[test]
+    fn taking_the_password_away_seeds_the_disabled_marker() {
+        let scratch = Scratch::new("nopassword");
+        let (directory, mut held) = scratch.machine("one");
+        held.password = Some(HASH.to_owned());
+        let changes = Changes {
+            password: Some("*".to_owned()),
+            ..Changes::default()
+        };
+        apply(&directory, &mut held, &changes).unwrap();
+        assert_eq!(held.password.as_deref(), Some("*"));
+        let seed = String::from_utf8_lossy(&std::fs::read(directory.seed()).unwrap()).into_owned();
+        assert!(!seed.contains(HASH), "{seed}");
+        assert!(seed.contains("password: \"*\""), "{seed}");
+    }
+
+    #[test]
+    fn a_password_for_a_machine_with_no_seed_is_refused_and_nothing_changes() {
+        let scratch = Scratch::new("unseededpassword");
+        let (directory, mut held) = scratch.machine("one");
+        held.seeded = false;
+        directory.write(&held).unwrap();
+        let changes = Changes {
+            memory: Some(8192),
+            password: Some(HASH.to_owned()),
+            ..Changes::default()
+        };
+        let error = apply(&directory, &mut held, &changes).unwrap_err();
+        assert_eq!(error.kind(), "password-needs-seed");
+        let stored = directory.read().unwrap();
+        assert_eq!(stored.password, None);
+        assert_eq!(stored.memory, 2048);
+    }
+
+    /// Firmware and processor are the hypervisor's, so the guest is not told it is new.
+    #[test]
+    fn a_machine_change_is_recorded_without_renewing_the_guest() {
+        let scratch = Scratch::new("machinechange");
+        let (directory, mut held) = scratch.machine("one");
+        std::fs::write(directory.firmware_variables(), b"boot entries").unwrap();
+        let changes = Changes {
+            firmware: Some(Firmware::Bios),
+            cpu: Some("Penryn,+avx".to_owned()),
+            ..Changes::default()
+        };
+        held.firmware = Firmware::Uefi;
+        apply(&directory, &mut held, &changes).unwrap();
+        let stored = directory.read().unwrap();
+        assert_eq!(stored.firmware, Firmware::Bios);
+        assert_eq!(stored.cpu, "Penryn,+avx");
+        assert_eq!(stored.generation, 0);
+        assert_eq!(
+            std::fs::read(directory.firmware_variables()).unwrap(),
+            b"boot entries",
+            "a return to UEFI would lose its boot entries"
+        );
+    }
+
+    #[test]
+    fn a_chipset_and_disk_change_is_recorded() {
+        let scratch = Scratch::new("chipsetchange");
+        let (directory, mut held) = scratch.machine("one");
+        let changes = Changes {
+            machine: Some(Chipset::Pc),
+            disk: Some(Disk::Ide),
+            ..Changes::default()
+        };
+        apply(&directory, &mut held, &changes).unwrap();
+        let stored = directory.read().unwrap();
+        assert_eq!((stored.machine, stored.disk), (Chipset::Pc, Disk::Ide));
+        assert_eq!(stored.generation, 0);
+    }
+
+    /// Checked against what the machine will be once the change is made, not against either half alone.
+    #[test]
+    fn a_disk_controller_the_resulting_chipset_lacks_is_refused_and_nothing_changes() {
+        let scratch = Scratch::new("chipsetmismatch");
+        let (directory, mut held) = scratch.machine("one");
+        let changes = Changes {
+            memory: Some(8192),
+            disk: Some(Disk::Ide),
+            ..Changes::default()
+        };
+        let error = apply(&directory, &mut held, &changes).unwrap_err();
+        assert_eq!(error.kind(), "machine-mismatch");
+        let stored = directory.read().unwrap();
+        assert_eq!((stored.disk, stored.memory), (Disk::Virtio, 2048));
+    }
+
+    #[test]
+    fn changing_the_chipset_and_disk_together_is_checked_as_a_pair() {
+        let scratch = Scratch::new("chipsetboth");
+        let (directory, mut held) = scratch.machine("one");
+        held.machine = Chipset::Pc;
+        held.disk = Disk::Ide;
+        let changes = Changes {
+            machine: Some(Chipset::Q35),
+            disk: Some(Disk::Sata),
+            ..Changes::default()
+        };
+        apply(&directory, &mut held, &changes).unwrap();
+        assert_eq!((held.machine, held.disk), (Chipset::Q35, Disk::Sata));
+    }
+
     #[test]
     fn the_account_it_already_has_is_not_a_change() {
         let scratch = Scratch::new("sameuser");
@@ -1385,6 +1615,7 @@ mod tests {
             user: "vm".to_owned(),
             authorized_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKq7YQ== vm".to_owned(),
             mounts: Vec::new(),
+            password: None,
         };
         assert!(seed.image().is_ok());
         assert!(tail("", None).is_empty());

@@ -1,0 +1,16 @@
+name = "puredarwin"
+tag = "17.4"
+aliases = ["17", "latest"]
+description = "PureDarwin 17.4 Beta (open-source Darwin); root shell on the screen, kernel log on the console"
+login = "none"
+
+[[image]]
+arch = "amd64"
+format = "vmdk"
+compression = "xz"
+url = "https://github.com/PureDarwin/PureDarwin/releases/download/17.4/pd_17_4.vmdk.xz"
+digest = "sha256:f2bb10f2fdb309a9a4fc77083c17b5a145db132551449a01b115f470d86c317c"
+size = 1087242240
+machine = "pc"
+disk = "ide"
+cpu = "Penryn,vendor=GenuineIntel,+ssse3,+sse4.1,+sse4.2,+aes,+xsave,+avx,+popcnt"

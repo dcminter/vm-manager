@@ -167,6 +167,10 @@ mod tests {
             created: 1_700_000_000,
             memory: 2048,
             cpus: 2,
+            firmware: crate::machine::Firmware::Bios,
+            cpu: "max".to_owned(),
+            machine: crate::machine::Chipset::Q35,
+            disk: crate::machine::Disk::Virtio,
             user: "vm".to_owned(),
             seeded: true,
             monitor: PathBuf::new(),
@@ -174,6 +178,7 @@ mod tests {
             pid: Some(handle.pid),
             started: Some(handle.started),
             generation: 0,
+            password: None,
             ports: Vec::new(),
             shares: Vec::new(),
         }

@@ -8,6 +8,7 @@
 
 use crate::error::{Error, Result};
 use crate::instance::{Directory, Instance};
+use crate::machine::{self, Firmware};
 use crate::process::Handle;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -128,19 +129,36 @@ pub fn arguments(instance: &Instance, directory: &Directory) -> Vec<String> {
         instance.memory
     ));
     push("-machine");
-    push("q35,memory-backend=mem,accel=kvm:tcg");
-    // `max` rather than `host`, which only exists under KVM: the accelerator
-    // above falls back to emulation, and the CPU model must survive that.
+    push(&format!(
+        "{},memory-backend=mem,accel=kvm:tcg",
+        instance.machine.name()
+    ));
+    // The default is `max` rather than `host`, which only exists under KVM.
     push("-cpu");
-    push("max");
+    push(&instance.cpu);
+    if instance.firmware == Firmware::Uefi {
+        if let Some(code) = machine::uefi_code(&instance.arch) {
+            push("-drive");
+            push(&format!(
+                "if=pflash,format=raw,unit=0,readonly=on,file={}",
+                code.display()
+            ));
+        }
+        push("-drive");
+        push(&format!(
+            "if=pflash,format=raw,unit=1,file={}",
+            directory.firmware_variables().display()
+        ));
+    }
     push("-m");
     push(&instance.memory.to_string());
     push("-smp");
     push(&instance.cpus.to_string());
     push("-drive");
     push(&format!(
-        "file={},if=virtio,format=qcow2",
-        directory.overlay().display()
+        "file={},{},format=qcow2",
+        directory.overlay().display(),
+        instance.disk.interface(0)
     ));
     if instance.seeded {
         push("-drive");
@@ -150,8 +168,9 @@ pub fn arguments(instance: &Instance, directory: &Directory) -> Vec<String> {
         // file belongs to this instance alone and is rewritten on every
         // start, so there is nothing here for a guest to spoil.
         push(&format!(
-            "file={},if=virtio,format=raw",
-            directory.seed().display()
+            "file={},{},format=raw",
+            directory.seed().display(),
+            instance.disk.interface(1)
         ));
     }
     push("-netdev");
@@ -178,11 +197,14 @@ pub fn arguments(instance: &Instance, directory: &Directory) -> Vec<String> {
     }
     push("-display");
     push("none");
-    // Appended rather than truncated: a machine that failed to boot and was
-    // started again would otherwise take the evidence with it.
+    // On from launch, because QMP cannot add a VNC server to a machine started without one.
+    push("-vnc");
+    push(&format!("unix:{}", directory.screen_socket().display()));
+    // Logged with append so a machine started again keeps the evidence of the last boot.
     push("-chardev");
     push(&format!(
-        "file,id=console,path={},append=on",
+        "socket,id=console,path={},server=on,wait=off,logfile={},logappend=on",
+        directory.console_socket().display(),
         directory.console().display()
     ));
     push("-serial");
@@ -411,6 +433,10 @@ mod tests {
             created: 1_700_000_000,
             memory: 2048,
             cpus: 2,
+            firmware: crate::machine::Firmware::Bios,
+            cpu: "max".to_owned(),
+            machine: crate::machine::Chipset::Q35,
+            disk: crate::machine::Disk::Virtio,
             user: "vm".to_owned(),
             seeded: true,
             monitor: PathBuf::new(),
@@ -418,6 +444,7 @@ mod tests {
             pid: None,
             started: None,
             generation: 0,
+            password: None,
             ports: Vec::new(),
             shares: Vec::new(),
         }
@@ -466,8 +493,7 @@ mod tests {
         );
     }
 
-    /// The accelerator falls back rather than failing, so the processor model
-    /// has to be one that exists under emulation too.
+    /// The default model has to exist under emulation too, which `host` does not.
     #[test]
     fn the_accelerator_falls_back_and_the_processor_survives_it() {
         let scratch = Scratch::new("accel");
@@ -478,6 +504,101 @@ mod tests {
                 .contains("accel=kvm:tcg")
         );
         assert_eq!(pair(&arguments, "-cpu"), Some("max".to_owned()));
+    }
+
+    fn drives(arguments: &[String]) -> Vec<String> {
+        arguments
+            .iter()
+            .enumerate()
+            .filter(|(at, held)| *held == "-drive" && arguments.len() > at + 1)
+            .filter_map(|(at, _)| arguments.get(at + 1).cloned())
+            .collect()
+    }
+
+    #[test]
+    fn the_recorded_processor_model_is_the_one_presented() {
+        let scratch = Scratch::new("cpumodel");
+        let mut held = instance("one");
+        held.cpu = "Penryn,vendor=GenuineIntel,+avx".to_owned();
+        let arguments = arguments(&held, &scratch.directory("one"));
+        assert_eq!(
+            pair(&arguments, "-cpu"),
+            Some("Penryn,vendor=GenuineIntel,+avx".to_owned())
+        );
+    }
+
+    /// An old guest with no virtio driver finds its disks where an IDE controller puts them.
+    #[test]
+    fn a_pc_machine_with_ide_disks_puts_both_disks_on_the_ide_controller() {
+        let scratch = Scratch::new("ide");
+        let directory = scratch.directory("one");
+        let mut held = instance("one");
+        held.machine = crate::machine::Chipset::Pc;
+        held.disk = crate::machine::Disk::Ide;
+        let arguments = arguments(&held, &directory);
+        assert!(
+            pair(&arguments, "-machine").unwrap().starts_with("pc,"),
+            "{arguments:?}"
+        );
+        let disks = drives(&arguments);
+        let overlay = disks
+            .iter()
+            .find(|drive| drive.contains(&directory.overlay().display().to_string()))
+            .unwrap();
+        assert!(overlay.contains("if=ide,index=0"), "{overlay}");
+        let seed = disks
+            .iter()
+            .find(|drive| drive.contains("seed.img"))
+            .unwrap();
+        assert!(seed.contains("if=ide,index=1"), "{seed}");
+    }
+
+    #[test]
+    fn the_default_machine_is_q35_with_virtio_disks() {
+        let scratch = Scratch::new("q35virtio");
+        let directory = scratch.directory("one");
+        let arguments = arguments(&instance("one"), &directory);
+        assert!(pair(&arguments, "-machine").unwrap().starts_with("q35,"));
+        assert!(
+            drives(&arguments)
+                .iter()
+                .all(|drive| drive.contains("pflash") || drive.contains("if=virtio"))
+        );
+    }
+
+    #[test]
+    fn a_bios_machine_is_given_no_flash() {
+        let scratch = Scratch::new("bios");
+        let arguments = arguments(&instance("one"), &scratch.directory("one"));
+        assert!(
+            !drives(&arguments)
+                .iter()
+                .any(|drive| drive.contains("pflash"))
+        );
+    }
+
+    /// The code is shared and must not be written; the variables are the machine's own.
+    #[test]
+    fn a_uefi_machine_is_given_shared_code_and_its_own_variables() {
+        let scratch = Scratch::new("uefi");
+        let directory = scratch.directory("one");
+        let mut held = instance("one");
+        held.firmware = Firmware::Uefi;
+        let flash: Vec<String> = drives(&arguments(&held, &directory))
+            .into_iter()
+            .filter(|drive| drive.contains("if=pflash"))
+            .collect();
+        assert_eq!(flash.len(), 2, "{flash:?}");
+        assert!(flash[0].contains("unit=0"), "{}", flash[0]);
+        assert!(flash[0].contains("readonly=on"), "{}", flash[0]);
+        assert!(flash[0].contains("OVMF_CODE_4M.fd"), "{}", flash[0]);
+        assert!(flash[1].contains("unit=1"), "{}", flash[1]);
+        assert!(!flash[1].contains("readonly"), "{}", flash[1]);
+        assert!(
+            flash[1].contains(&directory.firmware_variables().display().to_string()),
+            "{}",
+            flash[1]
+        );
     }
 
     #[test]
@@ -580,10 +701,33 @@ mod tests {
         assert_eq!(
             pair(&arguments, "-chardev"),
             Some(format!(
-                "file,id=console,path={},append=on",
+                "socket,id=console,path={},server=on,wait=off,logfile={},logappend=on",
+                directory.console_socket().display(),
                 directory.console().display()
             ))
         );
+    }
+
+    /// Without `wait=off` the guest would not boot until someone attached.
+    #[test]
+    fn the_console_waits_for_nobody_and_keeps_its_log() {
+        let scratch = Scratch::new("consolewait");
+        let arguments = arguments(&instance("one"), &scratch.directory("one"));
+        let console = pair(&arguments, "-chardev").unwrap();
+        assert!(console.contains("wait=off"), "{console}");
+        assert!(console.contains("logappend=on"), "{console}");
+    }
+
+    #[test]
+    fn every_machine_has_a_screen_on_a_private_socket() {
+        let scratch = Scratch::new("screen");
+        let directory = scratch.directory("one");
+        let arguments = arguments(&instance("one"), &directory);
+        assert_eq!(
+            pair(&arguments, "-vnc"),
+            Some(format!("unix:{}", directory.screen_socket().display()))
+        );
+        assert_eq!(pair(&arguments, "-display"), Some("none".to_owned()));
     }
 
     fn share(tag: &str, target: &str) -> Share {

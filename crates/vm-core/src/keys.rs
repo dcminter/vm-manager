@@ -122,6 +122,7 @@ mod tests {
             user: "vm".to_owned(),
             authorized_key: public,
             mounts: Vec::new(),
+            password: None,
         };
         assert!(seed.image().is_ok());
     }

@@ -1,9 +1,12 @@
+mod console;
 mod machines;
 mod output;
 mod progress;
 mod reports;
+mod screen;
 mod style;
 mod table;
+mod terminal;
 mod units;
 
 use clap::{Parser, Subcommand};
@@ -83,6 +86,21 @@ enum Command {
         /// When to fetch the image
         #[arg(long, value_enum)]
         pull: Option<machines::Pull>,
+        /// Firmware, bios or uefi, instead of what the image asks for
+        #[arg(long, value_parser = machines::parse_firmware)]
+        firmware: Option<vm_core::machine::Firmware>,
+        /// QEMU CPU model instead of what the image asks for, such as Penryn,+avx
+        #[arg(long, value_parser = machines::parse_cpu)]
+        cpu: Option<String>,
+        /// Machine type, q35 or pc, instead of what the image asks for
+        #[arg(long, value_parser = machines::parse_machine)]
+        machine: Option<vm_core::machine::Chipset>,
+        /// Disk controller, virtio, ide (pc only) or sata (q35 only), instead of what the image asks for
+        #[arg(long, value_parser = machines::parse_disk)]
+        disk: Option<vm_core::machine::Disk>,
+        /// Ask for a password the account can log in with at the console
+        #[arg(long)]
+        password: bool,
     },
     /// Start an instance that is not running, changing how it is set up
     Start {
@@ -114,6 +132,24 @@ enum Command {
         /// Grow the disk to this size, such as 40G
         #[arg(long)]
         disk_size: Option<String>,
+        /// Firmware, bios or uefi; a disk prepared for only the other will not boot
+        #[arg(long, value_parser = machines::parse_firmware)]
+        firmware: Option<vm_core::machine::Firmware>,
+        /// QEMU CPU model, such as Penryn,+avx
+        #[arg(long, value_parser = machines::parse_cpu)]
+        cpu: Option<String>,
+        /// Machine type, q35 or pc
+        #[arg(long, value_parser = machines::parse_machine)]
+        machine: Option<vm_core::machine::Chipset>,
+        /// Disk controller, virtio, ide (pc only) or sata (q35 only); a guest without its driver will not boot
+        #[arg(long, value_parser = machines::parse_disk)]
+        disk: Option<vm_core::machine::Disk>,
+        /// Ask for a new console password for the account
+        #[arg(long, conflicts_with = "no_password")]
+        password: bool,
+        /// Take the account's console password away
+        #[arg(long)]
+        no_password: bool,
     },
     /// Open a shell on an instance, or run a command in it
     Ssh {
@@ -183,6 +219,23 @@ enum Command {
         #[arg(long, short = 'n')]
         lines: Option<usize>,
     },
+    /// Attach this terminal to an instance's serial console; Ctrl-] detaches
+    Console {
+        /// Instance name
+        name: String,
+    },
+    /// Open a VNC viewer on an instance's screen
+    Screen {
+        /// Instance name
+        name: String,
+    },
+    /// Save a picture of an instance's screen as PNG
+    Screenshot {
+        /// Instance name
+        name: String,
+        /// Where to save it; NAME.png in this directory if omitted
+        file: Option<std::path::PathBuf>,
+    },
     /// Delete an image from the local store
     Rmi {
         /// Image reference, such as debian:trixie
@@ -237,6 +290,15 @@ fn replacement<T: Clone>(given: &[T], none: bool) -> Option<Vec<T>> {
     }
 }
 
+/// The hash of a password read from the user, when one was asked for.
+fn asked_password(asked: bool) -> vm_core::Result<Option<String>> {
+    if asked {
+        vm_core::crypt::hash(&terminal::password()?).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 /// What a command left behind: something to write out, or nothing, because it
 /// wrote as it went and there is no last word to add.
 enum Outcome {
@@ -272,14 +334,29 @@ fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> 
             no_volume,
             user,
             disk_size,
+            firmware,
+            cpu,
+            machine,
+            disk,
+            password,
+            no_password,
         } => {
             let changes = machines::Changes {
+                machine: *machine,
+                disk: *disk,
+                password: if *no_password {
+                    Some("*".to_owned())
+                } else {
+                    asked_password(*password)?
+                },
                 memory: *memory,
                 cpus: *cpus,
                 ports: replacement(publish, *no_publish),
                 shares: replacement(volume, *no_volume),
                 user: user.clone(),
                 disk_size: disk_size.clone(),
+                firmware: *firmware,
+                cpu: cpu.clone(),
             };
             Box::new(machines::start(name, &changes)?)
         }
@@ -297,6 +374,18 @@ fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> 
             }
             Box::new(machines::logs(name, *lines)?)
         }
+        Command::Console { name } => {
+            if !cli.format.is_text() {
+                return Err(vm_core::Error::ConsoleNeedsText);
+            }
+            console::attach(name)?;
+            return Ok(Some(Outcome::Written));
+        }
+        Command::Screen { name } => match screen::show(name, cli.format.is_text())? {
+            Some(report) => Box::new(report),
+            None => return Ok(Some(Outcome::Written)),
+        },
+        Command::Screenshot { name, file } => Box::new(screen::capture(name, file.as_deref())?),
         Command::Ssh { name, command } => {
             // Either this replaces the process or it reports why it could not.
             return machines::connect(name, command).map(|held| match held {});
@@ -353,6 +442,11 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
             volume,
             disk_size,
             pull,
+            firmware,
+            cpu,
+            machine,
+            disk,
+            password,
         } => Ok(Box::new(machines::run(
             &catalogue,
             &store,
@@ -366,6 +460,11 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
                 shares: volume.clone(),
                 disk_size: disk_size.clone(),
                 pull: *pull,
+                firmware: *firmware,
+                cpu: cpu.clone(),
+                machine: *machine,
+                disk: *disk,
+                password: asked_password(*password)?,
             },
             style,
             cli.format.is_text(),
@@ -380,6 +479,9 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
         | Command::Resume { .. }
         | Command::Clone { .. }
         | Command::Logs { .. }
+        | Command::Console { .. }
+        | Command::Screen { .. }
+        | Command::Screenshot { .. }
         | Command::Rm { .. } => unreachable!("handled above"),
     }
 }
@@ -550,6 +652,77 @@ mod tests {
         use clap::Parser as _;
         let cli = Cli::try_parse_from(["vm", "ps", "--follow", "--format", "json"]).unwrap();
         assert_eq!(cli.format, Format::Json);
+    }
+
+    #[test]
+    fn run_takes_a_machine_in_place_of_the_images_own() {
+        use clap::Parser as _;
+        let cli = Cli::try_parse_from([
+            "vm",
+            "run",
+            "debian:trixie",
+            "--firmware",
+            "uefi",
+            "--cpu",
+            "Penryn,+avx",
+        ])
+        .unwrap();
+        let Command::Run { firmware, cpu, .. } = cli.command else {
+            panic!("not a run");
+        };
+        assert_eq!(firmware, Some(vm_core::machine::Firmware::Uefi));
+        assert_eq!(cpu.as_deref(), Some("Penryn,+avx"));
+    }
+
+    #[test]
+    fn run_leaves_the_machine_to_the_image_when_nothing_is_said() {
+        use clap::Parser as _;
+        let cli = Cli::try_parse_from(["vm", "run", "debian:trixie"]).unwrap();
+        let Command::Run { firmware, cpu, .. } = cli.command else {
+            panic!("not a run");
+        };
+        assert_eq!(firmware, None);
+        assert_eq!(cpu, None);
+    }
+
+    #[test]
+    fn start_takes_machine_changes() {
+        use clap::Parser as _;
+        let cli = Cli::try_parse_from(["vm", "start", "pd", "--firmware", "bios", "--cpu", "max"])
+            .unwrap();
+        let Command::Start { firmware, cpu, .. } = cli.command else {
+            panic!("not a start");
+        };
+        assert_eq!(firmware, Some(vm_core::machine::Firmware::Bios));
+        assert_eq!(cpu.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn run_and_start_take_a_chipset_and_disk_controller() {
+        use clap::Parser as _;
+        let cli =
+            Cli::try_parse_from(["vm", "run", "x", "--machine", "pc", "--disk", "ide"]).unwrap();
+        let Command::Run { machine, disk, .. } = cli.command else {
+            panic!("not a run");
+        };
+        assert_eq!(machine, Some(vm_core::machine::Chipset::Pc));
+        assert_eq!(disk, Some(vm_core::machine::Disk::Ide));
+        let cli = Cli::try_parse_from(["vm", "start", "x", "--disk", "sata"]).unwrap();
+        let Command::Start { machine, disk, .. } = cli.command else {
+            panic!("not a start");
+        };
+        assert_eq!(machine, None);
+        assert_eq!(disk, Some(vm_core::machine::Disk::Sata));
+    }
+
+    #[test]
+    fn unusable_machine_settings_are_refused_by_the_parser() {
+        use clap::Parser as _;
+        assert!(Cli::try_parse_from(["vm", "run", "x", "--firmware", "coreboot"]).is_err());
+        assert!(Cli::try_parse_from(["vm", "run", "x", "--cpu", "max -S"]).is_err());
+        assert!(Cli::try_parse_from(["vm", "start", "x", "--cpu", ""]).is_err());
+        assert!(Cli::try_parse_from(["vm", "run", "x", "--machine", "isapc"]).is_err());
+        assert!(Cli::try_parse_from(["vm", "start", "x", "--disk", "scsi"]).is_err());
     }
 
     /// Every command is reachable, and none of them collides with another over

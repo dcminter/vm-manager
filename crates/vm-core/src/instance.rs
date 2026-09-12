@@ -5,6 +5,7 @@
 //! commands claiming one name, because a directory can only be created once.
 
 use crate::error::{Error, Result};
+use crate::machine::{self, Chipset, Disk, Firmware};
 use crate::process::Handle;
 use crate::{paths, seed};
 use serde::{Deserialize, Serialize};
@@ -67,6 +68,18 @@ pub struct Instance {
     /// Mebibytes.
     pub memory: u64,
     pub cpus: u32,
+    /// Absent in records written before firmware could be chosen, which were all BIOS.
+    #[serde(default, skip_serializing_if = "Firmware::is_default")]
+    pub firmware: Firmware,
+    /// Absent in records written before the model could be chosen, which were all the default.
+    #[serde(default = "default_cpu")]
+    pub cpu: String,
+    /// Absent in records written before the chipset could be chosen, which were all q35.
+    #[serde(default, skip_serializing_if = "Chipset::is_default")]
+    pub machine: Chipset,
+    /// Absent in records written before the disk controller could be chosen, which were all virtio.
+    #[serde(default, skip_serializing_if = "Disk::is_default")]
+    pub disk: Disk,
     /// The account cloud-init was told to create, and the one `vm ssh` uses.
     pub user: String,
     /// Whether the image can be seeded at all, from its catalogue entry.
@@ -87,6 +100,9 @@ pub struct Instance {
     /// the instance id they were created with.
     #[serde(default, skip_serializing_if = "is_first")]
     pub generation: u32,
+    /// The account's console password as a `$6$` hash, or `*` once one has been taken away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
     /// An empty list is left out rather than written as `[]`: TOML has no way
     /// to write a bare key after a table, so a written-out empty list after a
     /// populated one makes the file unwritable.
@@ -94,6 +110,10 @@ pub struct Instance {
     pub ports: Vec<Port>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shares: Vec<Share>,
+}
+
+fn default_cpu() -> String {
+    machine::DEFAULT_CPU.to_owned()
 }
 
 #[expect(
@@ -165,7 +185,11 @@ impl Instances {
             source,
         })?;
         match fs::create_dir(&path) {
-            Ok(()) => Ok(self.directory(name)),
+            Ok(()) => {
+                let directory = self.directory(name);
+                directory.restrict()?;
+                Ok(directory)
+            }
             Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
                 Err(Error::InstanceExists {
                     name: name.to_owned(),
@@ -246,6 +270,18 @@ impl Directory {
         &self.monitor
     }
 
+    /// Makes the directory private to its owner, since it holds a private key and may hold a password hash.
+    pub fn restrict(&self) -> Result<()> {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&self.path, fs::Permissions::from_mode(0o700)).map_err(|source| {
+            Error::State {
+                path: self.path.clone(),
+                action: "restrict the instance directory",
+                source,
+            }
+        })
+    }
+
     pub fn record(&self) -> PathBuf {
         self.path.join("instance.toml")
     }
@@ -257,6 +293,11 @@ impl Directory {
 
     pub fn seed(&self) -> PathBuf {
         self.path.join("seed.img")
+    }
+
+    /// The UEFI variable store, which holds the guest's boot entries.
+    pub fn firmware_variables(&self) -> PathBuf {
+        self.path.join("efivars.fd")
     }
 
     /// Where the guest's serial console is written.
@@ -283,6 +324,20 @@ impl Directory {
     pub fn share_socket(&self, index: usize) -> PathBuf {
         let mut path = self.monitor.clone();
         path.set_extension(format!("fs{index}"));
+        path
+    }
+
+    /// The serial console, which a client attaches to and QEMU also logs to [`Directory::console`].
+    pub fn console_socket(&self) -> PathBuf {
+        let mut path = self.monitor.clone();
+        path.set_extension("console");
+        path
+    }
+
+    /// The VNC server showing the machine's screen.
+    pub fn screen_socket(&self) -> PathBuf {
+        let mut path = self.monitor.clone();
+        path.set_extension("vnc");
         path
     }
 
@@ -484,6 +539,7 @@ pub fn seed_for(instance: &Instance, authorized_key: &str) -> seed::Seed {
                 target: share.target.clone(),
             })
             .collect(),
+        password: instance.password.clone(),
     }
 }
 
@@ -524,6 +580,10 @@ mod tests {
             created: 1_700_000_000,
             memory: 2048,
             cpus: 2,
+            firmware: crate::machine::Firmware::Bios,
+            cpu: "max".to_owned(),
+            machine: crate::machine::Chipset::Q35,
+            disk: crate::machine::Disk::Virtio,
             user: "vm".to_owned(),
             seeded: true,
             monitor: PathBuf::from("/run/user/1000/vm/0011223344556677.sock"),
@@ -531,6 +591,7 @@ mod tests {
             pid: None,
             started: None,
             generation: 0,
+            password: None,
             ports: Vec::new(),
             shares: Vec::new(),
         }
@@ -622,6 +683,75 @@ mod tests {
     }
 
     #[test]
+    fn machine_settings_survive_the_round_trip() {
+        let scratch = Scratch::new("machine");
+        let directory = scratch.instances().create("one").unwrap();
+        let mut held = instance("one");
+        held.firmware = Firmware::Uefi;
+        held.cpu = "Penryn,vendor=GenuineIntel,+avx".to_owned();
+        held.shares.push(Share {
+            tag: "work".to_owned(),
+            source: PathBuf::from("/home/x/work"),
+            target: "/mnt/work".to_owned(),
+            pid: None,
+            started: None,
+        });
+        directory.write(&held).unwrap();
+        assert_eq!(directory.read().unwrap(), held);
+    }
+
+    #[test]
+    fn a_chipset_and_disk_controller_survive_the_round_trip() {
+        let scratch = Scratch::new("chipset");
+        let directory = scratch.instances().create("one").unwrap();
+        let mut held = instance("one");
+        held.machine = Chipset::Pc;
+        held.disk = Disk::Ide;
+        directory.write(&held).unwrap();
+        assert_eq!(directory.read().unwrap(), held);
+        let text = fs::read_to_string(directory.record()).unwrap();
+        assert!(text.contains("machine = \"pc\""), "{text}");
+        assert!(text.contains("disk = \"ide\""), "{text}");
+    }
+
+    #[test]
+    fn the_default_chipset_and_disk_are_left_out_and_read_back() {
+        let text = basic_toml::to_string(&instance("one")).unwrap();
+        assert!(!text.contains("machine ="), "{text}");
+        assert!(!text.contains("disk ="), "{text}");
+        let read: Instance = basic_toml::from_str(&text).unwrap();
+        assert_eq!((read.machine, read.disk), (Chipset::Q35, Disk::Virtio));
+    }
+
+    /// Every machine made before these settings existed was BIOS with the default model.
+    #[test]
+    fn a_record_without_machine_settings_reads_as_the_defaults() {
+        let scratch = Scratch::new("oldrecord");
+        let directory = scratch.instances().create("one").unwrap();
+        let text: String = basic_toml::to_string(&instance("one"))
+            .unwrap()
+            .lines()
+            .filter(|line| !line.starts_with("cpu =") && !line.starts_with("firmware ="))
+            .flat_map(|line| [line, "\n"])
+            .collect();
+        assert!(!text.contains("cpu ="), "{text}");
+        fs::write(directory.record(), text).unwrap();
+        let read = directory.read().unwrap();
+        assert_eq!(read.firmware, Firmware::Bios);
+        assert_eq!(read.cpu, "max");
+    }
+
+    #[test]
+    fn default_firmware_is_left_out_of_the_record() {
+        let text = basic_toml::to_string(&instance("one")).unwrap();
+        assert!(!text.contains("firmware"), "{text}");
+        let mut held = instance("one");
+        held.firmware = Firmware::Uefi;
+        let text = basic_toml::to_string(&held).unwrap();
+        assert!(text.contains("firmware = \"uefi\""), "{text}");
+    }
+
+    #[test]
     fn a_rewritten_record_replaces_the_old_one_whole() {
         let scratch = Scratch::new("rewrite");
         let directory = scratch.instances().create("one").unwrap();
@@ -690,6 +820,8 @@ mod tests {
         let runtime = directory.monitor().parent().unwrap().to_owned();
         fs::create_dir_all(&runtime).unwrap();
         fs::write(directory.monitor(), b"").unwrap();
+        fs::write(directory.console_socket(), b"").unwrap();
+        fs::write(directory.screen_socket(), b"").unwrap();
         for index in 0..2 {
             let socket = directory.share_socket(index);
             fs::write(&socket, b"").unwrap();
@@ -705,7 +837,46 @@ mod tests {
             !PathBuf::from(format!("{}.pid", directory.share_socket(0).display())).exists(),
             "a pid file was left behind"
         );
+        assert!(!directory.console_socket().exists());
+        assert!(!directory.screen_socket().exists());
         assert!(stranger.exists(), "another machine's socket was removed");
+    }
+
+    #[test]
+    fn the_console_and_screen_sockets_are_distinct_and_inside_the_kernels_limit() {
+        let instances = Instances::at(
+            "/home/somebody-with-a-long-name/.local/state/vm/instances",
+            "/run/user/1000/vm",
+        );
+        let directory = instances.directory(&"a".repeat(63));
+        let sockets = [
+            directory.monitor().to_owned(),
+            directory.console_socket(),
+            directory.screen_socket(),
+            directory.share_socket(0),
+        ];
+        for (index, socket) in sockets.iter().enumerate() {
+            assert!(
+                socket.as_os_str().len() <= crate::qmp::MAX_SOCKET_PATH,
+                "{} is too long",
+                socket.display()
+            );
+            assert!(
+                !sockets[index + 1..].contains(socket),
+                "{} is shared",
+                socket.display()
+            );
+        }
+    }
+
+    /// A new directory holds a private key before anything else, so it starts private.
+    #[test]
+    fn a_new_instance_directory_is_private_to_its_owner() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let scratch = Scratch::new("private");
+        let directory = scratch.instances().create("one").unwrap();
+        let mode = fs::metadata(directory.path()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700, "{mode:o}");
     }
 
     /// The reason the socket does not live in the instance directory: this

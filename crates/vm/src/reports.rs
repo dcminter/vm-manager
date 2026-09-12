@@ -3,6 +3,7 @@ use crate::table;
 use crate::units::{human, human_pair};
 use vm_core::catalogue::{Artifact, Entry};
 use vm_core::instance::{self, Instance, Port};
+use vm_core::machine::{Chipset, Disk, Firmware};
 use vm_core::process;
 use vm_core::value::Value;
 
@@ -83,6 +84,10 @@ pub struct Inspect {
     pub seedable: bool,
     pub held: bool,
     pub size: Option<u64>,
+    pub firmware: Firmware,
+    pub cpu: String,
+    pub machine: Chipset,
+    pub disk: Disk,
 }
 
 impl Inspect {
@@ -100,6 +105,10 @@ impl Inspect {
             seedable: entry.login.is_seedable(),
             held,
             size: artifact.size,
+            firmware: artifact.firmware,
+            cpu: artifact.cpu().to_owned(),
+            machine: artifact.machine,
+            disk: artifact.disk,
         }
     }
 
@@ -137,6 +146,10 @@ impl Report for Inspect {
             ("seedable", Value::Bool(self.seedable)),
             ("held", Value::Bool(self.held)),
             ("size", self.size.map_or(Value::Null, Value::Integer)),
+            ("firmware", Value::string(self.firmware.name())),
+            ("cpu", Value::string(self.cpu.clone())),
+            ("machine", Value::string(self.machine.name())),
+            ("disk", Value::string(self.disk.name())),
         ])
     }
 
@@ -165,6 +178,9 @@ impl Report for Inspect {
             ("Guest access", self.access().to_owned()),
             ("Pulled", if self.held { "yes" } else { "no" }.to_owned()),
         ]);
+        if let Some(machine) = machine_text(self.firmware, self.machine, self.disk, &self.cpu) {
+            fields.push(("Machine", machine));
+        }
         let width = fields
             .iter()
             .map(|(label, _)| label.chars().count())
@@ -286,7 +302,14 @@ pub struct Run {
     /// Whether the machine got KVM; absent when the monitor would not say.
     pub accelerated: Option<bool>,
     pub console: String,
+    pub screen: String,
     pub status: RunStatus,
+    pub firmware: Firmware,
+    pub cpu: String,
+    pub machine: Chipset,
+    pub disk: Disk,
+    /// Set when this start moved the machine to other firmware.
+    pub firmware_changed: bool,
 }
 
 fn ports_value(ports: &[Port]) -> Value {
@@ -329,6 +352,12 @@ impl Report for Run {
                 self.accelerated.map_or(Value::Null, Value::Bool),
             ),
             ("console", Value::string(self.console.clone())),
+            ("screen", Value::string(self.screen.clone())),
+            ("firmware", Value::string(self.firmware.name())),
+            ("cpu", Value::string(self.cpu.clone())),
+            ("machine", Value::string(self.machine.name())),
+            ("disk", Value::string(self.disk.name())),
+            ("firmware_changed", Value::Bool(self.firmware_changed)),
         ])
     }
 
@@ -352,8 +381,22 @@ impl Report for Run {
         if let Some(port) = self.ssh_port {
             lines.push(format!("  ssh      vm ssh {} (port {port})", self.name));
         }
+        lines.push(format!("  console  vm console {}", self.name));
+        if !self.seeded {
+            lines.push(format!("  screen   vm screen {}", self.name));
+        }
         if !self.ports.is_empty() {
             lines.push(format!("  ports    {}", ports_text(&self.ports)));
+        }
+        if let Some(machine) = machine_text(self.firmware, self.machine, self.disk, &self.cpu) {
+            lines.push(format!("  machine  {machine}"));
+        }
+        if self.firmware_changed {
+            lines.push(style.dim(&format!(
+                "  The firmware is now {}; a disk prepared only for the other will not boot, \
+                 and changing it back restores it.",
+                self.firmware.name()
+            )));
         }
         if self.accelerated == Some(false) {
             lines.push(
@@ -369,6 +412,86 @@ impl Report for Run {
         }
         lines
     }
+}
+
+/// Where a machine's screen can be reached.
+pub struct Screen {
+    pub name: String,
+    pub socket: String,
+    /// This host's name, for the command that forwards the socket from elsewhere.
+    pub host: String,
+}
+
+impl Report for Screen {
+    fn to_value(&self) -> Value {
+        Value::map([
+            ("name", Value::string(self.name.clone())),
+            ("socket", Value::string(self.socket.clone())),
+        ])
+    }
+
+    fn render_text(&self, style: Style) -> Vec<String> {
+        vec![
+            format!(
+                "{}'s screen is a VNC server at {}",
+                style.name(&self.name),
+                self.socket
+            ),
+            style.dim("  There is no display here to open a viewer on. From a machine with one:"),
+            format!("  ssh -L 5900:{} {}", self.socket, self.host),
+            style.dim("  then connect a VNC viewer to localhost:5900."),
+        ]
+    }
+}
+
+/// A saved picture of a machine's screen.
+pub struct Screenshot {
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Report for Screenshot {
+    fn to_value(&self) -> Value {
+        Value::map([
+            ("name", Value::string(self.name.clone())),
+            ("path", Value::string(self.path.clone())),
+            ("size", Value::Integer(self.size)),
+            ("width", Value::Integer(u64::from(self.width))),
+            ("height", Value::Integer(u64::from(self.height))),
+        ])
+    }
+
+    fn render_text(&self, style: Style) -> Vec<String> {
+        vec![format!(
+            "Saved {}'s screen to {} ({}x{}, {})",
+            style.name(&self.name),
+            self.path,
+            self.width,
+            self.height,
+            human(self.size)
+        )]
+    }
+}
+
+/// The machine settings that differ from the defaults, or nothing when none do.
+fn machine_text(firmware: Firmware, machine: Chipset, disk: Disk, cpu: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    if !machine.is_default() {
+        parts.push(format!("{} machine", machine.name()));
+    }
+    if !disk.is_default() {
+        parts.push(format!("{} disk", disk.name()));
+    }
+    if !firmware.is_default() {
+        parts.push(format!("{} firmware", firmware.name()));
+    }
+    if cpu != vm_core::machine::DEFAULT_CPU {
+        parts.push(format!("cpu {cpu}"));
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 /// One instance, as `vm ps` lists it.
@@ -822,6 +945,8 @@ impl Report for Removed {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
     use vm_core::value::{to_json, to_yaml};
 
@@ -1154,6 +1279,10 @@ mod tests {
             seedable: false,
             held: false,
             size: None,
+            firmware: Firmware::Bios,
+            cpu: "max".to_owned(),
+            machine: Chipset::Q35,
+            disk: Disk::Virtio,
         };
         let lines = report.render_text(Style::plain());
         assert!(
@@ -1180,6 +1309,10 @@ mod tests {
             seedable: true,
             held: false,
             size: None,
+            firmware: Firmware::Bios,
+            cpu: "max".to_owned(),
+            machine: Chipset::Q35,
+            disk: Disk::Virtio,
         };
         let line = |report: &Inspect| {
             report
@@ -1192,6 +1325,176 @@ mod tests {
         assert!(to_json(&report.to_value()).contains(r#""compression": "xz""#));
         report.compression = "none".to_owned();
         assert!(line(&report).ends_with("qcow2"));
+    }
+
+    fn run(firmware: Firmware, cpu: &str, firmware_changed: bool) -> Run {
+        Run {
+            name: "pd".to_owned(),
+            image: "puredarwin:minimal".to_owned(),
+            arch: "amd64".to_owned(),
+            memory: 4096,
+            cpus: 2,
+            ports: Vec::new(),
+            ssh_port: None,
+            user: "vm".to_owned(),
+            seeded: false,
+            pid: 42,
+            accelerated: Some(true),
+            console: "/tmp/console.log".to_owned(),
+            screen: "/run/user/1000/vm/0011.vnc".to_owned(),
+            status: RunStatus::Restarted,
+            firmware,
+            cpu: cpu.to_owned(),
+            machine: Chipset::Q35,
+            disk: Disk::Virtio,
+            firmware_changed,
+        }
+    }
+
+    #[test]
+    fn a_run_says_how_to_reach_the_console_and_for_an_unseeded_image_the_screen() {
+        let mut report = run(Firmware::Bios, "max", false);
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(text.contains("console  vm console pd"), "{text}");
+        assert!(text.contains("screen   vm screen pd"), "{text}");
+        report.seeded = true;
+        report.ssh_port = Some(2222);
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(text.contains("vm console pd"), "{text}");
+        assert!(!text.contains("vm screen"), "{text}");
+        assert!(to_json(&report.to_value()).contains(r#""screen": "/run/user/1000/vm/0011.vnc""#));
+    }
+
+    #[test]
+    fn a_screen_with_no_display_here_says_how_to_reach_it_from_elsewhere() {
+        let report = Screen {
+            name: "pd".to_owned(),
+            socket: "/run/user/1000/vm/0011.vnc".to_owned(),
+            host: "hal".to_owned(),
+        };
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(
+            text.contains("ssh -L 5900:/run/user/1000/vm/0011.vnc hal"),
+            "{text}"
+        );
+        assert!(text.contains("localhost:5900"), "{text}");
+        let document = to_json(&report.to_value());
+        assert!(
+            document.contains(r#""socket": "/run/user/1000/vm/0011.vnc""#),
+            "{document}"
+        );
+        assert!(!document.contains("hal"), "{document}");
+    }
+
+    #[test]
+    fn a_screenshot_reports_where_it_went_and_what_it_holds() {
+        let report = Screenshot {
+            name: "pd".to_owned(),
+            path: "/home/x/pd.png".to_owned(),
+            size: 20480,
+            width: 1280,
+            height: 800,
+        };
+        let text = report.render_text(Style::plain()).join("\n");
+        assert_eq!(
+            text,
+            "Saved pd's screen to /home/x/pd.png (1280x800, 20.0 KiB)"
+        );
+        let document = to_json(&report.to_value());
+        assert!(document.contains(r#""width": 1280"#), "{document}");
+        assert!(document.contains(r#""size": 20480"#), "{document}");
+    }
+
+    #[test]
+    fn a_default_machine_is_not_mentioned_in_text() {
+        let text = run(Firmware::Bios, "max", false)
+            .render_text(Style::plain())
+            .join("\n");
+        assert!(!text.contains("machine"), "{text}");
+        assert!(!text.contains("firmware"), "{text}");
+    }
+
+    #[test]
+    fn a_machine_that_differs_from_the_default_says_how() {
+        let report = run(Firmware::Uefi, "Penryn,+avx", false);
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(
+            text.contains("machine  uefi firmware, cpu Penryn,+avx"),
+            "{text}"
+        );
+        let document = to_json(&report.to_value());
+        assert!(document.contains(r#""firmware": "uefi""#), "{document}");
+        assert!(document.contains(r#""cpu": "Penryn,+avx""#), "{document}");
+        assert!(
+            document.contains(r#""firmware_changed": false"#),
+            "{document}"
+        );
+    }
+
+    #[test]
+    fn a_non_default_chipset_and_disk_are_named_in_the_machine_line() {
+        let mut report = run(Firmware::Bios, "Penryn", false);
+        report.machine = Chipset::Pc;
+        report.disk = Disk::Ide;
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(
+            text.contains("machine  pc machine, ide disk, cpu Penryn"),
+            "{text}"
+        );
+        let document = to_json(&report.to_value());
+        assert!(document.contains(r#""machine": "pc""#), "{document}");
+        assert!(document.contains(r#""disk": "ide""#), "{document}");
+    }
+
+    #[test]
+    fn a_firmware_change_is_explained_with_the_way_back() {
+        let text = run(Firmware::Uefi, "max", true)
+            .render_text(Style::plain())
+            .join("\n");
+        assert!(text.contains("The firmware is now uefi"), "{text}");
+        assert!(text.contains("changing it back restores it"), "{text}");
+    }
+
+    #[test]
+    fn an_inspection_names_a_machine_only_when_it_is_not_the_default() {
+        let mut report = Inspect::new(
+            &vm_core::catalogue::Entry {
+                name: "puredarwin".to_owned(),
+                tag: "minimal".to_owned(),
+                aliases: Vec::new(),
+                description: String::new(),
+                login: vm_core::catalogue::Login::None,
+                artifacts: Vec::new(),
+            },
+            &Artifact {
+                arch: "amd64".to_owned(),
+                format: "raw".to_owned(),
+                url: None,
+                digest: format!("sha256:{}", "a".repeat(64)).parse().unwrap(),
+                size: None,
+                compression: vm_core::compression::Compression::None,
+                firmware: Firmware::Uefi,
+                cpu: Some("Penryn".to_owned()),
+                machine: Chipset::Q35,
+                disk: Disk::Virtio,
+            },
+            false,
+        );
+        let machine = |report: &Inspect| {
+            report
+                .render_text(Style::plain())
+                .into_iter()
+                .find(|line| line.starts_with("Machine"))
+        };
+        assert!(
+            machine(&report)
+                .unwrap()
+                .ends_with("uefi firmware, cpu Penryn")
+        );
+        report.firmware = Firmware::Bios;
+        report.cpu = "max".to_owned();
+        assert_eq!(machine(&report), None);
+        assert!(to_json(&report.to_value()).contains(r#""cpu": "max""#));
     }
 
     #[test]
@@ -1224,6 +1527,10 @@ mod tests {
             seedable: true,
             held: false,
             size: Some(1024),
+            firmware: Firmware::Bios,
+            cpu: "max".to_owned(),
+            machine: Chipset::Q35,
+            disk: Disk::Virtio,
         };
         assert!(report.access().contains("cloud-init"));
         report.seedable = false;

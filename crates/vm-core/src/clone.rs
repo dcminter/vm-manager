@@ -239,7 +239,7 @@ fn write_entry(
     } else {
         "none"
     };
-    let body = format!(
+    let mut body = format!(
         "name = \"{name}\"\n\
          tag = \"{tag}\"\n\
          description = \"Cloned from '{}'\"\n\
@@ -252,6 +252,28 @@ fn write_entry(
          size = {size}\n",
         instance.name, instance.arch
     );
+    // The disk was made to boot on this machine, so a clone asks for the same one.
+    if !instance.firmware.is_default() {
+        let _ = std::fmt::Write::write_fmt(
+            &mut body,
+            format_args!("firmware = \"{}\"\n", instance.firmware.name()),
+        );
+    }
+    if !instance.machine.is_default() {
+        let _ = std::fmt::Write::write_fmt(
+            &mut body,
+            format_args!("machine = \"{}\"\n", instance.machine.name()),
+        );
+    }
+    if !instance.disk.is_default() {
+        let _ = std::fmt::Write::write_fmt(
+            &mut body,
+            format_args!("disk = \"{}\"\n", instance.disk.name()),
+        );
+    }
+    if instance.cpu != crate::machine::DEFAULT_CPU {
+        let _ = std::fmt::Write::write_fmt(&mut body, format_args!("cpu = \"{}\"\n", instance.cpu));
+    }
     let path = directory.join(format!("{tag}.toml"));
     fs::write(&path, body).map_err(|source| Error::Store {
         path: path.clone(),
@@ -295,6 +317,10 @@ mod tests {
             created: 1_700_000_000,
             memory: 2048,
             cpus: 2,
+            firmware: crate::machine::Firmware::Bios,
+            cpu: "max".to_owned(),
+            machine: crate::machine::Chipset::Q35,
+            disk: crate::machine::Disk::Virtio,
             user: "vm".to_owned(),
             seeded: true,
             monitor: PathBuf::new(),
@@ -302,6 +328,7 @@ mod tests {
             pid: None,
             started: None,
             generation: 0,
+            password: None,
             ports: Vec::new(),
             shares: Vec::new(),
         }
@@ -448,6 +475,38 @@ mod tests {
         assert!(entry.description.contains("demo"), "{}", entry.description);
         assert_eq!(artifact.digest, digest);
         assert_eq!(artifact.size, Some(4096));
+    }
+
+    #[test]
+    fn a_clone_asks_for_the_machine_its_disk_was_made_on() {
+        let scratch = Scratch::new("machine");
+        let digest = Digest::new(ALGORITHM, &"c".repeat(64));
+        let mut held = instance("demo");
+        held.firmware = crate::machine::Firmware::Uefi;
+        held.cpu = "Penryn,vendor=GenuineIntel,+avx".to_owned();
+        held.machine = crate::machine::Chipset::Pc;
+        held.disk = crate::machine::Disk::Ide;
+        write_entry(&scratch.0, &held, "mine", "latest", &digest, 1).unwrap();
+        let catalogue = entry_is_readable(&scratch.0);
+        let reference: Reference = "mine:latest".parse().unwrap();
+        let (_, artifact) = catalogue.resolve(&reference, "amd64").unwrap();
+        assert_eq!(artifact.firmware, crate::machine::Firmware::Uefi);
+        assert_eq!(artifact.cpu(), "Penryn,vendor=GenuineIntel,+avx");
+        assert_eq!(artifact.machine, crate::machine::Chipset::Pc);
+        assert_eq!(artifact.disk, crate::machine::Disk::Ide);
+    }
+
+    #[test]
+    fn a_clone_of_a_default_machine_states_no_machine() {
+        let scratch = Scratch::new("defaultmachine");
+        let digest = Digest::new(ALGORITHM, &"d".repeat(64));
+        let path =
+            write_entry(&scratch.0, &instance("demo"), "mine", "latest", &digest, 1).unwrap();
+        let text = fs::read_to_string(path).unwrap();
+        assert!(!text.contains("firmware"), "{text}");
+        assert!(!text.contains("cpu"), "{text}");
+        assert!(!text.contains("machine"), "{text}");
+        assert!(!text.contains("disk ="), "{text}");
     }
 
     /// There is nowhere to fetch a local image from, and the absence has to

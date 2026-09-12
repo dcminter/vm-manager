@@ -26,10 +26,14 @@ case "$distribution" in
 trixie)
     suffix="deb13"
     depends="qemu-system-x86, qemu-utils, openssh-client, virtiofsd"
+    recommends="ovmf, xz-utils, zstd"
+    suggests="tigervnc-viewer"
     ;;
 noble)
     suffix="ubuntu24.04"
     depends="qemu-system-x86, qemu-utils, openssh-client, virtiofsd"
+    recommends="ovmf, xz-utils, zstd"
+    suggests="tigervnc-viewer"
     ;;
 *)
     echo "package: unknown distribution '$distribution'; expected trixie or noble" >&2
@@ -44,9 +48,9 @@ architecture="$(dpkg --print-architecture)"
 package="vm-manager_${full_version}_${architecture}"
 staging="target/package/${package}"
 
-# Checks every dependency names a package that exists here. A .deb claiming a
-# package the distribution does not have is one apt refuses to install, and
-# finding that out from a user is finding it out too late.
+# Checks every package named in the control file exists here. A .deb claiming
+# a dependency the distribution does not have is one apt refuses to install,
+# and finding that out from a user is finding it out too late.
 verify_dependencies() {
     if ! command -v apt-cache >/dev/null 2>&1; then
         echo "package: apt-cache is not here, so dependencies go unchecked" >&2
@@ -54,7 +58,7 @@ verify_dependencies() {
     fi
     local missing=()
     local name
-    for name in ${depends//,/ }; do
+    for name in ${depends//,/ } ${recommends//,/ } ${suggests//,/ }; do
         name="${name//[[:space:]]/}"
         [ -n "$name" ] || continue
         if [ -z "$(apt-cache policy "$name" 2>/dev/null)" ]; then
@@ -62,7 +66,7 @@ verify_dependencies() {
         fi
     done
     if [ ${#missing[@]} -gt 0 ]; then
-        echo "package: these dependencies name nothing in $distribution: ${missing[*]}" >&2
+        echo "package: these packages name nothing in $distribution: ${missing[*]}" >&2
         echo "package: fix the dependency list rather than shipping a package apt will refuse" >&2
         return 1
     fi
@@ -109,6 +113,8 @@ Section: admin
 Priority: optional
 Architecture: $architecture
 Depends: $depends
+Recommends: $recommends
+Suggests: $suggests
 Conflicts: mgetty-voice, vmg
 Maintainer: Dave Minter <dave@paperstack.com>
 Homepage: https://github.com/dcminter/vm-manager

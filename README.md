@@ -45,6 +45,9 @@ cargo run -p vm -- images
 | `vm resume <name>` | Let a paused machine carry on |
 | `vm kill <name>` | Stop a machine without telling the guest |
 | `vm logs <name>` | Show a machine's console; `--follow` writes it as it arrives |
+| `vm console <name>` | Attach the terminal to a machine's serial console; Ctrl-] detaches |
+| `vm screen <name>` | Open a VNC viewer on a machine's screen |
+| `vm screenshot <name> [file]` | Save a machine's screen as a PNG |
 | `vm clone <name> <image>` | Save a machine's disk as a new image |
 | `vm rm <name>` | Delete a machine and its disk |
 | `vm rmi <image>` | Delete an image from the local store |
@@ -56,8 +59,8 @@ appending `@sha512:...`.
 ## Images
 
 The catalogue ships with `debian`, `ubuntu`, `fedora`, `centos`, `almalinux`,
-`rocky`, `opensuse`, `alpine`, `arch`, `omnios`, `freebsd`, `netbsd` and
-`9front`, several releases apiece. Run `vm images` for the list. Every entry
+`rocky`, `opensuse`, `alpine`, `arch`, `omnios`, `freebsd`, `netbsd`, `9front`
+and `puredarwin`, several releases apiece. Run `vm images` for the list. Every entry
 names a dated build rather than a moving `latest`, and carries the checksum its
 publisher issued, which is what `vm pull` verifies what it fetched against.
 
@@ -69,10 +72,13 @@ than what it expands to. An entry also states the `format` of the image itself,
 `qcow2` or `raw`, which is what the instance's overlay records as its backing
 format.
 
-What keeps names out now is the machine rather than the wrapper: desktop spins
-publish installer ISOs and no bootable disk at all, and PureDarwin needs UEFI
-firmware and an Intel processor to present to the guest, neither of which this
-tool can yet be told to arrange.
+An entry that needs other hardware says so: `firmware = "uefi"` in place of
+BIOS, `cpu` for a QEMU CPU model in place of `max`, `machine = "pc"` in place of
+`q35`, and `disk = "ide"` or `"sata"` in place of `virtio` for a guest with no
+virtio driver. PureDarwin needs a CPU model, the `pc` machine and an IDE disk,
+and its shell is on the screen rather than the serial console.
+Desktop spins stay out, because they publish installer ISOs and no bootable
+disk.
 
 ## Machines
 
@@ -99,10 +105,22 @@ written into the guest's `/etc/fstab`, because a share belongs to the run: an
 entry left in the guest would outlive it and fail the next boot that went
 without it.
 
+`--firmware`, `--cpu`, `--machine` and `--disk` override what the image asks
+for; an IDE disk needs the `pc` machine and a SATA disk needs `q35`. `--password` asks
+for a password the account can log in with at the console; it is read from the
+terminal, or as one line of standard input, and never taken as an argument. SSH
+still takes only the machine's key.
+
 `vm start` takes the same `--memory`, `--cpus`, `--publish`, `--volume`,
-`--user` and `--disk-size` as `vm run`, and each changes the machine from then
-on; what is not given is left as it was. Forwards and shares are replaced as a
-list, and `--no-publish` or `--no-volume` leaves the machine with none. A new
+`--user`, `--disk-size`, `--firmware`, `--cpu`, `--machine`, `--disk` and
+`--password` as `vm run`,
+and each changes the machine from then on; what is not given is left as it was.
+Forwards and shares are replaced as a list, `--no-publish` or `--no-volume`
+leaves the machine with none, and `--no-password` takes the password away. A
+disk prepared for only one firmware does not boot under the other; nothing on it
+is changed by trying, and changing the firmware back restores the machine.
+FreeBSD reads a new account or password only on a machine's first boot, so
+there they belong on `vm run`. A new
 `--user` is an account cloud-init has to create, so the guest is told it is a
 machine it has not seen before and generates fresh host keys; the account it
 already had is left where it is. None of this touches a running machine, which
@@ -112,6 +130,13 @@ is stopped first.
 since the machine was created, so a machine that failed to boot and was started
 again keeps the evidence. `--follow` writes it as it arrives, which is text
 only: a document cannot be emitted a line at a time and still be a document.
+
+`vm console` attaches the terminal to the machine's serial console, for images
+that take no key and for logging in with `--password`. Ctrl-] detaches and
+leaves the machine running. Every machine also has a screen, served over VNC on
+a private socket: `vm screen` opens `xtigervncviewer` on it, or, where there is
+no display, prints the socket and the `ssh -L` command that forwards it to a
+machine with one. `vm screenshot` saves the screen as a PNG.
 
 `vm ps` gives each machine's memory and disk as what it costs the host against
 what it was promised: the memory the hypervisor holds now out of what the

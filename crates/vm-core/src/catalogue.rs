@@ -1,5 +1,6 @@
 use crate::compression::Compression;
 use crate::error::{Error, Result};
+use crate::machine::{self, Chipset, Disk, Firmware};
 use crate::reference::{Digest, Reference};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -46,6 +47,13 @@ struct RawImage {
     /// How the published file is wrapped. Absent means it is not.
     #[serde(default)]
     compression: Compression,
+    #[serde(default)]
+    firmware: Firmware,
+    cpu: Option<String>,
+    #[serde(default)]
+    machine: Chipset,
+    #[serde(default)]
+    disk: Disk,
 }
 
 /// One architecture's build of a catalogue entry.
@@ -64,6 +72,18 @@ pub struct Artifact {
     /// What the expanded image occupies, where the entry says.
     pub size: Option<u64>,
     pub compression: Compression,
+    pub firmware: Firmware,
+    /// The CPU model this image needs, where the default will not boot it.
+    pub cpu: Option<String>,
+    pub machine: Chipset,
+    pub disk: Disk,
+}
+
+impl Artifact {
+    /// The CPU model to present, falling back to the default.
+    pub fn cpu(&self) -> &str {
+        self.cpu.as_deref().unwrap_or(machine::DEFAULT_CPU)
+    }
 }
 
 /// A named, tagged image as the catalogue describes it.
@@ -243,6 +263,12 @@ fn read_entry(path: &Path) -> Result<Entry> {
         .images
         .into_iter()
         .map(|image| {
+            machine::check_disk(image.machine, image.disk).map_err(|error| {
+                Error::CatalogueEntry {
+                    path: path.to_owned(),
+                    reason: error.to_string(),
+                }
+            })?;
             Ok(Artifact {
                 arch: image.arch,
                 format: image.format,
@@ -253,6 +279,19 @@ fn read_entry(path: &Path) -> Result<Entry> {
                 })?,
                 size: image.size,
                 compression: image.compression,
+                firmware: image.firmware,
+                cpu: match image.cpu {
+                    Some(cpu) => {
+                        machine::check_cpu(&cpu).map_err(|error| Error::CatalogueEntry {
+                            path: path.to_owned(),
+                            reason: error.to_string(),
+                        })?;
+                        Some(cpu)
+                    }
+                    None => None,
+                },
+                machine: image.machine,
+                disk: image.disk,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -344,6 +383,101 @@ digest = "sha512:{}"
             .unwrap();
         assert_eq!(artifact.compression, Compression::Gzip);
         assert_eq!(artifact.format, "raw");
+    }
+
+    fn machine_entry(settings: &str) -> String {
+        format!(
+            r#"
+name = "puredarwin"
+tag = "minimal"
+description = "test entry"
+login = "none"
+
+[[image]]
+arch = "amd64"
+format = "raw"
+url = "https://example.invalid/pd.img"
+digest = "sha256:{}"
+{settings}
+"#,
+            "a".repeat(64)
+        )
+    }
+
+    #[test]
+    fn an_entry_that_is_silent_asks_for_the_default_machine() {
+        let scratch = Scratch::new("defaultmachine");
+        scratch.write("puredarwin/minimal.toml", &machine_entry(""));
+        let catalogue = scratch.load().unwrap();
+        let (_, artifact) = catalogue
+            .resolve(&"puredarwin:minimal".parse().unwrap(), "amd64")
+            .unwrap();
+        assert_eq!(artifact.firmware, Firmware::Bios);
+        assert_eq!(artifact.cpu, None);
+        assert_eq!(artifact.cpu(), "max");
+        assert_eq!(artifact.machine, Chipset::Q35);
+        assert_eq!(artifact.disk, Disk::Virtio);
+    }
+
+    #[test]
+    fn an_entry_carries_the_machine_it_needs() {
+        let scratch = Scratch::new("machine");
+        scratch.write(
+            "puredarwin/minimal.toml",
+            &machine_entry("firmware = \"uefi\"\ncpu = \"Penryn,vendor=GenuineIntel,+avx\""),
+        );
+        let catalogue = scratch.load().unwrap();
+        let (_, artifact) = catalogue
+            .resolve(&"puredarwin:minimal".parse().unwrap(), "amd64")
+            .unwrap();
+        assert_eq!(artifact.firmware, Firmware::Uefi);
+        assert_eq!(artifact.cpu(), "Penryn,vendor=GenuineIntel,+avx");
+    }
+
+    #[test]
+    fn an_entry_carries_the_chipset_and_disk_controller_it_needs() {
+        let scratch = Scratch::new("chipset");
+        scratch.write(
+            "puredarwin/minimal.toml",
+            &machine_entry("machine = \"pc\"\ndisk = \"ide\""),
+        );
+        let catalogue = scratch.load().unwrap();
+        let (_, artifact) = catalogue
+            .resolve(&"puredarwin:minimal".parse().unwrap(), "amd64")
+            .unwrap();
+        assert_eq!(artifact.machine, Chipset::Pc);
+        assert_eq!(artifact.disk, Disk::Ide);
+    }
+
+    #[test]
+    fn an_entry_asking_for_a_controller_its_chipset_lacks_names_its_file() {
+        let scratch = Scratch::new("mismatch");
+        scratch.write("puredarwin/minimal.toml", &machine_entry("disk = \"ide\""));
+        let error = scratch.load().unwrap_err();
+        assert!(error.to_string().contains("minimal.toml"), "{error}");
+        assert!(error.to_string().contains("no ide controller"), "{error}");
+    }
+
+    #[test]
+    fn an_entry_with_an_unusable_cpu_model_names_its_file() {
+        let scratch = Scratch::new("badcpu");
+        scratch.write(
+            "puredarwin/minimal.toml",
+            &machine_entry("cpu = \"max -snapshot\""),
+        );
+        let error = scratch.load().unwrap_err();
+        assert!(error.to_string().contains("minimal.toml"), "{error}");
+        assert!(error.to_string().contains("cpu"), "{error}");
+    }
+
+    #[test]
+    fn an_entry_with_unknown_firmware_is_refused() {
+        let scratch = Scratch::new("badfirmware");
+        scratch.write(
+            "puredarwin/minimal.toml",
+            &machine_entry("firmware = \"coreboot\""),
+        );
+        assert!(scratch.load().is_err());
     }
 
     fn entry_toml(name: &str, tag: &str, aliases: &str) -> String {

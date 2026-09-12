@@ -36,6 +36,8 @@ pub struct Seed {
     pub user: String,
     pub authorized_key: String,
     pub mounts: Vec<Mount>,
+    /// A `$6$` hash for console login, `*` to take one away, or nothing to leave the account keyless-only.
+    pub password: Option<String>,
 }
 
 impl Seed {
@@ -46,19 +48,7 @@ impl Seed {
         ]))
     }
 
-    /// The cloud-config document. Password login is disabled outright: the
-    /// generated key is the only way in, so a default password left enabled
-    /// would only ever be a way for someone else in.
-    /// What has to be put right on the guest itself, because it cannot be
-    /// known from here which of these an image has.
-    ///
-    /// Both are conditional and both end in `true`: a correction that does not
-    /// apply must not fail the module and take the rest of the seed with it.
-    /// Written as shell lines rather than as argument lists.
-    ///
-    /// cloud-init takes either, but FreeBSD's nuageinit takes only the first
-    /// and stops with a Lua error on the second, which costs the whole seed.
-    /// Every command here is `sh -c` material anyway.
+    /// Fixes applied on the guest, as shell lines because FreeBSD's nuageinit accepts no argument lists.
     fn corrections(&self) -> Value {
         let user = &self.user;
         Value::list([
@@ -78,6 +68,7 @@ impl Seed {
         ])
     }
 
+    /// The cloud-config document; SSH takes only the generated key, whatever the password.
     pub fn user_data(&self) -> String {
         let mut fields = vec![
             ("hostname", Value::string(&self.hostname)),
@@ -92,7 +83,10 @@ impl Seed {
                     // which is how Alpine ships it — refuses a locked account
                     // outright, public key and all. A '*' is not a hash any
                     // password can produce, so this shuts the same door.
-                    ("passwd", Value::string("*")),
+                    (
+                        "passwd",
+                        Value::string(self.password.as_deref().unwrap_or("*")),
+                    ),
                     ("lock_passwd", Value::Bool(false)),
                     ("sudo", Value::string("ALL=(ALL) NOPASSWD:ALL")),
                     (
@@ -111,6 +105,23 @@ impl Seed {
             // sake of the few that have nothing else.
             ("runcmd", self.corrections()),
         ];
+        // The users module leaves an existing account's password alone, so a change goes through chpasswd.
+        if let Some(password) = &self.password {
+            fields.push((
+                "chpasswd",
+                Value::map([
+                    ("expire", Value::Bool(false)),
+                    (
+                        "users",
+                        Value::list([Value::map([
+                            ("name", Value::string(&self.user)),
+                            ("password", Value::string(password)),
+                            ("type", Value::string("hash")),
+                        ])]),
+                    ),
+                ]),
+            ));
+        }
         if !self.mounts.is_empty() {
             // Mounted per boot rather than written into the guest's fstab. A
             // share belongs to the run, not to the disk: an fstab entry would
@@ -189,6 +200,13 @@ impl Seed {
                 self.instance_id
             ));
         }
+        if self
+            .password
+            .as_deref()
+            .is_some_and(|password| !crate::crypt::is_hash(password))
+        {
+            return refuse("the password is not a SHA-512 crypt hash".to_owned());
+        }
         if !is_public_key(&self.authorized_key) {
             return refuse("the authorized key is not an OpenSSH public key".to_owned());
         }
@@ -259,6 +277,7 @@ mod tests {
             user: "vm".to_owned(),
             authorized_key: KEY.to_owned(),
             mounts: Vec::new(),
+            password: None,
         }
     }
 
@@ -471,5 +490,35 @@ mod tests {
             target: "/mnt/work".to_owned(),
         });
         assert!(seed.image().is_err());
+    }
+
+    const HASH: &str = "$6$saltstring$svn8UoSVapNtMuq1ukKS4tPQd8iKwSMHWjl/O817G3uBnIFNjnQJuesI68u4OTLiBFdcbYEdFCoEOfaS35inz1";
+
+    #[test]
+    fn without_a_password_the_account_has_none_and_nothing_is_changed() {
+        let text = seed().user_data();
+        assert!(text.contains("passwd: \"*\""), "{text}");
+        assert!(!text.contains("chpasswd"), "{text}");
+    }
+
+    /// The users entry covers a first boot; chpasswd covers an account that already exists.
+    #[test]
+    fn a_password_reaches_both_the_new_account_and_an_existing_one() {
+        let mut held = seed();
+        held.password = Some(HASH.to_owned());
+        let text = held.user_data();
+        assert!(text.contains(&format!("passwd: {HASH}")), "{text}");
+        assert!(text.contains("chpasswd:"), "{text}");
+        assert!(text.contains("expire: false"), "{text}");
+        assert!(text.contains("type: hash"), "{text}");
+        assert!(text.contains("ssh_pwauth: false"), "{text}");
+        held.image().unwrap();
+    }
+
+    #[test]
+    fn a_password_that_is_not_a_hash_is_refused() {
+        let mut held = seed();
+        held.password = Some("hunter2".to_owned());
+        assert_eq!(held.image().unwrap_err().kind(), "seed-invalid");
     }
 }

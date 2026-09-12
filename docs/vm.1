@@ -50,9 +50,10 @@ below.
 .TP
 .BI start " NAME"
 Start a machine that exists but is not running. It takes the same
-.BR \-\-memory ", " \-\-cpus ", " \-\-publish ", " \-\-volume ", " \-\-user
+.BR \-\-memory ", " \-\-cpus ", " \-\-publish ", " \-\-volume ", " \-\-user ,
+.BR \-\-disk\-size ", " \-\-firmware ", " \-\-cpu ", " \-\-machine ", " \-\-disk
 and
-.B \-\-disk\-size
+.B \-\-password
 options as
 .BR run ,
 each of which changes the machine for this start and every one after it;
@@ -61,8 +62,18 @@ one the machine had, and
 .B \-\-no\-publish
 or
 .B \-\-no\-volume
-leaves it with none. A running machine is not changed: these are read when a
-machine starts, so it must be stopped first.
+leaves it with none;
+.B \-\-no\-password
+takes the account's password away. A running machine is not changed: these are
+read when a machine starts, so it must be stopped first.
+.IP
+A disk prepared for only one firmware does not boot under the other, and a guest
+without a driver for the disk controller does not find its disk. Nothing on the
+disk is changed by trying, and changing the setting back restores the machine.
+.IP
+A new account or password reaches the guest through its seed, which FreeBSD
+reads only on a machine's first boot; there, give them to
+.BR run .
 .TP
 .BI ssh " NAME " [\fICOMMAND\fR]
 Open a shell on a machine, or run a command in it. Wraps
@@ -118,6 +129,29 @@ Let a paused machine carry on from where it stopped.
 .TP
 .BI kill " NAME"
 Stop a machine without telling the guest.
+.TP
+.BI console " NAME"
+Attach the terminal to the machine's serial console, as if at a terminal plugged
+into it. Ctrl-] detaches and leaves the machine running. One terminal can be
+attached at a time. Output reaches
+.B vm logs
+whether or not anyone is attached.
+.TP
+.BI screen " NAME"
+Open
+.BR xtigervncviewer (1)
+on the machine's screen, which every machine serves over VNC on a socket in the
+runtime directory. Where there is no display to open it on, or in a document
+format, the socket path is reported instead, with the
+.BR ssh (1)
+command that forwards it to another machine.
+.TP
+.BI screenshot " NAME " [\fIFILE\fR]
+Save what the machine's screen shows as a PNG, to
+.I FILE
+or to
+.I NAME.png
+in the current directory.
 .TP
 .BI logs " NAME"
 Show what the machine has written to its console, across every boot since it
@@ -185,6 +219,38 @@ Grow the machine's disk to this size, such as 40G.
 .TP
 .BI \-\-pull " WHEN"
 .BR always ", " missing " (the default) or " never .
+.TP
+.BI \-\-firmware " FIRMWARE"
+.BR bios " or " uefi ,
+in place of the firmware the image asks for. Most images ask for BIOS.
+.TP
+.BI \-\-cpu " MODEL"
+A QEMU CPU model, such as
+.BR Penryn,+avx ,
+in place of the one the image asks for. Most images ask for
+.BR max .
+.TP
+.BI \-\-machine " TYPE"
+.BR q35 " or " pc ,
+in place of the machine type the image asks for. Most images ask for
+.BR q35 .
+.TP
+.BI \-\-disk " CONTROLLER"
+.BR virtio ", " ide " or " sata ,
+in place of the disk controller the image asks for. An IDE disk needs the
+.B pc
+machine and a SATA disk needs
+.BR q35 .
+Most images ask for
+.BR virtio .
+.TP
+.B \-\-password
+Ask for a password the account can log in with at
+.BR "vm console" .
+It is asked for twice on a terminal and read as one line of standard input
+otherwise, and never taken as an argument, where other users could read it.
+SSH still takes only the machine's key. Refused for an image that takes no
+seed.
 .SH OUTPUT
 Every command writes a table by default and machine-readable output on request:
 .B \-\-format json
@@ -197,8 +263,10 @@ carrying a stable
 alongside the message.
 .PP
 .B vm logs \-\-follow
-writes the console as it arrives, which no document format can do, so it is
-refused there.
+writes the console as it arrives, and
+.B vm console
+holds a conversation with it, neither of which a document format can do, so
+both are refused there.
 .PP
 .B vm ssh
 is the exception: it replaces itself with
@@ -234,13 +302,14 @@ Catalogue entries for images made here by
 .BR "vm clone" .
 .TP
 .I $XDG_STATE_HOME/vm/instances
-One directory per machine: its disk, key, console log and record. The console
+One directory per machine, readable only by its owner: its disk, key, console
+log, record and, for a UEFI machine, the firmware's variable store. The console
 log is appended to, so a machine that failed to boot and was started again
 keeps the evidence.
 .TP
 .I $XDG_RUNTIME_DIR/vm
-Monitor and share sockets, kept short because the kernel bounds the length of
-a socket path.
+Monitor, console, screen and share sockets, kept short because the kernel
+bounds the length of a socket path.
 .SH ENVIRONMENT
 .TP
 .B VM_FORMAT
@@ -255,4 +324,5 @@ Overrides the catalogue directory.
 .BR scp (1),
 .BR qemu\-system\-x86_64 (1),
 .BR qemu\-img (1),
-.BR virtiofsd (1)
+.BR virtiofsd (1),
+.BR xtigervncviewer (1)
