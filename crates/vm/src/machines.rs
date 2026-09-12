@@ -402,6 +402,7 @@ pub fn connect(name: &str, command: &[String]) -> Result<std::convert::Infallibl
     let instances = Instances::discover()?;
     let directory = instances.open(name)?;
     let held = directory.read()?;
+    answering(&held)?;
     let arguments = vm_core::access::ssh(&held, &directory, command)?;
     Err(exec("ssh", &arguments))
 }
@@ -420,6 +421,7 @@ pub fn copy(from: &str, to: &str) -> Result<std::convert::Infallible> {
     let instances = Instances::discover()?;
     let directory = instances.open(&name)?;
     let held = directory.read()?;
+    answering(&held)?;
     let arguments = vm_core::access::scp(&held, &directory, &from, &to)?;
     Err(exec("scp", &arguments))
 }
@@ -541,10 +543,88 @@ pub fn list(all: bool) -> Result<reports::Machines> {
             let _ = directory.write(&held);
         }
         if running || all {
-            rows.push(reports::MachineRow::of(&held, running));
+            let state = if running {
+                reports::State::Live(doing(&held))
+            } else {
+                reports::State::Stopped
+            };
+            rows.push(reports::MachineRow::of(&held, state));
         }
     }
     Ok(reports::Machines { rows, all })
+}
+
+/// Refuses a machine that cannot answer.
+///
+/// The forward to a paused guest is still bound, so connecting to one succeeds
+/// and then waits for a guest that will never reply. Saying so costs a round
+/// trip on a local socket, which is worth it not to hang.
+fn answering(held: &Instance) -> Result<()> {
+    if held.is_running() && doing(held) == "paused" {
+        return Err(Error::InstancePaused {
+            name: held.name.clone(),
+        });
+    }
+    Ok(())
+}
+
+/// How long to wait for a machine to say what it is doing. A listing should
+/// not stall on one wedged machine, and the record already says it is running.
+const STATUS_WAIT: Duration = Duration::from_secs(2);
+
+/// What a running machine says it is doing.
+///
+/// Only the machine knows whether it is paused, and a machine that cannot
+/// answer is reported as what looking for its process already established.
+fn doing(held: &Instance) -> String {
+    qmp::connect_with_timeout(&held.monitor, STATUS_WAIT)
+        .and_then(|mut client| client.status())
+        .unwrap_or_else(|_| "running".to_owned())
+}
+
+/// Stops the guest's processors without the guest knowing.
+///
+/// The machine, its memory and everything it holds open stay where they are;
+/// nothing of it is written anywhere, so this outlives neither a host reboot
+/// nor `vm kill`.
+pub fn pause(name: &str) -> Result<reports::Switched> {
+    switch(name, true)
+}
+
+/// Lets it carry on from the instruction it stopped at.
+pub fn resume(name: &str) -> Result<reports::Switched> {
+    switch(name, false)
+}
+
+fn switch(name: &str, pausing: bool) -> Result<reports::Switched> {
+    let instances = Instances::discover()?;
+    let directory = instances.open(name)?;
+    let held = directory.read()?;
+    if !held.is_running() {
+        return Err(Error::InstanceStopped {
+            name: name.to_owned(),
+        });
+    }
+    let mut client = qmp::connect(&held.monitor)?;
+    let before = client.status()?;
+    // Asking for what it is already doing is the outcome that was wanted.
+    if before == if pausing { "paused" } else { "running" } {
+        return Ok(reports::Switched {
+            name: name.to_owned(),
+            state: before,
+            changed: false,
+        });
+    }
+    if pausing {
+        client.pause()?;
+    } else {
+        client.resume()?;
+    }
+    Ok(reports::Switched {
+        name: name.to_owned(),
+        state: client.status()?,
+        changed: true,
+    })
 }
 
 /// Asks the guest to shut down, then insists.
@@ -569,6 +649,9 @@ pub fn stop(name: &str, timeout: Duration, force: bool, text: bool) -> Result<re
             let _ = client.quit();
         }
     } else if let Ok(mut client) = qmp::connect(&held.monitor) {
+        // A paused guest cannot act on the power button, and waiting for it to
+        // would only end in the same kill by a longer road.
+        let _ = client.resume();
         client.powerdown()?;
     } else {
         // No monitor to ask through, so the polite route is not available.
@@ -655,6 +738,9 @@ pub fn commit(name: &str, target: &str, force: bool) -> Result<reports::Committe
 
     let committed = if consistency == Consistency::Paused {
         let mut client = qmp::connect(&held.monitor)?;
+        // A machine the user paused is left paused; only one paused here is
+        // let go again.
+        let was_running = client.status()? == "running";
         client.pause()?;
         // The guest stays paused until this returns, so resuming has to happen
         // on the way out whether the commit worked or not.
@@ -667,7 +753,9 @@ pub fn commit(name: &str, target: &str, force: bool) -> Result<reports::Committe
             reference.tag(),
             true,
         );
-        client.resume()?;
+        if was_running {
+            client.resume()?;
+        }
         outcome?
     } else {
         vm_core::commit::commit(

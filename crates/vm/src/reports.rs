@@ -348,30 +348,50 @@ impl Report for Run {
 }
 
 /// One instance, as `vm ps` lists it.
+/// What a machine is doing. Running and stopped are settled by looking for the
+/// process; anything finer has to be asked of the machine itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum State {
+    Stopped,
+    /// The record could not be read, so nothing else is known.
+    Damaged,
+    /// What the monitor says it is doing: `running`, `paused`, or a word this
+    /// tool has never heard of. Passed through rather than mapped.
+    Live(String),
+}
+
+impl State {
+    pub fn slug(&self) -> &str {
+        match self {
+            Self::Stopped => "stopped",
+            Self::Damaged => "damaged",
+            Self::Live(held) => held,
+        }
+    }
+}
+
 pub struct MachineRow {
     pub name: String,
     pub image: String,
-    pub running: bool,
+    pub state: State,
     pub created: u64,
     pub ports: Vec<Port>,
     pub pid: Option<u32>,
     pub ssh_port: Option<u16>,
     pub user: String,
-    pub damaged: bool,
 }
 
 impl MachineRow {
-    pub fn of(instance: &Instance, running: bool) -> Self {
+    pub fn of(instance: &Instance, state: State) -> Self {
         Self {
             name: instance.name.clone(),
             image: instance.image.clone(),
-            running,
+            state,
             created: instance.created,
             ports: instance.ports.clone(),
             pid: instance.pid,
             ssh_port: instance.ssh_port,
             user: instance.user.clone(),
-            damaged: false,
         }
     }
 
@@ -381,24 +401,17 @@ impl MachineRow {
         Self {
             name: name.to_owned(),
             image: String::new(),
-            running: false,
+            state: State::Damaged,
             created: 0,
             ports: Vec::new(),
             pid: None,
             ssh_port: None,
             user: String::new(),
-            damaged: true,
         }
     }
 
-    const fn status(&self) -> &'static str {
-        if self.damaged {
-            "damaged"
-        } else if self.running {
-            "running"
-        } else {
-            "stopped"
-        }
+    fn status(&self) -> &str {
+        self.state.slug()
     }
 }
 
@@ -428,7 +441,7 @@ impl Report for Machines {
             Value::map([
                 ("name", Value::string(row.name.clone())),
                 ("image", Value::string(row.image.clone())),
-                ("status", Value::string(row.status())),
+                ("status", Value::string(row.status().to_owned())),
                 ("created", Value::Integer(row.created)),
                 ("ports", ports_value(&row.ports)),
                 (
@@ -673,6 +686,43 @@ impl Report for Console {
     }
 }
 
+/// What `vm pause` and `vm resume` did, or found already done.
+pub struct Switched {
+    pub name: String,
+    /// What the machine is doing now.
+    pub state: String,
+    pub changed: bool,
+}
+
+impl Report for Switched {
+    fn to_value(&self) -> Value {
+        Value::map([
+            ("name", Value::string(self.name.clone())),
+            ("state", Value::string(self.state.clone())),
+            ("changed", Value::Bool(self.changed)),
+        ])
+    }
+
+    fn render_text(&self, style: Style) -> Vec<String> {
+        let name = style.name(&self.name);
+        if !self.changed {
+            return vec![format!("{name} is already {}", self.state)];
+        }
+        let mut lines = vec![match self.state.as_str() {
+            "paused" => format!("Paused {name}"),
+            "running" => format!("Resumed {name}"),
+            held => format!("{name} is {held}"),
+        }];
+        if self.state == "paused" {
+            lines.push(style.dim(
+                "  Its memory is held by a process that is still there, so this survives \
+                 neither a host reboot nor 'vm kill'.",
+            ));
+        }
+        lines
+    }
+}
+
 pub struct Removed {
     pub name: String,
 }
@@ -714,6 +764,78 @@ mod tests {
             size: 1024,
             status,
         }
+    }
+
+    #[test]
+    fn a_pause_says_what_it_did_and_what_it_costs() {
+        let report = Switched {
+            name: "one".to_owned(),
+            state: "paused".to_owned(),
+            changed: true,
+        };
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(text.starts_with("Paused one"), "{text}");
+        assert!(text.contains("host reboot"), "{text}");
+    }
+
+    #[test]
+    fn a_resume_says_only_that_it_carried_on() {
+        let report = Switched {
+            name: "one".to_owned(),
+            state: "running".to_owned(),
+            changed: true,
+        };
+        let text = report.render_text(Style::plain()).join("\n");
+        assert_eq!(text, "Resumed one");
+    }
+
+    /// Asking for what a machine is already doing is the outcome that was
+    /// wanted, so it reads as a statement rather than a refusal.
+    #[test]
+    fn a_machine_already_doing_it_is_not_a_failure() {
+        let report = Switched {
+            name: "one".to_owned(),
+            state: "paused".to_owned(),
+            changed: false,
+        };
+        assert_eq!(
+            report.render_text(Style::plain()),
+            ["one is already paused"]
+        );
+        let document = to_json(&report.to_value());
+        assert!(document.contains(r#""changed": false"#), "{document}");
+    }
+
+    /// QEMU has more run states than this tool knows about, and one it has
+    /// never heard of has to reach the user rather than be called running.
+    #[test]
+    fn a_state_this_tool_does_not_know_is_passed_through() {
+        assert_eq!(
+            State::Live("guest-panicked".to_owned()).slug(),
+            "guest-panicked"
+        );
+        assert_eq!(State::Stopped.slug(), "stopped");
+        assert_eq!(State::Damaged.slug(), "damaged");
+    }
+
+    #[test]
+    fn a_paused_machine_is_listed_as_paused() {
+        let machines = Machines {
+            rows: vec![MachineRow {
+                name: "one".to_owned(),
+                image: "debian:trixie".to_owned(),
+                state: State::Live("paused".to_owned()),
+                created: instance::now(),
+                ports: Vec::new(),
+                pid: Some(42),
+                ssh_port: Some(2222),
+                user: "vm".to_owned(),
+            }],
+            all: false,
+        };
+        let text = machines.render_text(Style::plain()).join("\n");
+        assert!(text.contains("paused"), "{text}");
+        assert!(to_json(&machines.to_value()).contains(r#""status": "paused""#));
     }
 
     #[test]

@@ -382,6 +382,27 @@ mod tests {
         assert_eq!(reply.get("running"), Some(&Value::Bool(true)));
     }
 
+    /// The monitor's names for these are not the ones the command line uses,
+    /// so the mapping is worth pinning down.
+    #[test]
+    fn pausing_and_resuming_are_stop_and_cont() {
+        let mut paused = client(&[r#"{"return": {}}"#]);
+        paused.pause().unwrap();
+        assert!(
+            said(&paused).contains(r#""execute":"stop""#),
+            "{}",
+            said(&paused)
+        );
+
+        let mut resumed = client(&[r#"{"return": {}}"#]);
+        resumed.resume().unwrap();
+        assert!(
+            said(&resumed).contains(r#""execute":"cont""#),
+            "{}",
+            said(&resumed)
+        );
+    }
+
     #[test]
     fn the_status_is_passed_through_rather_than_interpreted() {
         let mut client = client(&[r#"{"return": {"status": "guest-panicked"}}"#]);

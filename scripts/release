@@ -46,6 +46,8 @@ Before cutting a release, these are worth doing by hand on this machine:
   vm ssh release-check 'cloud-init status --wait; hostname; mount | grep virtiofs'
   vm cp /etc/hostname release-check:/tmp/
   vm logs release-check -n 5
+  vm pause release-check && vm ps
+  vm resume release-check
   vm commit release-check checked:latest
   vm stop release-check
   vm start release-check --cpus 1 --no-volume

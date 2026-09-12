@@ -69,12 +69,28 @@ Copy files to or from a machine. One side is written as
 .B ps
 List machines.
 .B \-\-all
-includes those that are not running.
+includes those that are not running. The status of a running machine is what it
+says of itself through its monitor, so a paused one is listed as paused.
 .TP
 .BI stop " NAME"
 Ask the guest to shut down, waiting
 .B \-\-timeout
 seconds before insisting.
+.TP
+.BI pause " NAME"
+Stop a machine's processors. The guest is not told and takes no part: its
+memory, its disk and everything it holds open stay as they are, held by a
+hypervisor that is still running. Nothing is written anywhere, so a paused
+machine survives neither a host reboot nor
+.BR "vm kill" .
+A paused guest answers nothing, so
+.B vm ssh
+and
+.B vm cp
+say so rather than wait.
+.TP
+.BI resume " NAME"
+Let a paused machine carry on from where it stopped.
 .TP
 .BI kill " NAME"
 Stop a machine without telling the guest.

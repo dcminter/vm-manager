@@ -119,6 +119,9 @@ pub enum Error {
     InstanceStopped {
         name: String,
     },
+    InstancePaused {
+        name: String,
+    },
     NoGuestAccess {
         name: String,
     },
@@ -186,6 +189,7 @@ impl Error {
             Self::FollowNeedsText => "follow-needs-text",
             Self::InstanceRunning { .. } => "instance-running",
             Self::InstanceStopped { .. } => "instance-stopped",
+            Self::InstancePaused { .. } => "instance-paused",
             Self::NoGuestAccess { .. } => "no-guest-access",
             Self::CopyBetweenGuests => "copy-between-guests",
             Self::CopyWithoutGuest => "copy-without-guest",
@@ -344,6 +348,11 @@ impl fmt::Display for Error {
                     "'{name}' is not running; start it with 'vm start {name}'"
                 )
             }
+            Self::InstancePaused { name } => write!(
+                f,
+                "'{name}' is paused, so nothing in it is answering; \
+                 let it carry on with 'vm resume {name}'"
+            ),
             Self::NoGuestAccess { name } => write!(
                 f,
                 "'{name}' has no account of ours to connect to: its image takes no \

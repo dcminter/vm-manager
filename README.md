@@ -39,6 +39,8 @@ cargo run -p vm -- images
 | `vm cp <from> <to>` | Copy files, naming one side as `name:path` |
 | `vm ps` | List machines; `--all` includes those not running |
 | `vm stop <name>` | Ask the guest to shut down, then insist |
+| `vm pause <name>` | Stop a machine's processors without telling the guest |
+| `vm resume <name>` | Let a paused machine carry on |
 | `vm kill <name>` | Stop a machine without telling the guest |
 | `vm logs <name>` | Show a machine's console; `--follow` writes it as it arrives |
 | `vm commit <name> <image>` | Save a machine's disk as a new image |
@@ -93,6 +95,14 @@ gives it a name. A running guest is paused for the duration, because a disk
 taken from under one is crash-consistent at best; `--force` skips the pause and
 says so. Committed images are listed by `vm images` alongside the catalogue's
 own, and `vm update` does not disturb them.
+
+`vm pause` stops a machine's processors. The guest takes no part: its memory,
+its disk and everything it holds open stay as they are, held by a hypervisor
+that is still running, and `vm resume` continues from the instruction it
+stopped at. This is not suspending — nothing is written anywhere, so it
+survives neither a host reboot nor `vm kill`. A paused guest answers nothing,
+so `vm ssh` and `vm cp` say so rather than wait, and `vm stop` lets it carry on
+first so that it can take the power button.
 
 `vm rmi` takes an image back out of the store. One the catalogue provides is
 listed again as unfetched; one made here has nowhere to be fetched from, so its

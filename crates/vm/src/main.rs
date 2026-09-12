@@ -143,6 +143,16 @@ enum Command {
         #[arg(long, short, default_value_t = 30)]
         timeout: u64,
     },
+    /// Stop an instance's processors without telling the guest
+    Pause {
+        /// Instance name
+        name: String,
+    },
+    /// Let a paused instance carry on
+    Resume {
+        /// Instance name
+        name: String,
+    },
     /// Stop an instance without telling the guest
     Kill {
         /// Instance name
@@ -282,6 +292,8 @@ fn machine_command(cli: &Cli) -> vm_core::Result<Option<Box<dyn Report>>> {
             false,
             cli.format.is_text(),
         )?),
+        Command::Pause { name } => Box::new(machines::pause(name)?),
+        Command::Resume { name } => Box::new(machines::resume(name)?),
         Command::Kill { name } => Box::new(machines::stop(
             name,
             std::time::Duration::from_secs(10),
@@ -344,6 +356,8 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
         | Command::Cp { .. }
         | Command::Stop { .. }
         | Command::Kill { .. }
+        | Command::Pause { .. }
+        | Command::Resume { .. }
         | Command::Commit { .. }
         | Command::Logs { .. }
         | Command::Rm { .. } => unreachable!("handled above"),
