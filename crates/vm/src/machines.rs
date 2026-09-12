@@ -118,11 +118,21 @@ fn build(
         user: request.user.clone(),
         seeded: entry.login.is_seedable(),
         monitor: directory.monitor().to_owned(),
+        ssh_port: None,
         pid: None,
         started: None,
         ports: request.ports.clone(),
         shares: Vec::new(),
     };
+
+    if held.seeded {
+        // A published forward to the guest's SSH port is the one to use; only
+        // allocate when the user has not already arranged one.
+        held.ssh_port = Some(match held.ports.iter().find(|port| port.guest == 22) {
+            Some(port) => port.host,
+            None => free_port()?,
+        });
+    }
 
     hypervisor::create_overlay(
         &store.path_for(&artifact.digest),
@@ -136,40 +146,155 @@ fn build(
     }
     directory.write(&held)?;
 
+    let accelerated = launch(directory, &mut held)?;
+    Ok(report(
+        &held,
+        directory,
+        accelerated,
+        reports::RunStatus::Created,
+    ))
+}
+
+/// Starts the hypervisor and waits for it to answer.
+///
+/// A machine that dies on its arguments dies within a moment of starting, so
+/// waiting for its monitor is what separates "started" from "reported as
+/// started". What it says about acceleration comes free with the wait.
+fn launch(directory: &Directory, held: &mut Instance) -> Result<Option<bool>> {
     prepare_runtime(directory.monitor())?;
     let handle = vm_core::hypervisor::Detached.start(&hypervisor::Launch {
         program: hypervisor::binary_for(&held.arch).to_owned(),
-        arguments: hypervisor::arguments(&held, directory),
+        arguments: hypervisor::arguments(held, directory),
         log: directory.log(),
     })?;
     held.pid = Some(handle.pid);
     held.started = Some(handle.started);
-    directory.write(&held)?;
+    directory.write(held)?;
 
-    // A machine that dies on its arguments dies within a moment of starting,
-    // so waiting for its monitor is what separates "started" from "reported
-    // as started". What it says about acceleration comes free with the wait.
-    let accelerated = match await_monitor(directory.monitor(), &handle) {
-        Ok(accelerated) => accelerated,
+    match await_monitor(directory.monitor(), &handle) {
+        Ok(accelerated) => Ok(accelerated),
         Err(error) => {
             let _ = process::signal(&handle, process::Signal::Kill);
-            return Err(refusal(directory, error));
+            held.forget_process();
+            let _ = directory.write(held);
+            Err(refusal(directory, error))
         }
-    };
+    }
+}
 
-    Ok(reports::Run {
-        name: name.to_owned(),
-        image: request.reference.clone(),
+fn report(
+    held: &Instance,
+    directory: &Directory,
+    accelerated: Option<bool>,
+    status: reports::RunStatus,
+) -> reports::Run {
+    reports::Run {
+        name: held.name.clone(),
+        image: held.image.clone(),
         arch: held.arch.clone(),
         memory: held.memory,
         cpus: held.cpus,
         ports: held.ports.clone(),
+        ssh_port: held.ssh_port,
         user: held.user.clone(),
         seeded: held.seeded,
-        pid: handle.pid,
+        pid: held.pid.unwrap_or_default(),
         accelerated,
         console: directory.console().display().to_string(),
-    })
+        status,
+    }
+}
+
+/// Boots an instance that exists but is not running.
+pub fn start(name: &str) -> Result<reports::Run> {
+    let instances = Instances::discover()?;
+    let directory = instances.open(name)?;
+    let mut held = directory.read()?;
+    if held.is_running() {
+        return Ok(report(
+            &held,
+            &directory,
+            None,
+            reports::RunStatus::AlreadyRunning,
+        ));
+    }
+    held.forget_process();
+    // The port it used last time may belong to something else by now, and a
+    // forward that cannot bind would take the whole machine down with it.
+    if held.seeded && !held.ssh_port.is_some_and(port_is_free) {
+        held.ssh_port = Some(free_port()?);
+    }
+    let accelerated = launch(&directory, &mut held)?;
+    Ok(report(
+        &held,
+        &directory,
+        accelerated,
+        reports::RunStatus::Restarted,
+    ))
+}
+
+/// Replaces this process with `ssh`, so that the terminal, the signals and the
+/// exit status are the guest's rather than filtered through ours.
+pub fn connect(name: &str, command: &[String]) -> Result<std::convert::Infallible> {
+    let instances = Instances::discover()?;
+    let directory = instances.open(name)?;
+    let held = directory.read()?;
+    let arguments = vm_core::access::ssh(&held, &directory, command)?;
+    Err(exec("ssh", &arguments))
+}
+
+/// Copies between here and a guest, the same way.
+pub fn copy(from: &str, to: &str) -> Result<std::convert::Infallible> {
+    use vm_core::access::Location;
+    let (from, to) = (Location::parse(from), Location::parse(to));
+    let name = match (from.instance(), to.instance()) {
+        (Some(_), Some(_)) => {
+            return Err(Error::CopyBetweenGuests);
+        }
+        (Some(name), None) | (None, Some(name)) => name.clone(),
+        (None, None) => return Err(Error::CopyWithoutGuest),
+    };
+    let instances = Instances::discover()?;
+    let directory = instances.open(&name)?;
+    let held = directory.read()?;
+    let arguments = vm_core::access::scp(&held, &directory, &from, &to)?;
+    Err(exec("scp", &arguments))
+}
+
+fn exec(program: &str, arguments: &[String]) -> Error {
+    use std::os::unix::process::CommandExt as _;
+    // This returns only on failure; on success the process is gone.
+    let source = std::process::Command::new(program).args(arguments).exec();
+    if source.kind() == std::io::ErrorKind::NotFound {
+        Error::MissingTool {
+            binary: "ssh",
+            package: "openssh-client",
+            operation: "reaching a virtual machine",
+        }
+    } else {
+        Error::Launch {
+            program: program.to_owned(),
+            source,
+        }
+    }
+}
+
+/// A free port on the loopback address, found by asking the kernel for one.
+/// There is a moment between letting it go and the hypervisor taking it; if
+/// something else wins that race the hypervisor says so and the run is
+/// reported as failed rather than as started.
+fn free_port() -> Result<u16> {
+    std::net::TcpListener::bind(("127.0.0.1", 0))
+        .and_then(|listener| listener.local_addr())
+        .map(|address| address.port())
+        .map_err(|source| Error::Launch {
+            program: "the port allocator".to_owned(),
+            source,
+        })
+}
+
+fn port_is_free(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
 /// A hypervisor that refuses its arguments says why on its own output and
@@ -261,7 +386,7 @@ pub fn list(all: bool) -> Result<reports::Machines> {
 }
 
 /// Asks the guest to shut down, then insists.
-pub fn stop(name: &str, timeout: Duration, force: bool) -> Result<reports::Stopped> {
+pub fn stop(name: &str, timeout: Duration, force: bool, text: bool) -> Result<reports::Stopped> {
     let instances = Instances::discover()?;
     let directory = instances.open(name)?;
     let mut held = directory.read()?;
@@ -271,6 +396,7 @@ pub fn stop(name: &str, timeout: Duration, force: bool) -> Result<reports::Stopp
         return Ok(reports::Stopped {
             name: name.to_owned(),
             outcome: reports::StopOutcome::AlreadyStopped,
+            waited: 0,
         });
     };
 
@@ -284,13 +410,23 @@ pub fn stop(name: &str, timeout: Duration, force: bool) -> Result<reports::Stopp
         client.powerdown()?;
     } else {
         // No monitor to ask through, so the polite route is not available.
-        outcome = reports::StopOutcome::Killed;
+        outcome = reports::StopOutcome::Unreachable;
         process::signal(&handle, process::Signal::Terminate)?;
     }
 
+    if text && outcome == reports::StopOutcome::PoweredDown {
+        eprintln!(
+            "Waiting for {name} to shut down, up to {}s",
+            timeout.as_secs()
+        );
+    }
+
     if !wait_for_exit(&handle, timeout) {
-        // The guest ignored the power button, or there was nobody listening.
-        outcome = reports::StopOutcome::Killed;
+        // The guest ignored the power button, which is what a machine early in
+        // its boot does: the handler is not loaded yet.
+        if outcome == reports::StopOutcome::PoweredDown {
+            outcome = reports::StopOutcome::Unresponsive;
+        }
         process::signal(&handle, process::Signal::Kill)?;
         if !wait_for_exit(&handle, Duration::from_secs(5)) {
             return Err(Error::Signal {
@@ -306,6 +442,7 @@ pub fn stop(name: &str, timeout: Duration, force: bool) -> Result<reports::Stopp
     Ok(reports::Stopped {
         name: name.to_owned(),
         outcome,
+        waited: timeout.as_secs(),
     })
 }
 
@@ -331,7 +468,7 @@ pub fn remove(name: &str, force: bool) -> Result<reports::Removed> {
                 name: name.to_owned(),
             });
         }
-        stop(name, Duration::from_secs(10), true)?;
+        stop(name, Duration::from_secs(10), true, false)?;
     }
     directory.remove()?;
     Ok(reports::Removed {

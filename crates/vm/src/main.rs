@@ -80,6 +80,26 @@ enum Command {
         #[arg(long, value_enum)]
         pull: Option<machines::Pull>,
     },
+    /// Start an instance that is not running
+    Start {
+        /// Instance name
+        name: String,
+    },
+    /// Open a shell on an instance, or run a command in it
+    Ssh {
+        /// Instance name
+        name: String,
+        /// Command to run instead of a shell
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
+    /// Copy files to or from an instance, naming one side as name:path
+    Cp {
+        /// Source, as a path or name:path
+        from: String,
+        /// Destination, as a path or name:path
+        to: String,
+    },
     /// List instances
     Ps {
         /// Include instances that are not running
@@ -137,11 +157,20 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
     // neither is in place.
     match &cli.command {
         Command::Ps { all } => return Ok(Box::new(machines::list(*all)?)),
+        Command::Start { name } => return Ok(Box::new(machines::start(name)?)),
+        Command::Ssh { name, command } => {
+            // Either this replaces the process or it reports why it could not.
+            return machines::connect(name, command).map(|held| match held {});
+        }
+        Command::Cp { from, to } => {
+            return machines::copy(from, to).map(|held| match held {});
+        }
         Command::Stop { name, timeout } => {
             return Ok(Box::new(machines::stop(
                 name,
                 std::time::Duration::from_secs(*timeout),
                 false,
+                cli.format.is_text(),
             )?));
         }
         Command::Kill { name } => {
@@ -149,6 +178,7 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
                 name,
                 std::time::Duration::from_secs(10),
                 true,
+                cli.format.is_text(),
             )?));
         }
         Command::Rm { name, force } => return Ok(Box::new(machines::remove(name, *force)?)),
@@ -190,9 +220,13 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
             style,
             cli.format.is_text(),
         )?)),
-        Command::Ps { .. } | Command::Stop { .. } | Command::Kill { .. } | Command::Rm { .. } => {
-            unreachable!("handled above")
-        }
+        Command::Ps { .. }
+        | Command::Start { .. }
+        | Command::Ssh { .. }
+        | Command::Cp { .. }
+        | Command::Stop { .. }
+        | Command::Kill { .. }
+        | Command::Rm { .. } => unreachable!("handled above"),
     }
 }
 

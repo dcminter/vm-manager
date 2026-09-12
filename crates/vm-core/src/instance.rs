@@ -52,6 +52,10 @@ pub struct Instance {
     /// Whether the image can be seeded at all, from its catalogue entry.
     pub seeded: bool,
     pub monitor: PathBuf,
+    /// The host port forwarded to the guest's SSH port. Allocated at run time
+    /// so that a machine can be reached without having been asked to publish
+    /// anything, and absent when the image takes no key.
+    pub ssh_port: Option<u16>,
     /// Absent until the hypervisor is launched, and again once it has gone.
     pub pid: Option<u32>,
     /// Paired with the pid so a reused pid is not mistaken for this one.
@@ -436,6 +440,7 @@ mod tests {
             user: "vm".to_owned(),
             seeded: true,
             monitor: PathBuf::from("/run/user/1000/vm/0011223344556677.sock"),
+            ssh_port: Some(2222),
             pid: None,
             started: None,
             ports: Vec::new(),

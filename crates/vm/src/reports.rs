@@ -225,7 +225,24 @@ impl Report for Update {
     }
 }
 
-/// What `vm run` started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStatus {
+    Created,
+    Restarted,
+    AlreadyRunning,
+}
+
+impl RunStatus {
+    const fn slug(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Restarted => "restarted",
+            Self::AlreadyRunning => "already-running",
+        }
+    }
+}
+
+/// What `vm run` or `vm start` left running.
 pub struct Run {
     pub name: String,
     pub image: String,
@@ -233,12 +250,14 @@ pub struct Run {
     pub memory: u64,
     pub cpus: u32,
     pub ports: Vec<Port>,
+    pub ssh_port: Option<u16>,
     pub user: String,
     pub seeded: bool,
     pub pid: u32,
     /// Whether the machine got KVM; absent when the monitor would not say.
     pub accelerated: Option<bool>,
     pub console: String,
+    pub status: RunStatus,
 }
 
 fn ports_value(ports: &[Port]) -> Value {
@@ -267,8 +286,14 @@ impl Report for Run {
             ("memory", Value::Integer(self.memory)),
             ("cpus", Value::Integer(u64::from(self.cpus))),
             ("ports", ports_value(&self.ports)),
+            (
+                "ssh_port",
+                self.ssh_port
+                    .map_or(Value::Null, |port| Value::Integer(u64::from(port))),
+            ),
             ("user", Value::string(self.user.clone())),
             ("seeded", Value::Bool(self.seeded)),
+            ("status", Value::string(self.status.slug())),
             ("pid", Value::Integer(u64::from(self.pid))),
             (
                 "accelerated",
@@ -279,14 +304,25 @@ impl Report for Run {
     }
 
     fn render_text(&self, style: Style) -> Vec<String> {
+        let name = style.name(&self.name);
+        if self.status == RunStatus::AlreadyRunning {
+            return vec![format!("{name} is already running")];
+        }
         let mut lines = vec![format!(
-            "Started {} from {} ({} MiB, {} CPU{})",
-            style.name(&self.name),
+            "{} {name} from {} ({} MiB, {} CPU{})",
+            if self.status == RunStatus::Restarted {
+                "Restarted"
+            } else {
+                "Started"
+            },
             self.image,
             self.memory,
             self.cpus,
             if self.cpus == 1 { "" } else { "s" }
         )];
+        if let Some(port) = self.ssh_port {
+            lines.push(format!("  ssh      vm ssh {} (port {port})", self.name));
+        }
         if !self.ports.is_empty() {
             lines.push(format!("  ports    {}", ports_text(&self.ports)));
         }
@@ -314,6 +350,8 @@ pub struct MachineRow {
     pub created: u64,
     pub ports: Vec<Port>,
     pub pid: Option<u32>,
+    pub ssh_port: Option<u16>,
+    pub user: String,
     pub damaged: bool,
 }
 
@@ -326,6 +364,8 @@ impl MachineRow {
             created: instance.created,
             ports: instance.ports.clone(),
             pid: instance.pid,
+            ssh_port: instance.ssh_port,
+            user: instance.user.clone(),
             damaged: false,
         }
     }
@@ -340,6 +380,8 @@ impl MachineRow {
             created: 0,
             ports: Vec::new(),
             pid: None,
+            ssh_port: None,
+            user: String::new(),
             damaged: true,
         }
     }
@@ -389,6 +431,14 @@ impl Report for Machines {
                     row.pid
                         .map_or(Value::Null, |pid| Value::Integer(u64::from(pid))),
                 ),
+                // What a script needs to reach the guest without `vm ssh`,
+                // which replaces this process and so reports nothing itself.
+                (
+                    "ssh_port",
+                    row.ssh_port
+                        .map_or(Value::Null, |port| Value::Integer(u64::from(port))),
+                ),
+                ("user", Value::string(row.user.clone())),
             ])
         }))
     }
@@ -425,8 +475,15 @@ impl Report for Machines {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopOutcome {
+    /// The guest took the power button and shut itself down.
     PoweredDown,
+    /// It was taken down without being asked, as `vm kill` does.
     Killed,
+    /// It was asked and did not answer. A machine still early in its boot has
+    /// no ACPI handler yet, so this is what stopping one looks like.
+    Unresponsive,
+    /// There was no monitor to ask through, so it was signalled instead.
+    Unreachable,
     AlreadyStopped,
 }
 
@@ -435,6 +492,8 @@ impl StopOutcome {
         match self {
             Self::PoweredDown => "powered-down",
             Self::Killed => "killed",
+            Self::Unresponsive => "unresponsive",
+            Self::Unreachable => "unreachable",
             Self::AlreadyStopped => "already-stopped",
         }
     }
@@ -443,6 +502,8 @@ impl StopOutcome {
 pub struct Stopped {
     pub name: String,
     pub outcome: StopOutcome,
+    /// How long the guest was given, for the message when it took none of it.
+    pub waited: u64,
 }
 
 impl Report for Stopped {
@@ -450,6 +511,7 @@ impl Report for Stopped {
         Value::map([
             ("name", Value::string(self.name.clone())),
             ("outcome", Value::string(self.outcome.slug())),
+            ("waited", Value::Integer(self.waited)),
         ])
     }
 
@@ -458,6 +520,14 @@ impl Report for Stopped {
         vec![match self.outcome {
             StopOutcome::PoweredDown => format!("Stopped {name}"),
             StopOutcome::Killed => format!("Killed {name}"),
+            StopOutcome::Unresponsive => format!(
+                "Killed {name}: it ignored the power button for {} seconds. A machine \
+                 still booting has no handler for it yet.",
+                self.waited
+            ),
+            StopOutcome::Unreachable => {
+                format!("Killed {name}: its monitor could not be reached")
+            }
             StopOutcome::AlreadyStopped => format!("{name} was not running"),
         }]
     }

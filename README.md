@@ -5,8 +5,8 @@ set modelled on Docker.
 
 ```bash
 vm images
-vm run --name demo -p 2222:22 debian:trixie
-vm ps
+vm run --name demo debian:trixie
+vm ssh demo
 vm stop demo
 ```
 
@@ -34,6 +34,9 @@ cargo run -p vm -- images
 | `vm pull <image>` | Fetch an image into the local store |
 | `vm update` | Refresh the local catalogue from its remote source |
 | `vm run <image>` | Create and start a machine |
+| `vm start <name>` | Start a machine that is not running |
+| `vm ssh <name>` | Open a shell on a machine, or run a command in it |
+| `vm cp <from> <to>` | Copy files, naming one side as `name:path` |
 | `vm ps` | List machines; `--all` includes those not running |
 | `vm stop <name>` | Ask the guest to shut down, then insist |
 | `vm kill <name>` | Stop a machine without telling the guest |
@@ -52,6 +55,11 @@ host:guest` to forward a port, `-m` for memory and `--cpus` for processors, and
 
 Each machine gets a key pair of its own and a cloud-init seed that installs it
 for the account named by `--user`, so no password is set and none is needed.
+A host port is forwarded to its SSH port whether or not one was published, so
+`vm ssh demo` works on a machine that was started with no arguments at all. It
+wraps `ssh` rather than replacing it, so `~/.ssh/config`, the agent and
+`ProxyCommand` all still apply, and each machine keeps its own `known_hosts`
+so that rebuilding one never touches yours.
 Everything a machine owns — its disk, its key, its console log and its record —
 lives in one directory under `$XDG_STATE_HOME/vm/instances`, and `vm rm` takes
 the lot.

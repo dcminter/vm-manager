@@ -104,6 +104,14 @@ pub enum Error {
     InstanceRunning {
         name: String,
     },
+    InstanceStopped {
+        name: String,
+    },
+    NoGuestAccess {
+        name: String,
+    },
+    CopyBetweenGuests,
+    CopyWithoutGuest,
     Signal {
         pid: u32,
         source: std::io::Error,
@@ -160,6 +168,10 @@ impl Error {
             Self::InstanceRecord { .. } => "instance-damaged",
             Self::UnheldImage { .. } => "image-not-held",
             Self::InstanceRunning { .. } => "instance-running",
+            Self::InstanceStopped { .. } => "instance-stopped",
+            Self::NoGuestAccess { .. } => "no-guest-access",
+            Self::CopyBetweenGuests => "copy-between-guests",
+            Self::CopyWithoutGuest => "copy-without-guest",
             Self::Launch { .. } => "launch-failed",
             Self::Overlay { .. } => "overlay-failed",
             Self::KeyGeneration { .. } => "key-generation-failed",
@@ -283,6 +295,25 @@ impl fmt::Display for Error {
             Self::InstanceRunning { name } => {
                 write!(f, "'{name}' is running; stop it first, or use --force")
             }
+            Self::InstanceStopped { name } => {
+                write!(
+                    f,
+                    "'{name}' is not running; start it with 'vm start {name}'"
+                )
+            }
+            Self::NoGuestAccess { name } => write!(
+                f,
+                "'{name}' has no account of ours to connect to: its image takes no \
+                 cloud-init seed, so no key was installed"
+            ),
+            Self::CopyBetweenGuests => write!(
+                f,
+                "a copy runs between this machine and one guest; copy it here first"
+            ),
+            Self::CopyWithoutGuest => write!(
+                f,
+                "neither side names an instance; write one of them as 'name:path'"
+            ),
             Self::Launch { program, source } => {
                 write!(f, "cannot start {program}: {source}")
             }

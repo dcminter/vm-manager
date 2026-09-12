@@ -165,17 +165,25 @@ pub fn arguments(instance: &Instance, directory: &Directory) -> Vec<String> {
 /// the direct analogue of publishing a container's port.
 fn network(instance: &Instance) -> String {
     use std::fmt::Write as _;
-    instance
-        .ports
-        .iter()
-        .fold(String::from("user,id=net0"), |mut netdev, port| {
-            let _ = write!(
-                netdev,
-                ",hostfwd=tcp:127.0.0.1:{}-:{}",
-                port.host, port.guest
-            );
-            netdev
-        })
+    let mut netdev =
+        instance
+            .ports
+            .iter()
+            .fold(String::from("user,id=net0"), |mut netdev, port| {
+                let _ = write!(
+                    netdev,
+                    ",hostfwd=tcp:127.0.0.1:{}-:{}",
+                    port.host, port.guest
+                );
+                netdev
+            });
+    // The forward `vm ssh` uses. It is deliberately not in the published list:
+    // the user did not ask for it, and listing it there would invite removing
+    // it from a machine that is reached through it.
+    if let Some(port) = instance.ssh_port {
+        let _ = write!(netdev, ",hostfwd=tcp:127.0.0.1:{port}-:22");
+    }
+    netdev
 }
 
 /// Creates the instance's writable disk over an image in the store. The image
@@ -277,6 +285,7 @@ mod tests {
             user: "vm".to_owned(),
             seeded: true,
             monitor: PathBuf::new(),
+            ssh_port: None,
             pid: None,
             started: None,
             ports: Vec::new(),
@@ -398,6 +407,15 @@ mod tests {
             netdev.contains("hostfwd=tcp:127.0.0.1:8080-:80"),
             "{netdev}"
         );
+    }
+
+    #[test]
+    fn the_ssh_port_is_forwarded_without_being_published() {
+        let scratch = Scratch::new("sshport");
+        let mut held = instance("one");
+        held.ssh_port = Some(2222);
+        let netdev = pair(&arguments(&held, &scratch.directory("one")), "-netdev").unwrap();
+        assert_eq!(netdev, "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22");
     }
 
     #[test]

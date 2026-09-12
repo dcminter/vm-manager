@@ -1,3 +1,4 @@
+pub mod access;
 pub mod catalogue;
 pub mod config;
 pub mod digest;
