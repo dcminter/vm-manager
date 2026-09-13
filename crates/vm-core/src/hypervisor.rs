@@ -135,12 +135,9 @@ pub fn arguments(instance: &Instance, directory: &Directory) -> Vec<String> {
     push(&instance.memory.to_string());
     push("-smp");
     push(&instance.cpus.to_string());
-    push("-drive");
-    push(&format!(
-        "file={},{},format=qcow2",
-        directory.overlay().display(),
-        instance.disk.interface(0)
-    ));
+    for argument in disk_arguments(instance, directory) {
+        push(&argument);
+    }
     if instance.seeded {
         push("-drive");
         // Writable, because FreeBSD's nuageinit ignores a seed it cannot mount read-write.
@@ -190,6 +187,38 @@ pub fn arguments(instance: &Instance, directory: &Directory) -> Vec<String> {
         directory.monitor().display()
     ));
     out
+}
+
+/// The arguments attaching the machine's disk, and its CD-ROM while it has one.
+fn disk_arguments(instance: &Instance, directory: &Directory) -> Vec<String> {
+    let overlay = directory.overlay();
+    let Some(cdrom) = &instance.cdrom else {
+        return vec![
+            "-drive".to_owned(),
+            format!(
+                "file={},{},format=qcow2",
+                overlay.display(),
+                instance.disk.interface(0)
+            ),
+        ];
+    };
+    // A blank disk falls through to the CD-ROM, and an installed one boots itself.
+    vec![
+        "-drive".to_owned(),
+        format!("file={},if=none,id=disk0,format=qcow2", overlay.display()),
+        "-device".to_owned(),
+        format!("{},drive=disk0,bootindex=0", instance.disk.device()),
+        "-drive".to_owned(),
+        format!(
+            "file={},if=none,id=cdrom0,media=cdrom,readonly=on,format=raw",
+            cdrom.display()
+        ),
+        "-device".to_owned(),
+        format!(
+            "ide-cd,drive=cdrom0,bus={},bootindex=1",
+            instance.machine.cdrom_bus()
+        ),
+    ]
 }
 
 /// User-mode networking with port forwards.
@@ -305,6 +334,20 @@ pub fn create_overlay(
     if let Some(size) = size {
         command.arg(size);
     }
+    created(&mut command, overlay)
+}
+
+pub fn create_blank(disk: &Path, size: &str) -> Result<()> {
+    let mut command = Command::new("qemu-img");
+    command
+        .args(["create", "-q", "-f", "qcow2"])
+        .arg(disk)
+        .arg(size);
+    created(&mut command, disk)
+}
+
+/// Runs a `qemu-img create`, reporting its complaint.
+fn created(command: &mut Command, overlay: &Path) -> Result<()> {
     let output = command.output().map_err(|source| {
         if source.kind() == std::io::ErrorKind::NotFound {
             Error::MissingTool {
@@ -335,6 +378,7 @@ mod tests {
 
     use super::*;
     use crate::instance::{Instances, Port, Share};
+    use crate::machine::{Chipset, Disk};
     use std::fs;
     use std::sync::Mutex;
 
@@ -396,6 +440,8 @@ mod tests {
             started: None,
             generation: 0,
             ssh_config: false,
+            media: crate::catalogue::Media::Disk,
+            cdrom: None,
             password: None,
             ports: Vec::new(),
             shares: Vec::new(),
@@ -500,6 +546,81 @@ mod tests {
             .find(|drive| drive.contains("seed.img"))
             .unwrap();
         assert!(seed.contains("if=ide,index=1"), "{seed}");
+    }
+
+    /// The value following each `flag`.
+    fn all(arguments: &[String], flag: &str) -> Vec<String> {
+        arguments
+            .windows(2)
+            .filter(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_cdrom_machine_boots_its_disk_first_and_its_cdrom_second() {
+        let scratch = Scratch::new("cdrom");
+        let directory = scratch.directory("one");
+        for (chipset, disk, device, bus) in [
+            (Chipset::Q35, Disk::Virtio, "virtio-blk-pci,", "bus=ide.2"),
+            (Chipset::Q35, Disk::Sata, "ide-hd,bus=ide.0,", "bus=ide.2"),
+            (Chipset::Pc, Disk::Ide, "ide-hd,bus=ide.0,", "bus=ide.1"),
+            (Chipset::Pc, Disk::Virtio, "virtio-blk-pci,", "bus=ide.1"),
+        ] {
+            let mut held = instance("one");
+            held.seeded = false;
+            held.machine = chipset;
+            held.disk = disk;
+            held.media = crate::catalogue::Media::Cdrom;
+            held.cdrom = Some(PathBuf::from("/store/disc"));
+            let arguments = arguments(&held, &directory);
+            let drives = all(&arguments, "-drive");
+            assert_eq!(
+                drives,
+                [
+                    format!(
+                        "file={},if=none,id=disk0,format=qcow2",
+                        directory.overlay().display()
+                    ),
+                    "file=/store/disc,if=none,id=cdrom0,media=cdrom,readonly=on,format=raw"
+                        .to_owned()
+                ]
+            );
+            let devices = all(&arguments, "-device");
+            assert!(
+                devices.contains(&format!("{device}drive=disk0,bootindex=0")),
+                "{devices:?}"
+            );
+            assert!(
+                devices.contains(&format!("ide-cd,drive=cdrom0,{bus},bootindex=1")),
+                "{devices:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_ejected_cdrom_leaves_the_disk_as_any_other() {
+        let scratch = Scratch::new("ejected");
+        let directory = scratch.directory("one");
+        let mut held = instance("one");
+        held.seeded = false;
+        held.media = crate::catalogue::Media::Cdrom;
+        let arguments = arguments(&held, &directory);
+        assert!(!arguments.iter().any(|held| held.contains("cdrom")));
+        assert!(!arguments.iter().any(|held| held.contains("bootindex")));
+    }
+
+    #[test]
+    fn a_blank_disk_is_made_at_the_size_given() {
+        let scratch = Scratch::new("blank");
+        let disk = scratch.0.join("disk.qcow2");
+        if create_blank(&disk, "32M").is_err() {
+            return;
+        }
+        let probed = crate::conversion::probe(&disk, "testing").unwrap();
+        assert_eq!(probed.format, "qcow2");
+        assert!(probed.external.is_empty());
+        assert_eq!(crate::disk::usage(&disk).capacity, Some(32 * 1024 * 1024));
     }
 
     #[test]

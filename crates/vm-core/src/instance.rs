@@ -1,5 +1,6 @@
 //! Instances, recorded only in the state directory.
 
+use crate::catalogue::Media;
 use crate::error::{Error, Result};
 use crate::machine::{self, Chipset, Disk, Firmware};
 use crate::process::Handle;
@@ -89,6 +90,12 @@ pub struct Instance {
     /// Whether the directory holds an SSH config entry for the machine.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ssh_config: bool,
+    /// How the image was given: as the disk's base, or as a CD-ROM beside a blank disk.
+    #[serde(default, skip_serializing_if = "Media::is_disk")]
+    pub media: Media,
+    /// The CD-ROM image in the drive, until it is ejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cdrom: Option<PathBuf>,
     /// Omitted when empty, because TOML cannot follow a table with a bare key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<Port>,
@@ -126,6 +133,11 @@ impl Instance {
     pub const fn forget_process(&mut self) {
         self.pid = None;
         self.started = None;
+    }
+
+    /// Whether the machine still needs its image: as its disk's base, or in its CD-ROM drive.
+    pub const fn needs_image(&self) -> bool {
+        !self.media.is_cdrom() || self.cdrom.is_some()
     }
 }
 
@@ -569,6 +581,8 @@ mod tests {
             started: None,
             generation: 0,
             ssh_config: false,
+            media: crate::catalogue::Media::Disk,
+            cdrom: None,
             password: None,
             ports: Vec::new(),
             shares: Vec::new(),
@@ -735,6 +749,38 @@ mod tests {
         held.firmware = Firmware::Uefi;
         let text = basic_toml::to_string(&held).unwrap();
         assert!(text.contains("firmware = \"uefi\""), "{text}");
+    }
+
+    #[test]
+    fn a_cdrom_and_its_media_survive_the_round_trip_and_default_to_a_disk() {
+        let text = basic_toml::to_string(&instance("one")).unwrap();
+        assert!(!text.contains("media"), "{text}");
+        assert!(!text.contains("cdrom"), "{text}");
+        let read: Instance = basic_toml::from_str(&text).unwrap();
+        assert_eq!(read.media, Media::Disk);
+        let mut held = instance("one");
+        held.shares.push(Share {
+            tag: "t".to_owned(),
+            source: PathBuf::from("/s"),
+            target: "/t".to_owned(),
+            pid: None,
+            started: None,
+        });
+        held.media = Media::Cdrom;
+        held.cdrom = Some(PathBuf::from("/store/disc"));
+        let text = basic_toml::to_string(&held).unwrap();
+        assert_eq!(basic_toml::from_str::<Instance>(&text).unwrap(), held);
+    }
+
+    #[test]
+    fn only_an_ejected_cdrom_machine_stands_without_its_image() {
+        let mut held = instance("one");
+        assert!(held.needs_image());
+        held.media = Media::Cdrom;
+        held.cdrom = Some(PathBuf::from("/store/disc"));
+        assert!(held.needs_image());
+        held.cdrom = None;
+        assert!(!held.needs_image());
     }
 
     #[test]

@@ -115,6 +115,20 @@ pub enum Error {
         reason: String,
     },
     NotFetchable,
+    ImageExists {
+        reference: String,
+        /// The entry file naming it under another tag, which `--force` does not replace.
+        alias_in: Option<PathBuf>,
+    },
+    ImportMismatch {
+        source: String,
+        expected: String,
+        actual: String,
+    },
+    UnreadableSource {
+        name: String,
+        error: std::io::Error,
+    },
     Password {
         reason: &'static str,
     },
@@ -145,6 +159,9 @@ pub enum Error {
     Clone {
         reason: String,
     },
+    Convert {
+        reason: String,
+    },
     UnheldImage {
         reference: String,
     },
@@ -170,6 +187,9 @@ pub enum Error {
         name: String,
     },
     InstancePaused {
+        name: String,
+    },
+    NoCdrom {
         name: String,
     },
     NoGuestAccess {
@@ -235,7 +255,7 @@ impl Error {
             Self::Download { .. } => "download-failed",
             Self::HttpStatus { .. } => "http-error",
             Self::PinMismatch { .. } => "pin-mismatch",
-            Self::DigestMismatch { .. } => "digest-mismatch",
+            Self::DigestMismatch { .. } | Self::ImportMismatch { .. } => "digest-mismatch",
             Self::MalformedArchive { .. } => "malformed-archive",
             Self::EmptyCatalogue { .. } => "empty-catalogue",
             Self::SeedRefused { .. } => "seed-invalid",
@@ -247,6 +267,9 @@ impl Error {
             Self::InstanceName { .. } => "invalid-instance-name",
             Self::InstanceRecord { .. } => "instance-damaged",
             Self::NotFetchable => "image-not-fetchable",
+            Self::ImageExists { .. } => "image-exists",
+            Self::UnreadableSource { .. } => "unreadable-source",
+
             Self::Decompress { .. } => "decompression-failed",
             Self::MachineSetting { .. } => "invalid-machine-setting",
             Self::Password { .. } => "unusable-password",
@@ -255,6 +278,7 @@ impl Error {
             Self::MissingFirmware { .. } => "missing-firmware",
             Self::NoFirmware { .. } => "no-uefi-firmware",
             Self::Clone { .. } => "clone-failed",
+            Self::Convert { .. } => "conversion-failed",
             Self::UnheldImage { .. } => "image-not-held",
             Self::ImageInUse { .. } => "image-in-use",
             Self::ChangeWhileRunning { .. } => "change-while-running",
@@ -265,6 +289,7 @@ impl Error {
             Self::InstanceRunning { .. } => "instance-running",
             Self::InstanceStopped { .. } => "instance-stopped",
             Self::InstancePaused { .. } => "instance-paused",
+            Self::NoCdrom { .. } => "no-cdrom",
             Self::NoGuestAccess { .. } => "no-guest-access",
             Self::SshHostTaken { .. } => "ssh-host-taken",
             Self::NoHome => "no-home",
@@ -413,6 +438,7 @@ impl fmt::Display for Error {
             Self::Clone { reason } => {
                 write!(f, "cannot clone the machine's disk: {reason}")
             }
+            Self::Convert { reason } => write!(f, "cannot convert the image: {reason}"),
             Self::Password { reason } => write!(f, "cannot use that password: {reason}"),
             Self::PasswordUnseeded { name } => write!(
                 f,
@@ -445,9 +471,34 @@ impl fmt::Display for Error {
             Self::Decompress { scheme, reason } => {
                 write!(f, "cannot expand the {scheme} image: {reason}")
             }
+            Self::ImageExists {
+                reference,
+                alias_in: None,
+            } => write!(
+                f,
+                "'{reference}' is already in the store catalogue; --force replaces it"
+            ),
+            Self::ImageExists {
+                reference,
+                alias_in: Some(path),
+            } => write!(
+                f,
+                "'{reference}' is an alias in {}; remove that entry first",
+                path.display()
+            ),
+            Self::ImportMismatch {
+                source,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "{source} does not match the digest given.\n  expected {expected}\n  \
+                 received {actual}\nThe image was not kept."
+            ),
+            Self::UnreadableSource { name, error } => write!(f, "cannot read {name}: {error}"),
             Self::NotFetchable => write!(
                 f,
-                "this image was made here by 'vm clone'; there is nowhere to fetch it from"
+                "this image was made here by 'vm clone' or 'vm import'; there is nowhere to fetch it from"
             ),
             Self::UnheldImage { reference } => write!(
                 f,
@@ -459,7 +510,7 @@ impl fmt::Display for Error {
                 instances,
             } => write!(
                 f,
-                "'{reference}' is the disk behind {}; \
+                "'{reference}' is in use by {}; \
                  remove them first, or use --force to break them",
                 instances.join(", ")
             ),
@@ -501,6 +552,7 @@ impl fmt::Display for Error {
                 "'{name}' is paused, so nothing in it is answering; \
                  let it carry on with 'vm resume {name}'"
             ),
+            Self::NoCdrom { name } => write!(f, "{name} has no CD-ROM in its drive"),
             Self::NoGuestAccess { name } => write!(
                 f,
                 "'{name}' has no account of ours to connect to: its image takes no \

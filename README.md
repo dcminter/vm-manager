@@ -34,10 +34,11 @@ cargo run -p vm -- images
 | `vm images` | List the images the catalogues name; `--local`, `--remote` or `--catalogue` narrows it |
 | `vm inspect <image>` | Show an image's details, origin and users; `--arch` picks a build |
 | `vm pull <image>` | Fetch an image into the local store |
+| `vm import <source> <image>` | Bring an image file or URL into the local store |
 | `vm update [catalogue]` | Refresh the remote catalogues, or one |
 | `vm config` | Show the config file, or change a setting or catalogue |
 | `vm run <image>` | Create and start a machine |
-| `vm start <name>` | Start a stopped machine, optionally changing its settings |
+| `vm start <name>` | Start a stopped machine, optionally changing its settings; `--eject` removes its CD-ROM |
 | `vm ssh <name>` | Open a shell on a machine, or run a command in it |
 | `vm cp <from> <to>` | Copy files, naming one side as `name:path` |
 | `vm ps` | List machines; `--all` includes stopped ones, `--follow` refreshes |
@@ -68,7 +69,27 @@ and `puredarwin`, several releases apiece. Each entry names a dated build and
 its publisher's checksum, which `vm pull` verifies.
 
 An entry may declare that its image is compressed (`compression`), its
-`format`, and hardware it needs: `firmware`, `cpu`, `machine` and `disk`.
+`format`, a `source_format` to convert to qcow2 when pulled, `media = "cdrom"`
+for a CD-ROM image, and hardware it needs: `firmware`, `cpu`, `machine` and
+`disk`.
+
+### Importing
+
+`vm import` names a local file or an `http` or `https` URL as an image in the
+`store` catalogue. The source may be compressed with xz, gzip or zstd. A disk
+image, such as vmdk, vdi, vhdx or raw, is converted to qcow2; an ISO CD-ROM
+image is kept as it is.
+
+```bash
+vm import ./appliance.vmdk appliance:1.0
+vm import https://example.com/os-installer.iso installer:1.0
+```
+
+An imported URL stays fetchable: `vm prune --all` may remove the file, and
+`vm run` or `vm pull` fetches and converts it again. `--forget-url` keeps only
+the local copy. `--login cloud-init` marks an image that takes a cloud-init
+seed, `--firmware`, `--machine`, `--disk` and `--cpu` give hardware it needs,
+`--digest` checks the source, and `--force` replaces an image of the same name.
 
 ## Machines
 
@@ -98,6 +119,14 @@ entry.
 
 Images without cloud-init still run, but take no key and no account.
 
+### CD-ROM images
+
+A machine run from a CD-ROM image gets a blank disk, 20G unless `--disk-size`
+says otherwise, and boots the CD-ROM until the disk holds a system. An
+installer's reboot therefore starts the installed system. `vm start --eject`
+removes the CD-ROM, after which the machine no longer needs the image, and
+`vm clone` saves the installed disk as an image.
+
 Machine state lives under `$XDG_STATE_HOME/vm/instances`.
 
 ### Pruning
@@ -108,7 +137,7 @@ or unfinished downloads. `--all` also removes every stopped machine and every
 pulled image no machine uses; machines go first, so their images go in the same
 run. `vm prune machines` or `vm prune images` limits it to one kind, and
 `--dry-run` lists without removing. Running and paused machines, images in use,
-and clones are never removed.
+and images that cannot be fetched again are never removed.
 
 ### Ping
 
@@ -157,7 +186,7 @@ and `default_user`, the account created when `--user` is not given.
 Several catalogues can name images. Remote catalogues are fetched by
 `vm update`; local ones are read in place. When two name the same image the
 later one wins: remotes in the order listed, then locals in the order listed,
-then the catalogue `vm clone` writes to.
+then `store`, the catalogue `vm clone` and `vm import` write to.
 
 ```toml
 [[remote]]

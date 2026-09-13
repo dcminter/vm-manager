@@ -21,7 +21,7 @@ pub enum Kind {
     Image,
     /// A record of a pulled reference.
     Record,
-    /// A file from a pull or clone that did not finish.
+    /// A file from a pull, clone or import that did not finish.
     Partial,
 }
 
@@ -52,7 +52,7 @@ pub enum Reason {
     Unused,
     /// The image file a record names is gone.
     FileGone,
-    /// Left by a pull or clone that did not finish.
+    /// Left by a pull, clone or import that did not finish.
     Interrupted,
 }
 
@@ -79,7 +79,7 @@ impl Reason {
             Self::Orphaned => "no catalogue entry names it",
             Self::Unused => "no machine uses it",
             Self::FileGone => "its image file is gone",
-            Self::Interrupted => "left by an unfinished pull or clone",
+            Self::Interrupted => "left by an unfinished pull, clone or import",
         }
     }
 }
@@ -110,7 +110,9 @@ pub fn machines(
         };
         let reason = match directory.read() {
             Ok(held) if held.is_running() => continue,
-            Ok(held) if !obtainable(store, catalogue, &held.digest) => Some(Reason::ImageGone),
+            Ok(held) if held.needs_image() && !obtainable(store, catalogue, &held.digest) => {
+                Some(Reason::ImageGone)
+            }
             Ok(_) => all.then_some(Reason::Stopped),
             Err(_) if answers(&directory) => continue,
             Err(_) => all.then_some(Reason::Unreadable),
@@ -215,6 +217,7 @@ pub fn in_use(instances: &Instances, store: &Store, removing: &[Item]) -> Result
             used.push(canonical(&backing));
         }
         if let Ok(held) = directory.read()
+            && held.needs_image()
             && let Ok(digest) = held.digest.parse::<Digest>()
         {
             used.push(canonical(&store.path_for(&digest)));
@@ -321,7 +324,7 @@ fn held(blobs: &Path) -> Vec<(PathBuf, Digest)> {
     found
 }
 
-/// Files a pull or clone was writing, left for [`PARTIAL_AGE`] before counting as abandoned.
+/// Files a pull, clone or import was writing, left for [`PARTIAL_AGE`] before counting as abandoned.
 fn partials(blobs: &Path, now: SystemTime) -> Vec<Item> {
     let building = listing(blobs)
         .into_iter()
@@ -566,6 +569,8 @@ mod tests {
                     started: handle.map(|held| held.started),
                     generation: 0,
                     ssh_config: false,
+                    media: crate::catalogue::Media::Disk,
+                    cdrom: None,
                     password: None,
                     ports: Vec::new(),
                     shares: Vec::new(),
@@ -607,6 +612,45 @@ mod tests {
             .iter()
             .map(|item| (item.kind, item.name.clone(), item.reason))
             .collect()
+    }
+
+    /// A machine made from a CD-ROM image, with the CD-ROM still in or ejected.
+    fn cdrom_machine(scratch: &Scratch, name: &str, digest: &Digest, inserted: bool) {
+        let directory = scratch.machine(name, digest, false);
+        let mut held = directory.read().unwrap();
+        held.media = crate::catalogue::Media::Cdrom;
+        held.cdrom = inserted.then(|| scratch.store().path_for(digest));
+        directory.write(&held).unwrap();
+    }
+
+    #[test]
+    fn a_machine_with_its_cdrom_ejected_does_not_need_the_image() {
+        let scratch = Scratch::new("ejected");
+        scratch.blob(&digest('a'));
+        cdrom_machine(&scratch, "installed", &digest('a'), false);
+        assert!(scratch.machines(false).is_empty());
+        assert_eq!(
+            summary(&scratch.images(false)),
+            [(Kind::Image, short(&digest('a')), Reason::Orphaned)]
+        );
+        fs::remove_file(scratch.store().path_for(&digest('a'))).unwrap();
+        assert!(
+            scratch.machines(false).is_empty(),
+            "the installed machine was taken"
+        );
+    }
+
+    #[test]
+    fn a_machine_with_its_cdrom_in_needs_the_image() {
+        let scratch = Scratch::new("inserted");
+        cdrom_machine(&scratch, "installing", &digest('a'), true);
+        assert_eq!(
+            summary(&scratch.machines(false)),
+            [(Kind::Machine, "installing".to_owned(), Reason::ImageGone)]
+        );
+        scratch.blob(&digest('a'));
+        assert!(scratch.machines(false).is_empty());
+        assert!(scratch.images(false).is_empty());
     }
 
     #[test]

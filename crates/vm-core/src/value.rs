@@ -614,6 +614,13 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn a_toml_string_escapes_what_would_end_or_break_it() {
+        assert_eq!(toml_string("plain"), r#""plain""#);
+        assert_eq!(toml_string(r#"a "b" \c"#), r#""a \"b\" \\c""#);
+        assert_eq!(toml_string("one\ntwo"), r#""one\u000Atwo""#);
+    }
+
     fn sample() -> Value {
         Value::map([
             ("name", Value::string("debian")),

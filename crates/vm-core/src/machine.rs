@@ -8,6 +8,9 @@ use std::str::FromStr;
 /// The processor model presented unless an image or the user asks for another.
 pub const DEFAULT_CPU: &str = "max";
 
+/// The size of the blank disk beside a CD-ROM image, unless one is asked for.
+pub const BLANK_DISK_SIZE: &str = "20G";
+
 /// The firmware that finds the guest's boot loader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -70,6 +73,16 @@ impl Chipset {
             Self::Pc => "pc",
         }
     }
+
+    /// The bus a CD-ROM drive is attached to, clear of the disk and seed.
+    pub const fn cdrom_bus(self) -> &'static str {
+        match self {
+            // An AHCI port of its own.
+            Self::Q35 => "ide.2",
+            // The secondary IDE channel.
+            Self::Pc => "ide.1",
+        }
+    }
 }
 
 impl FromStr for Chipset {
@@ -110,6 +123,14 @@ impl Disk {
             Self::Virtio => "virtio",
             Self::Ide => "ide",
             Self::Sata => "sata",
+        }
+    }
+
+    /// The `-device` for the first disk, attached to a drive given separately.
+    pub const fn device(self) -> &'static str {
+        match self {
+            Self::Virtio => "virtio-blk-pci",
+            Self::Ide | Self::Sata => "ide-hd,bus=ide.0",
         }
     }
 

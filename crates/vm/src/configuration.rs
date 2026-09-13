@@ -8,7 +8,7 @@ use clap::Subcommand;
 use clap_complete::engine::ArgValueCandidates;
 use std::path::{Path, PathBuf};
 use vm_core::config::{
-    CLONES_CATALOGUE, CURRENT_USER, Config, FALLBACK_USER, Key, Local, PROJECT_CATALOGUE, Remote,
+    CURRENT_USER, Config, FALLBACK_USER, Key, Local, PROJECT_CATALOGUE, Remote, STORE_CATALOGUE,
     Settings,
 };
 use vm_core::value::Value;
@@ -342,7 +342,7 @@ impl Shown {
                 (
                     source.name.clone(),
                     source.directory.clone(),
-                    source.name == CLONES_CATALOGUE,
+                    source.name == STORE_CATALOGUE,
                 )
             })
             .collect()
@@ -747,7 +747,7 @@ mod tests {
             path: PathBuf::from("/home/x/.config/vm/config.toml"),
             settings: None,
             sources: vec![vm_core::catalogue::Source {
-                name: CLONES_CATALOGUE.to_owned(),
+                name: STORE_CATALOGUE.to_owned(),
                 kind: vm_core::catalogue::Kind::Local,
                 directory: PathBuf::from("/home/x/.local/share/vm/local"),
             }],
@@ -762,7 +762,7 @@ mod tests {
         assert!(text.contains("auto_pull       true   default"), "{text}");
         assert!(text.contains("project"), "{text}");
         assert!(
-            text.contains("clones  /home/x/.local/share/vm/local  built in"),
+            text.contains("store  /home/x/.local/share/vm/local  built in"),
             "{text}"
         );
         let json = to_json(&shown.to_value());
@@ -825,6 +825,6 @@ mod tests {
         );
         assert!(parse(&["vm", "config", "add", "local", "team", "/srv/team"]).is_ok());
         assert!(parse(&["vm", "config", "remove", "remote", "a"]).is_ok());
-        assert!(parse(&["vm", "config", "remove", "clones"]).is_err());
+        assert!(parse(&["vm", "config", "remove", "store"]).is_err());
     }
 }

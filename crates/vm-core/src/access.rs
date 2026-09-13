@@ -170,6 +170,8 @@ mod tests {
             started: Some(handle.started),
             generation: 0,
             ssh_config: false,
+            media: crate::catalogue::Media::Disk,
+            cdrom: None,
             password: None,
             ports: Vec::new(),
             shares: Vec::new(),

@@ -1,5 +1,5 @@
 use crate::catalogue::{Kind, Source};
-use crate::config::{CLONES_CATALOGUE, Config, PROJECT_CATALOGUE_URL};
+use crate::config::{Config, PROJECT_CATALOGUE_URL, STORE_CATALOGUE};
 use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -75,7 +75,7 @@ fn user_id() -> u32 {
     std::fs::metadata("/proc/self").map_or(0, |data| data.uid())
 }
 
-/// Where `vm clone` writes catalogue entries, apart from what `vm update` replaces.
+/// Where `vm clone` and `vm import` write catalogue entries.
 pub fn local_catalogue_directory_in(environment: &impl Environment) -> Option<PathBuf> {
     data_directory_in(environment).map(|path| path.join("local"))
 }
@@ -131,7 +131,7 @@ pub fn remote_catalogue_directory(name: &str) -> Option<PathBuf> {
     remote_catalogue_directory_in(&SystemEnvironment, name)
 }
 
-/// Every catalogue, lowest precedence first: remotes, configured locals, then clones.
+/// Every catalogue, lowest precedence first: remotes, configured locals, then the store catalogue.
 pub fn catalogue_sources(config: &Config) -> Vec<Source> {
     catalogue_sources_in(&SystemEnvironment, config, &|path| path.is_dir())
 }
@@ -158,7 +158,7 @@ fn catalogue_sources_in(
     }));
     sources.extend(
         local_catalogue_directory_in(environment).map(|directory| Source {
-            name: CLONES_CATALOGUE.to_owned(),
+            name: STORE_CATALOGUE.to_owned(),
             kind: Kind::Local,
             directory,
         }),
@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn catalogues_are_ordered_remotes_then_locals_then_clones() {
+    fn catalogues_are_ordered_remotes_then_locals_then_the_store() {
         let held = environment(&[("HOME", "/home/x")]);
         let sources = catalogue_sources_in(&held, &configured(), &|_| true);
         assert_eq!(
@@ -339,7 +339,7 @@ mod tests {
                 ),
                 ("team", Kind::Local, Path::new("/srv/team")),
                 (
-                    "clones",
+                    "store",
                     Kind::Local,
                     Path::new("/home/x/.local/share/vm/local")
                 ),
@@ -392,7 +392,7 @@ mod tests {
                 ("override", Kind::Remote, Path::new("/override")),
                 ("team", Kind::Local, Path::new("/srv/team")),
                 (
-                    "clones",
+                    "store",
                     Kind::Local,
                     Path::new("/home/x/.local/share/vm/local")
                 ),

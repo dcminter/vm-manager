@@ -1,16 +1,14 @@
 //! Flattening a machine's disk into a new image.
 
+use crate::catalogue::{Artifact, Login, Media, NewEntry};
+use crate::compression::Compression;
+use crate::conversion::{self, Conversion};
 use crate::error::{Error, Result};
 use crate::instance::Instance;
 use crate::reference::{Algorithm, Digest, Reference};
 use crate::store::Store;
-use crate::value::toml_string;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-/// How far along a conversion is, in whole percent.
-pub type Converting<'a> = &'a mut dyn FnMut(u8);
 
 /// What a clone is to be called.
 #[derive(Debug, Clone, Copy)]
@@ -55,93 +53,8 @@ pub struct Cloned {
     pub entry: PathBuf,
 }
 
-/// Flattens an overlay and its backing chain into one image, stating the input format so damage is refused.
-pub fn convert(
-    overlay: &Path,
-    destination: &Path,
-    in_use: bool,
-    report: Option<Converting<'_>>,
-) -> Result<()> {
-    let mut command = Command::new("qemu-img");
-    command
-        .arg("convert")
-        // Progress, on one line rewritten by carriage returns.
-        .arg("-p")
-        .arg("-f")
-        .arg("qcow2")
-        .arg("-O")
-        .arg("qcow2");
-    if in_use {
-        // Bypasses the lock a running hypervisor holds.
-        command.arg("-U");
-    }
-    let mut child = command
-        .arg(overlay)
-        .arg(destination)
-        .stdout(std::process::Stdio::piped())
-        // Captured to report as an error.
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|source| {
-            if source.kind() == std::io::ErrorKind::NotFound {
-                Error::MissingTool {
-                    binary: "qemu-img",
-                    package: "qemu-utils",
-                    operation: "cloning a virtual machine",
-                }
-            } else {
-                Error::Launch {
-                    program: "qemu-img".to_owned(),
-                    source,
-                }
-            }
-        })?;
-    if let (Some(stdout), Some(report)) = (child.stdout.take(), report) {
-        watch(stdout, report);
-    }
-    let output = child.wait_with_output().map_err(|source| Error::Launch {
-        program: "qemu-img".to_owned(),
-        source,
-    })?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let _ = fs::remove_file(destination);
-    Err(Error::Clone {
-        reason: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-    })
-}
-
-/// Reads the conversion's progress until the process ends.
-fn watch(stdout: std::process::ChildStdout, report: Converting<'_>) {
-    use std::io::BufRead as _;
-    let mut reader = std::io::BufReader::new(stdout);
-    let mut buffer = Vec::new();
-    while reader
-        .read_until(b'\r', &mut buffer)
-        .is_ok_and(|read| read > 0)
-    {
-        if let Some(percent) = percentage(&String::from_utf8_lossy(&buffer)) {
-            report(percent);
-        }
-        buffer.clear();
-    }
-}
-
-/// The whole percent from `    (37.50/100%)`.
-fn percentage(text: &str) -> Option<u8> {
-    let open = text.rfind('(')?;
-    let slash = text.get(open..)?.find('/')? + open;
-    if !text.get(slash..)?.starts_with("/100%") {
-        return None;
-    }
-    let figure = text.get(open + 1..slash)?;
-    let whole = figure.split_once('.').map_or(figure, |(whole, _)| whole);
-    whole.parse().ok()
-}
-
 /// Whole percent of a known total, or zero when the total is unknown.
-fn proportion(progress: &crate::store::Progress) -> u8 {
+pub fn proportion(progress: &crate::store::Progress) -> u8 {
     let Some(total) = progress.total.filter(|total| *total > 0) else {
         return 0;
     };
@@ -167,12 +80,20 @@ pub fn image(
             report(stage, percent);
         }
     };
-    convert(
-        overlay,
-        &staged,
-        in_use,
+    conversion::convert(
+        &Conversion {
+            source: overlay,
+            format: "qcow2",
+            destination: &staged,
+            in_use,
+            operation: "cloning a virtual machine",
+        },
         Some(&mut |percent| say(Stage::Converting, percent)),
-    )?;
+    )
+    .map_err(|error| match error {
+        Error::Convert { reason } => Error::Clone { reason },
+        other => other,
+    })?;
     let digest = store.adopt(&staged, ALGORITHM, &mut |progress| {
         say(Stage::Hashing, proportion(&progress));
     })?;
@@ -208,62 +129,35 @@ fn write_entry(
     size: u64,
     description: Option<&str>,
 ) -> Result<PathBuf> {
-    let directory = local.join(name);
-    fs::create_dir_all(&directory).map_err(|source| Error::Store {
-        path: directory.clone(),
-        action: "create",
-        source,
-    })?;
-    let login = if instance.seeded {
-        "cloud-init"
-    } else {
-        "none"
-    };
     let description =
         description.map_or_else(|| format!("Cloned from '{}'", instance.name), str::to_owned);
-    let mut body = format!(
-        "name = \"{name}\"\n\
-         tag = \"{tag}\"\n\
-         description = {}\n\
-         login = \"{login}\"\n\
-         \n\
-         [[image]]\n\
-         arch = \"{}\"\n\
-         format = \"qcow2\"\n\
-         digest = \"{digest}\"\n\
-         size = {size}\n",
-        toml_string(&description),
-        instance.arch
-    );
     // The disk was made to boot on this machine, so a clone asks for the same one.
-    if !instance.firmware.is_default() {
-        let _ = std::fmt::Write::write_fmt(
-            &mut body,
-            format_args!("firmware = \"{}\"\n", instance.firmware.name()),
-        );
+    let artifact = Artifact {
+        arch: instance.arch.clone(),
+        format: "qcow2".to_owned(),
+        url: None,
+        digest: digest.clone(),
+        size: Some(size),
+        compression: Compression::None,
+        source_format: None,
+        media: Media::Disk,
+        firmware: instance.firmware,
+        cpu: (instance.cpu != crate::machine::DEFAULT_CPU).then(|| instance.cpu.clone()),
+        machine: instance.machine,
+        disk: instance.disk,
+    };
+    NewEntry {
+        name,
+        tag,
+        description: &description,
+        login: if instance.seeded {
+            Login::CloudInit
+        } else {
+            Login::None
+        },
+        artifact: &artifact,
     }
-    if !instance.machine.is_default() {
-        let _ = std::fmt::Write::write_fmt(
-            &mut body,
-            format_args!("machine = \"{}\"\n", instance.machine.name()),
-        );
-    }
-    if !instance.disk.is_default() {
-        let _ = std::fmt::Write::write_fmt(
-            &mut body,
-            format_args!("disk = \"{}\"\n", instance.disk.name()),
-        );
-    }
-    if instance.cpu != crate::machine::DEFAULT_CPU {
-        let _ = std::fmt::Write::write_fmt(&mut body, format_args!("cpu = \"{}\"\n", instance.cpu));
-    }
-    let path = directory.join(format!("{tag}.toml"));
-    fs::write(&path, body).map_err(|source| Error::Store {
-        path: path.clone(),
-        action: "write",
-        source,
-    })?;
-    Ok(path)
+    .write(local)
 }
 
 #[cfg(test)]
@@ -312,6 +206,8 @@ mod tests {
             started: None,
             generation: 0,
             ssh_config: false,
+            media: crate::catalogue::Media::Disk,
+            cdrom: None,
             password: None,
             ports: Vec::new(),
             shares: Vec::new(),
@@ -320,50 +216,6 @@ mod tests {
 
     fn entry_is_readable(local: &Path) -> Catalogue {
         Catalogue::load(local).unwrap()
-    }
-
-    #[test]
-    fn a_progress_line_yields_its_whole_percent() {
-        assert_eq!(percentage("    (37.50/100%)"), Some(37));
-        assert_eq!(percentage("    (0.00/100%)"), Some(0));
-        assert_eq!(percentage("    (100.00/100%)"), Some(100));
-    }
-
-    /// Anything else on the stream is not progress and must not be read as it.
-    #[test]
-    fn a_line_that_is_not_progress_yields_nothing() {
-        for text in ["", "(", "()", "(x.00/100%)", "(50.00/50%)", "(50.00)"] {
-            assert_eq!(percentage(text), None, "{text}");
-        }
-    }
-
-    #[test]
-    fn a_figure_too_large_for_a_percentage_is_refused() {
-        assert_eq!(percentage("(300.00/100%)"), None);
-    }
-
-    #[test]
-    fn a_conversion_reports_its_progress() {
-        let scratch = Scratch::new("progress");
-        let image = scratch.0.join("image.qcow2");
-        let made = Command::new("qemu-img")
-            .args(["create", "-q", "-f", "qcow2"])
-            .arg(&image)
-            .arg("64M")
-            .status();
-        if !made.is_ok_and(|status| status.success()) {
-            return;
-        }
-        let mut seen = Vec::new();
-        convert(
-            &image,
-            &scratch.0.join("out.qcow2"),
-            false,
-            Some(&mut |percent| seen.push(percent)),
-        )
-        .unwrap();
-        assert_eq!(seen.last(), Some(&100), "{seen:?}");
-        assert!(seen.windows(2).all(|pair| pair[0] <= pair[1]), "{seen:?}");
     }
 
     #[test]
@@ -413,25 +265,6 @@ mod tests {
     }
 
     #[test]
-    fn a_disk_in_use_is_read_without_taking_the_lock() {
-        let scratch = Scratch::new("lock");
-        let image = scratch.0.join("image.qcow2");
-        let made = Command::new("qemu-img")
-            .args(["create", "-q", "-f", "qcow2"])
-            .arg(&image)
-            .arg("16M")
-            .status();
-        if !made.is_ok_and(|status| status.success()) {
-            return;
-        }
-        for in_use in [false, true] {
-            let out = scratch.0.join(format!("out-{in_use}.qcow2"));
-            convert(&image, &out, in_use, None).unwrap();
-            assert!(out.is_file());
-        }
-    }
-
-    #[test]
     fn a_written_entry_is_one_the_catalogue_can_read() {
         let scratch = Scratch::new("entry");
         let digest = Digest::new(ALGORITHM, &"a".repeat(64));
@@ -473,13 +306,6 @@ mod tests {
         let reference: Reference = "mine:latest".parse().unwrap();
         let (entry, _) = catalogue.resolve(&reference, "amd64").unwrap();
         assert_eq!(entry.description, text);
-    }
-
-    #[test]
-    fn a_toml_string_escapes_what_would_end_or_break_it() {
-        assert_eq!(toml_string("plain"), r#""plain""#);
-        assert_eq!(toml_string(r#"a "b" \c"#), r#""a \"b\" \\c""#);
-        assert_eq!(toml_string("one\ntwo"), r#""one\u000Atwo""#);
     }
 
     #[test]
@@ -581,24 +407,5 @@ mod tests {
         write_entry(&scratch.0, &held, "mine", "one", &digest, 1, None).unwrap();
         write_entry(&scratch.0, &held, "mine", "two", &digest, 1, None).unwrap();
         assert_eq!(entry_is_readable(&scratch.0).entries().len(), 2);
-    }
-
-    #[test]
-    fn converting_something_that_is_not_a_disk_is_refused() {
-        let scratch = Scratch::new("notadisk");
-        let overlay = scratch.0.join("not-a-disk");
-        fs::write(&overlay, b"certainly not a qcow2").unwrap();
-        let outcome = convert(&overlay, &scratch.0.join("out.qcow2"), false, None);
-        match outcome {
-            Err(error) => assert!(
-                matches!(error.kind(), "clone-failed" | "missing-tool"),
-                "{error}"
-            ),
-            Ok(()) => panic!("a text file should not convert to an image"),
-        }
-        assert!(
-            !scratch.0.join("out.qcow2").exists(),
-            "a failed conversion left a file behind"
-        );
     }
 }

@@ -50,6 +50,55 @@ or
 .BR zstd (1);
 the digest covers the file as published.
 .TP
+.BI import " SOURCE IMAGE"
+Name a file, or an
+.B http
+or
+.B https
+URL, as the image
+.I repository:tag
+in the
+.B store
+catalogue. A source compressed with
+.BR xz (1),
+.BR gzip (1)
+or
+.BR zstd (1)
+is expanded. A disk image in any format
+.BR qemu\-img (1)
+reads is converted to qcow2; an ISO 9660 CD-ROM image is kept as it is. An
+imported URL stays fetchable, so a pull converts it again; a downloaded image
+that reads other files is refused.
+.RS
+.TP
+.B \-\-forget\-url
+Keep no URL, so the image cannot be fetched again.
+.TP
+.BI \-\-digest " DIGEST"
+Refuse a source whose digest, as published, differs.
+.TP
+.BI \-\-login " LOGIN"
+.B cloud-init
+for an image that takes a seed, or
+.B none
+(default).
+.TP
+.BI \-\-arch " ARCH"
+The image's architecture, instead of this host's.
+.TP
+.BR \-\-firmware ", " \-\-cpu ", " \-\-machine ", " \-\-disk
+Hardware the image needs, as for
+.BR run .
+.TP
+.BI \-\-description " TEXT"
+The image's description, which otherwise names the source.
+.TP
+.BR \-f ", " \-\-force
+Replace an image of the same name in the
+.B store
+catalogue.
+.RE
+.TP
 .B config
 Show the config file's path and every setting and catalogue, marking defaults.
 With no file, say where one would be created; none is created until a change is
@@ -94,6 +143,8 @@ fetched keeps its previous copy, and the command exits 1.
 .BI run " IMAGE"
 Create and start a machine. See
 .BR "OPTIONS FOR RUN" .
+A machine run from a CD-ROM image gets a blank disk and boots the CD-ROM until
+the disk holds a system, so an installer's reboot starts the installed system.
 .TP
 .BI start " NAME"
 Start a stopped machine. Takes
@@ -109,7 +160,10 @@ are replaced as a list.
 .BR \-\-no\-publish ", " \-\-no\-volume ", " \-\-no\-password
 and
 .B \-\-no\-ssh\-config
-remove them. A running machine cannot be changed.
+remove them.
+.B \-\-eject
+removes the CD-ROM, after which the machine no longer needs its image. A running
+machine cannot be changed.
 .IP
 A disk prepared for one firmware does not boot under the other, and a guest
 without a driver for its disk controller does not find its disk; changing the
@@ -187,6 +241,8 @@ shows only the last lines.
 Delete an image name from the local store. A catalogue image is listed again as
 unfetched; an image made by
 .B vm clone
+or
+.B vm import
 loses its catalogue entry. Entries in other local catalogues are left in place. An image in use by a machine is refused without
 .BR \-\-force .
 Names for identical images share one file, which is deleted with the last name.
@@ -210,15 +266,13 @@ Remove machines and images nothing needs: machines first, then images, or only
 the one named.
 .B \-\-dry\-run
 lists what would be removed. Running and paused machines, images a machine
-uses, and images made by
-.B vm clone
-are never removed.
+uses, and images that cannot be fetched again are never removed.
 .RS
 .TP
 Removed by default
 Machines whose image is not held and cannot be fetched; sockets left by
 machines that are not running; image files no catalogue entry names; records of
-pulled images whose file is gone; and partial files from pulls or clones
+pulled images whose file is gone; and partial files from pulls, clones or imports
 untouched for an hour.
 .TP
 .BR \-a ", " \-\-all
@@ -252,7 +306,8 @@ or
 .BR vm .
 .TP
 .BI \-\-disk\-size " SIZE"
-Grow the disk to this size, such as 40G.
+Grow the disk to this size, such as 40G. For a CD-ROM image, the size of the
+blank disk; default 20G.
 .TP
 .BI \-\-pull " WHEN"
 .BR always ", " missing " (default) or " never .
@@ -351,9 +406,11 @@ Each remote catalogue, as last fetched.
 .TP
 .I $XDG_DATA_HOME/vm/local
 The
-.B clones
+.B store
 catalogue, holding entries for images made by
-.BR "vm clone" .
+.B vm clone
+and
+.BR "vm import" .
 .TP
 .I $XDG_STATE_HOME/vm/instances
 One private directory per machine: its disk, key, console log, record, SSH
@@ -385,6 +442,11 @@ only if
 on the host includes one of the user's groups. Only echo requests pass, so
 .BR traceroute (1)
 sees nothing past the host.
+.PP
+An installer booted under UEFI records its boot entry in the machine's own
+variable store. An image cloned from that disk boots elsewhere only if the
+installer also placed the removable-media loader, such as
+.IR \eEFI\eBOOT\eBOOTX64.EFI .
 .SH EXIT STATUS
 0 on success, 1 on failure.
 .SH SEE ALSO

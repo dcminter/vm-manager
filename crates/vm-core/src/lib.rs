@@ -3,12 +3,14 @@ pub mod catalogue;
 pub mod clone;
 pub mod compression;
 pub mod config;
+pub mod conversion;
 pub mod crypt;
 pub mod digest;
 pub mod disk;
 pub mod error;
 pub mod fat;
 pub mod hypervisor;
+pub mod import;
 pub mod instance;
 pub mod keys;
 pub mod machine;
@@ -21,11 +23,16 @@ pub mod seed;
 pub mod ssh_config;
 pub mod store;
 pub mod tar;
+#[cfg(test)]
+mod testing;
 pub mod update;
 pub mod value;
 
 pub use error::{Error, Result};
 pub use reference::Reference;
+
+/// The catalogue's names for the architectures a machine can have.
+pub const ARCHITECTURES: [&str; 4] = ["amd64", "arm64", "riscv64", "ppc64el"];
 
 /// The catalogue's name for the architecture this build runs on.
 pub const fn host_architecture() -> &'static str {

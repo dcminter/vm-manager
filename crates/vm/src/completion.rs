@@ -191,6 +191,20 @@ pub fn firmware() -> Vec<CompletionCandidate> {
         .collect()
 }
 
+pub fn login() -> Vec<CompletionCandidate> {
+    vm_core::catalogue::Login::ALL
+        .into_iter()
+        .map(|held| CompletionCandidate::new(held.name()))
+        .collect()
+}
+
+pub fn known_architecture() -> Vec<CompletionCandidate> {
+    vm_core::ARCHITECTURES
+        .into_iter()
+        .map(CompletionCandidate::new)
+        .collect()
+}
+
 pub fn chipset() -> Vec<CompletionCandidate> {
     Chipset::ALL
         .into_iter()
@@ -289,6 +303,8 @@ mod tests {
                     started: handle.as_ref().map(|held| held.started),
                     generation: 0,
                     ssh_config: false,
+                    media: vm_core::catalogue::Media::Disk,
+                    cdrom: None,
                     password: None,
                     ports: Vec::new(),
                     shares: Vec::new(),

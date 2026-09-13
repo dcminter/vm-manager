@@ -1,6 +1,7 @@
 mod completion;
 mod configuration;
 mod console;
+mod imports;
 mod machines;
 mod output;
 mod progress;
@@ -184,6 +185,9 @@ enum Command {
         /// Remove the machine's SSH configuration entry
         #[arg(long)]
         no_ssh_config: bool,
+        /// Take the CD-ROM out of the drive, so the machine no longer needs its image
+        #[arg(long)]
+        eject: bool,
     },
     /// Open a shell on an instance, or run a command in it
     Ssh {
@@ -286,12 +290,50 @@ enum Command {
         #[arg(value_hint = clap::ValueHint::AnyPath)]
         file: Option<std::path::PathBuf>,
     },
+    /// Bring an image file or download into the store
+    Import {
+        /// Image file, or http or https URL, compressed or not
+        #[arg(value_parser = imports::parse_source, value_hint = clap::ValueHint::AnyPath)]
+        source: vm_core::import::Source,
+        /// Name for the image, as repository:tag
+        image: String,
+        /// Description for the image, instead of naming the source
+        #[arg(long, value_parser = machines::parse_description)]
+        description: Option<String>,
+        /// How the guest is reached: cloud-init, or none for the console only
+        #[arg(long, default_value = "none", value_parser = imports::parse_login, add = ArgValueCandidates::new(completion::login))]
+        login: vm_core::catalogue::Login,
+        /// Architecture of the image, instead of this host's
+        #[arg(long, value_parser = imports::parse_arch, add = ArgValueCandidates::new(completion::known_architecture))]
+        arch: Option<String>,
+        /// Firmware the image needs, bios or uefi
+        #[arg(long, value_parser = machines::parse_firmware, add = ArgValueCandidates::new(completion::firmware))]
+        firmware: Option<vm_core::machine::Firmware>,
+        /// QEMU CPU model the image needs, such as Penryn,+avx
+        #[arg(long, value_parser = machines::parse_cpu)]
+        cpu: Option<String>,
+        /// Machine type the image needs, q35 or pc
+        #[arg(long, value_parser = machines::parse_machine, add = ArgValueCandidates::new(completion::chipset))]
+        machine: Option<vm_core::machine::Chipset>,
+        /// Disk controller the image needs, virtio, ide (pc only) or sata (q35 only)
+        #[arg(long, value_parser = machines::parse_disk, add = ArgValueCandidates::new(completion::disk))]
+        disk: Option<vm_core::machine::Disk>,
+        /// Digest the source must match as published, such as sha256:...
+        #[arg(long, value_parser = imports::parse_digest)]
+        digest: Option<vm_core::reference::Digest>,
+        /// Keep no URL, so the image cannot be fetched again
+        #[arg(long)]
+        forget_url: bool,
+        /// Replace an image of the same name made by vm clone or vm import
+        #[arg(long, short)]
+        force: bool,
+    },
     /// Delete an image from the local store
     Rmi {
         /// Image reference, such as debian:trixie
         #[arg(add = ArgValueCandidates::new(completion::held_image))]
         reference: String,
-        /// Delete it even though instances are built on it
+        /// Delete it even though machines need it
         #[arg(long, short)]
         force: bool,
     },
@@ -404,6 +446,7 @@ fn start_changes(command: &Command) -> vm_core::Result<machines::Changes> {
         no_password,
         add_ssh_config,
         no_ssh_config,
+        eject,
         ..
     } = command
     else {
@@ -426,6 +469,7 @@ fn start_changes(command: &Command) -> vm_core::Result<machines::Changes> {
         firmware: *firmware,
         cpu: cpu.clone(),
         ssh_config: toggle(*add_ssh_config, *no_ssh_config),
+        eject: *eject,
     })
 }
 
@@ -541,6 +585,7 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
             &catalogue, &store, style, cli.format, reference,
         )?)),
         Command::Update { catalogue } => Ok(Box::new(update(&config, catalogue.as_deref())?)),
+        Command::Import { .. } => Ok(Box::new(import(cli, &catalogue, &store)?)),
         Command::Rmi { reference, force } => Ok(Box::new(machines::remove_image(
             &catalogue, &store, reference, *force,
         )?)),
@@ -607,6 +652,50 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
         | Command::Config { .. }
         | Command::Rm { .. } => unreachable!("handled above"),
     }
+}
+
+fn import(cli: &Cli, catalogue: &Catalogue, store: &Store) -> vm_core::Result<reports::Imported> {
+    let Command::Import {
+        source,
+        image,
+        description,
+        login,
+        arch,
+        firmware,
+        cpu,
+        machine,
+        disk,
+        digest,
+        forget_url,
+        force,
+    } = &cli.command
+    else {
+        unreachable!("not an import");
+    };
+    let hardware = vm_core::import::Hardware {
+        firmware: firmware.unwrap_or_default(),
+        cpu: cpu.clone(),
+        machine: machine.unwrap_or_default(),
+        disk: disk.unwrap_or_default(),
+    };
+    vm_core::machine::check_disk(hardware.machine, hardware.disk)?;
+    let reference: Reference = image.parse()?;
+    imports::run(
+        catalogue,
+        store,
+        &vm_core::import::Request {
+            source,
+            reference: &reference,
+            arch: arch.as_deref().unwrap_or(host_architecture()),
+            description: description.as_deref(),
+            login: *login,
+            hardware,
+            digest: digest.as_ref(),
+            fetchable: !forget_url,
+            force: *force,
+        },
+        cli.format.is_text(),
+    )
 }
 
 /// A pair of opposing flags, where neither means as it was.
@@ -741,17 +830,12 @@ fn pull(
 ) -> vm_core::Result<reports::Pull> {
     let reference: Reference = reference.parse()?;
     let (entry, artifact) = catalogue.resolve(&reference, host_architecture())?;
-    let mut bar = progress::Bar::new("  ", format.is_text());
     if format.is_text() && !store.contains(&artifact.digest) {
         if let Some(url) = &artifact.url {
             eprintln!("Fetching {}", style.name(url));
         }
     }
-    let outcome = store.pull(artifact, &vm_core::store::http_agent(), &mut |update| {
-        bar.update(update);
-    });
-    bar.clear();
-    let outcome = outcome?;
+    let outcome = machines::fetch(store, artifact, format.is_text())?;
     store.record(entry, artifact)?;
     let path = store.path_for(&artifact.digest);
     Ok(reports::Pull {
@@ -950,7 +1034,7 @@ mod tests {
             ("project", vm_core::catalogue::Kind::Remote),
             ("internal", vm_core::catalogue::Kind::Remote),
             ("team", vm_core::catalogue::Kind::Local),
-            ("clones", vm_core::catalogue::Kind::Local),
+            ("store", vm_core::catalogue::Kind::Local),
         ]
         .into_iter()
         .map(|(name, kind)| Source {
@@ -973,10 +1057,10 @@ mod tests {
     fn catalogues_are_selected_by_kind_or_name_keeping_their_order() {
         assert_eq!(
             selected(Origin::All, None),
-            ["project", "internal", "team", "clones"]
+            ["project", "internal", "team", "store"]
         );
         assert_eq!(selected(Origin::Remote, None), ["project", "internal"]);
-        assert_eq!(selected(Origin::Local, None), ["team", "clones"]);
+        assert_eq!(selected(Origin::Local, None), ["team", "store"]);
         assert_eq!(selected(Origin::All, Some("team")), ["team"]);
         assert!(selected(Origin::Remote, Some("team")).is_empty());
         let error = select_sources(sources(), Origin::All, Some("nope")).unwrap_err();
@@ -1051,6 +1135,110 @@ mod tests {
             (Some(machines::PruneTarget::Images), false, true)
         );
         assert!(Cli::try_parse_from(["vm", "prune", "everything"]).is_err());
+    }
+
+    #[test]
+    fn an_import_defaults_to_a_console_only_image_that_stays_fetchable() {
+        use clap::Parser as _;
+        let cli = Cli::try_parse_from(["vm", "import", "https://example.invalid/x.vmdk", "mine:1"])
+            .unwrap();
+        let Command::Import {
+            source,
+            image,
+            login,
+            arch,
+            digest,
+            forget_url,
+            force,
+            firmware,
+            ..
+        } = cli.command
+        else {
+            panic!("not an import");
+        };
+        assert!(source.is_url());
+        assert_eq!(image, "mine:1");
+        assert_eq!(login, vm_core::catalogue::Login::None);
+        assert_eq!(arch, None);
+        assert_eq!(digest, None);
+        assert!(!forget_url && !force);
+        assert_eq!(firmware, None);
+    }
+
+    #[test]
+    fn an_import_takes_what_the_image_needs() {
+        use clap::Parser as _;
+        let digest = format!("sha256:{}", "a".repeat(64));
+        let cli = Cli::try_parse_from([
+            "vm",
+            "import",
+            "disk.vmdk",
+            "mine:1",
+            "--login",
+            "cloud-init",
+            "--arch",
+            "arm64",
+            "--firmware",
+            "uefi",
+            "--machine",
+            "pc",
+            "--disk",
+            "ide",
+            "--cpu",
+            "Penryn",
+            "--digest",
+            &digest,
+            "--description",
+            "Mine",
+            "--forget-url",
+            "--force",
+        ])
+        .unwrap();
+        let Command::Import {
+            source,
+            login,
+            arch,
+            digest: given,
+            forget_url,
+            force,
+            machine,
+            disk,
+            ..
+        } = cli.command
+        else {
+            panic!("not an import");
+        };
+        assert_eq!(
+            source,
+            vm_core::import::Source::File(std::path::PathBuf::from("disk.vmdk"))
+        );
+        assert!(login.is_seedable());
+        assert_eq!(arch.as_deref(), Some("arm64"));
+        assert_eq!(given.unwrap().to_string(), digest);
+        assert!(forget_url && force);
+        assert_eq!(machine, Some(vm_core::machine::Chipset::Pc));
+        assert_eq!(disk, Some(vm_core::machine::Disk::Ide));
+        for bad in [
+            ["--arch", "x86_64"],
+            ["--login", "ssh"],
+            ["--digest", "sha256:0"],
+            ["--disk", "scsi"],
+        ] {
+            let mut arguments = vec!["vm", "import", "disk.vmdk", "mine:1"];
+            arguments.extend(bad);
+            assert!(Cli::try_parse_from(arguments).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn start_can_eject_the_cdrom() {
+        use clap::Parser as _;
+        let eject = |arguments: &[&str]| match Cli::try_parse_from(arguments).unwrap().command {
+            command @ Command::Start { .. } => start_changes(&command).unwrap().eject,
+            _ => panic!("not a start"),
+        };
+        assert!(eject(&["vm", "start", "one", "--eject"]));
+        assert!(!eject(&["vm", "start", "one"]));
     }
 
     #[test]

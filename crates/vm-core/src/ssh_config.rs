@@ -244,6 +244,8 @@ mod tests {
             started: None,
             generation: 0,
             ssh_config: true,
+            media: crate::catalogue::Media::Disk,
+            cdrom: None,
             password: None,
             ports: Vec::new(),
             shares: Vec::new(),

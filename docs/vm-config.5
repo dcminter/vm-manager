@@ -22,10 +22,12 @@ Images are named by catalogues. Remote catalogues are fetched by
 local catalogues are read where they are. Where catalogues name the same image,
 the later one wins: remotes in the order given, then locals in the order given,
 then
-.BR clones ,
+.BR store ,
 the local catalogue
 .B vm clone
-writes to. A name used twice within one catalogue is an error.
+and
+.B vm import
+write to. A name used twice within one catalogue is an error.
 .TP
 .B [[remote]]
 A remote catalogue.

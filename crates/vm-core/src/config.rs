@@ -11,8 +11,8 @@ const DEFAULT_CATALOGUE_PATH: &str = "catalogue";
 /// The name of the project's catalogue when no remote is configured.
 pub const PROJECT_CATALOGUE: &str = "project";
 
-/// The name of the local catalogue `vm clone` writes to.
-pub const CLONES_CATALOGUE: &str = "clones";
+/// The name of the local catalogue `vm clone` and `vm import` write to.
+pub const STORE_CATALOGUE: &str = "store";
 
 /// A catalogue fetched by `vm update`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -230,8 +230,10 @@ impl Settings {
                     "'{name}' is not a usable catalogue name; use lowercase letters, digits and dashes"
                 ));
             }
-            if *name == CLONES_CATALOGUE {
-                return Err(format!("'{name}' is reserved for images made by vm clone"));
+            if *name == STORE_CATALOGUE {
+                return Err(format!(
+                    "'{name}' is reserved for images made by vm clone and vm import"
+                ));
             }
             if names[..index].contains(name) {
                 return Err(format!("the catalogue name '{name}' is used twice"));
@@ -549,7 +551,7 @@ mod tests {
                 "[[remote]]\nname = \"a\"\nurl = \"u\"\n[[local]]\nname = \"a\"\npath = \"/x\"\n",
                 "used twice",
             ),
-            ("[[local]]\nname = \"clones\"\npath = \"/x\"\n", "reserved"),
+            ("[[local]]\nname = \"store\"\npath = \"/x\"\n", "reserved"),
             (
                 "[[local]]\nname = \"team\"\npath = \"relative\"\n",
                 "absolute",

@@ -1,14 +1,17 @@
 use crate::catalogue::{Artifact, Entry};
+use crate::compression::Compression;
+use crate::conversion::{self, Conversion, Converting};
 use crate::digest;
 use crate::error::{Error, Result};
 use crate::reference::{Algorithm, Digest};
+use crate::value::toml_string;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 /// How much of a download has arrived, reported as it goes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Progress {
     pub received: u64,
     pub total: Option<u64>,
@@ -67,6 +70,7 @@ impl Store {
         artifact: &Artifact,
         agent: &ureq::Agent,
         report: Reporter<'_>,
+        converting: Option<Converting<'_>>,
     ) -> Result<Pulled> {
         let destination = self.path_for(&artifact.digest);
         if destination.is_file() {
@@ -75,14 +79,25 @@ impl Store {
         let directory = destination.parent().unwrap_or(&self.root);
         create_directory(directory)?;
         let partial = directory.join(format!("{}.partial", artifact.digest.hex()));
-        let outcome = Self::fetch(artifact, agent, &partial, report);
+        let converted = directory.join(format!("{}.converted.partial", artifact.digest.hex()));
+        let outcome = Self::fetch(artifact, agent, &partial, report).and_then(|()| match &artifact
+            .source_format
+        {
+            Some(format) => {
+                to_qcow2(&partial, format, &converted, converting)?;
+                let _ = fs::remove_file(&partial);
+                Ok(&converted)
+            }
+            None => Ok(&partial),
+        });
         match outcome {
-            Ok(()) => {
-                rename(&partial, &destination)?;
+            Ok(ready) => {
+                rename(ready, &destination)?;
                 Ok(Pulled::Fetched)
             }
             Err(error) => {
                 let _ = fs::remove_file(&partial);
+                let _ = fs::remove_file(&converted);
                 Err(error)
             }
         }
@@ -95,48 +110,21 @@ impl Store {
         report: Reporter<'_>,
     ) -> Result<()> {
         let url = Self::source(artifact)?;
-        let response = agent.get(url).call().map_err(|source| Error::Download {
-            url: url.clone(),
-            source: Box::new(source),
-        })?;
-        let status = response.status().as_u16();
-        if !(200..300).contains(&status) {
-            return Err(Error::HttpStatus {
-                url: url.clone(),
-                status,
-            });
-        }
-        // For a compressed artifact the entry's size is the expanded size, not the download's.
-        let stated = artifact
-            .compression
-            .is_none()
+        let response = get(agent, url)?;
+        // The entry's size is the stored file's, not the download's.
+        let stated = (artifact.compression.is_none() && artifact.source_format.is_none())
             .then_some(artifact.size)
             .flatten();
         let total = content_length(&response).or(stated);
         let mut body = response.into_body().into_reader();
-        let file = fs::File::create(partial).map_err(|source| Error::Store {
-            path: partial.to_owned(),
-            action: "create",
-            source,
-        })?;
         let mut observe = |received| report(Progress { received, total });
-        let actual = if let Some(command) = artifact.compression.command() {
-            expand(command, artifact, &mut body, file, &mut observe)?
-        } else {
-            let mut sink = std::io::BufWriter::new(file);
-            let (_, hash) = digest::copy_hashing(
-                &mut body,
-                &mut sink,
-                artifact.digest.algorithm(),
-                &mut observe,
-            )
-            .map_err(|source| Error::Store {
-                path: partial.to_owned(),
-                action: "write",
-                source,
-            })?;
-            hash
-        };
+        let actual = receive(
+            &mut body,
+            artifact.compression,
+            artifact.digest.algorithm(),
+            partial,
+            &mut observe,
+        )?;
         if !digest::matches(&artifact.digest, &actual) {
             return Err(Error::DigestMismatch {
                 url: url.clone(),
@@ -177,17 +165,22 @@ impl Store {
                 source,
             })?;
         let digest = Digest::new(algorithm, &hash);
-        let destination = self.path_for(&digest);
+        self.place(staged, &digest)?;
+        Ok(digest)
+    }
+
+    /// Moves a file built at [`Store::staging`] into the store under a digest already known.
+    pub fn place(&self, staged: &Path, digest: &Digest) -> Result<()> {
+        let destination = self.path_for(digest);
         if destination.exists() {
             // The same bytes are already held, so the new copy is redundant.
             let _ = fs::remove_file(staged);
-            return Ok(digest);
+            return Ok(());
         }
         if let Some(parent) = destination.parent() {
             create_directory(parent)?;
         }
-        rename(staged, &destination)?;
-        Ok(digest)
+        rename(staged, &destination)
     }
 
     /// Removes a build if held, returning the bytes freed.
@@ -214,16 +207,21 @@ impl Store {
 
     /// Records which reference a build was fetched for.
     pub fn record(&self, entry: &Entry, artifact: &Artifact) -> Result<()> {
-        let directory = self.root.join("refs").join(&entry.name);
+        self.record_as(&entry.name, &entry.tag, artifact)
+    }
+
+    /// Records a build as fetched for `name:tag`.
+    pub fn record_as(&self, name: &str, tag: &str, artifact: &Artifact) -> Result<()> {
+        let directory = self.root.join("refs").join(name);
         create_directory(&directory)?;
-        let path = directory.join(format!("{}-{}.toml", entry.tag, artifact.arch));
+        let path = directory.join(format!("{tag}-{}.toml", artifact.arch));
         let body = format!(
-            "name = \"{}\"\ntag = \"{}\"\narch = \"{}\"\ndigest = \"{}\"\nurl = \"{}\"\n",
-            entry.name,
-            entry.tag,
-            artifact.arch,
+            "name = {}\ntag = {}\narch = {}\ndigest = \"{}\"\nurl = {}\n",
+            toml_string(name),
+            toml_string(tag),
+            toml_string(&artifact.arch),
             artifact.digest,
-            artifact.url.clone().unwrap_or_default()
+            toml_string(artifact.url.as_deref().unwrap_or_default())
         );
         fs::write(&path, body).map_err(|source| Error::Store {
             path,
@@ -233,29 +231,100 @@ impl Store {
     }
 }
 
+/// Asks for a URL, refusing any answer but success.
+pub fn get(agent: &ureq::Agent, url: &str) -> Result<ureq::http::Response<ureq::Body>> {
+    let response = agent.get(url).call().map_err(|source| Error::Download {
+        url: url.to_owned(),
+        source: Box::new(source),
+    })?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Err(Error::HttpStatus {
+            url: url.to_owned(),
+            status,
+        });
+    }
+    Ok(response)
+}
+
+/// Writes a published stream to `destination` expanded, returning the hash of the bytes as published.
+pub fn receive(
+    body: &mut impl Read,
+    compression: Compression,
+    algorithm: Algorithm,
+    destination: &Path,
+    observe: &mut dyn FnMut(u64),
+) -> Result<String> {
+    let file = fs::File::create(destination).map_err(|source| Error::Store {
+        path: destination.to_owned(),
+        action: "create",
+        source,
+    })?;
+    if let Some(command) = compression.command() {
+        return expand(command, compression, algorithm, body, file, observe);
+    }
+    let mut sink = std::io::BufWriter::new(file);
+    digest::copy_hashing(body, &mut sink, algorithm, observe)
+        .map(|(_, hash)| hash)
+        .map_err(|source| Error::Store {
+            path: destination.to_owned(),
+            action: "write",
+            source,
+        })
+}
+
+/// Rewrites a fetched image as qcow2, refusing one that would read other files on this host.
+pub fn to_qcow2(
+    source: &Path,
+    format: &str,
+    destination: &Path,
+    report: Option<Converting<'_>>,
+) -> Result<()> {
+    let operation = "converting a fetched image";
+    let probe = conversion::probe(source, operation)?;
+    if !probe.external.is_empty() {
+        return Err(Error::Convert {
+            reason: format!(
+                "the image reads other files ({}), which a fetched image may not",
+                probe.external.join(", ")
+            ),
+        });
+    }
+    conversion::convert(
+        &Conversion {
+            source,
+            format,
+            destination,
+            in_use: false,
+            operation,
+        },
+        report,
+    )
+}
+
 /// Streams a download through a decompressor, hashing the compressed bytes.
 fn expand(
     mut command: std::process::Command,
-    artifact: &Artifact,
+    compression: Compression,
+    algorithm: Algorithm,
     body: &mut impl Read,
     file: fs::File,
     observe: &mut dyn FnMut(u64),
 ) -> Result<String> {
-    let scheme = artifact.compression.name();
+    let scheme = compression.name();
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::from(file))
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|source| artifact.compression.missing(&source))?;
+        .map_err(|source| compression.missing(&source))?;
     let Some(mut stdin) = child.stdin.take() else {
         return Err(Error::Decompress {
             scheme,
             reason: "the decompressor was given no input pipe".to_owned(),
         });
     };
-    let outcome = digest::copy_hashing(body, &mut stdin, artifact.digest.algorithm(), observe)
-        .map(|(_, hash)| hash);
+    let outcome = digest::copy_hashing(body, &mut stdin, algorithm, observe).map(|(_, hash)| hash);
     // The decompressor finishes only once its input is closed.
     drop(stdin);
     let finished = child
@@ -289,7 +358,7 @@ fn complaint(finished: &std::process::Output) -> String {
         )
 }
 
-fn content_length(response: &ureq::http::Response<ureq::Body>) -> Option<u64> {
+pub fn content_length(response: &ureq::http::Response<ureq::Body>) -> Option<u64> {
     response
         .headers()
         .get("content-length")?
@@ -366,6 +435,8 @@ mod tests {
             digest: digest(),
             size: Some(1024),
             compression: Compression::None,
+            source_format: None,
+            media: crate::catalogue::Media::Disk,
             firmware: crate::machine::Firmware::Bios,
             cpu: None,
             machine: crate::machine::Chipset::Q35,
@@ -405,19 +476,12 @@ mod tests {
         hash
     }
 
-    fn compressed(scheme: Compression, bytes: &[u8]) -> Artifact {
-        Artifact {
-            compression: scheme,
-            digest: Digest::from_str(&format!("sha256:{}", hex(bytes))).unwrap(),
-            ..artifact()
-        }
-    }
-
     fn through(scheme: Compression, source: &[u8], destination: &Path) -> Result<String> {
         let mut ignored = |_| {};
         expand(
             scheme.command().unwrap(),
-            &compressed(scheme, source),
+            scheme,
+            Algorithm::Sha256,
             &mut &source[..],
             fs::File::create(destination).unwrap(),
             &mut ignored,
@@ -557,7 +621,9 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, b"payload").unwrap();
         // The agent is never reached, so an unroutable URL is safe here.
-        let outcome = store.pull(&artifact(), &http_agent(), &mut |_| {}).unwrap();
+        let outcome = store
+            .pull(&artifact(), &http_agent(), &mut |_| {}, None)
+            .unwrap();
         assert_eq!(outcome, Pulled::AlreadyPresent);
     }
 
@@ -601,7 +667,8 @@ mod tests {
         let mut observe = |received| seen.push(received);
         let hash = expand(
             Compression::Gzip.command().unwrap(),
-            &compressed(Compression::Gzip, &source),
+            Compression::Gzip,
+            Algorithm::Sha256,
             &mut &source[..],
             fs::File::create(scratch.0.join("out.img")).unwrap(),
             &mut observe,
@@ -610,6 +677,130 @@ mod tests {
         assert_eq!(hash, hex(&source));
         assert_eq!(seen.last().copied(), Some(source.len() as u64));
         assert!(seen.iter().is_sorted(), "{seen:?}");
+    }
+
+    /// Makes an image with `qemu-img` and reads it back, or `None` where it is not installed.
+    fn image_bytes(scratch: &Scratch, format: &str) -> Option<Vec<u8>> {
+        let path = scratch.0.join(format!("source.{format}"));
+        std::process::Command::new("qemu-img")
+            .args(["create", "-q", "-f", format])
+            .arg(&path)
+            .arg("4M")
+            .status()
+            .is_ok_and(|status| status.success())
+            .then(|| fs::read(&path).unwrap())
+    }
+
+    #[test]
+    fn an_image_published_in_another_format_is_stored_as_qcow2() {
+        let scratch = Scratch::new("convertpull");
+        let store = scratch.store();
+        let Some(published) = image_bytes(&scratch, "vmdk") else {
+            return;
+        };
+        let packed = packed(Compression::Gzip, &published);
+        let fetched = Artifact {
+            url: Some(crate::testing::serve(packed.clone())),
+            digest: Digest::from_str(&format!("sha256:{}", hex(&packed))).unwrap(),
+            compression: Compression::Gzip,
+            source_format: Some("vmdk".to_owned()),
+            ..artifact()
+        };
+        let mut percents = Vec::new();
+        let outcome = store
+            .pull(
+                &fetched,
+                &http_agent(),
+                &mut |_| {},
+                Some(&mut |percent| percents.push(percent)),
+            )
+            .unwrap();
+        assert_eq!(outcome, Pulled::Fetched);
+        let held = store.path_for(&fetched.digest);
+        let probed = conversion::probe(&held, "testing").unwrap();
+        assert_eq!(probed.format, "qcow2");
+        assert_eq!(percents.last(), Some(&100));
+        let leftovers: Vec<_> = fs::read_dir(held.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".partial"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn an_image_whose_digest_does_not_match_is_neither_converted_nor_kept() {
+        let scratch = Scratch::new("convertbad");
+        let store = scratch.store();
+        let Some(published) = image_bytes(&scratch, "vmdk") else {
+            return;
+        };
+        let fetched = Artifact {
+            url: Some(crate::testing::serve(published)),
+            digest: Digest::from_str(&format!("sha256:{}", "0".repeat(64))).unwrap(),
+            source_format: Some("vmdk".to_owned()),
+            ..artifact()
+        };
+        let error = store
+            .pull(&fetched, &http_agent(), &mut |_| {}, None)
+            .unwrap_err();
+        assert_eq!(error.kind(), "digest-mismatch", "{error}");
+        let directory = store.path_for(&fetched.digest);
+        let directory = directory.parent().unwrap();
+        assert_eq!(fs::read_dir(directory).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_fetched_image_that_reads_other_files_is_refused() {
+        let scratch = Scratch::new("external");
+        let base = scratch.0.join("base.qcow2");
+        let top = scratch.0.join("top.qcow2");
+        let made = std::process::Command::new("qemu-img")
+            .args(["create", "-q", "-f", "qcow2"])
+            .arg(&base)
+            .arg("1M")
+            .status()
+            .is_ok_and(|status| status.success());
+        if !made {
+            return;
+        }
+        let layered = std::process::Command::new("qemu-img")
+            .args(["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b"])
+            .arg(&base)
+            .arg(&top)
+            .status()
+            .unwrap();
+        assert!(layered.success());
+        let out = scratch.0.join("out.qcow2");
+        let error = to_qcow2(&top, "qcow2", &out, None).unwrap_err();
+        assert_eq!(error.kind(), "conversion-failed");
+        assert!(error.to_string().contains("base.qcow2"), "{error}");
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn a_stream_is_received_expanded_and_hashed_as_published() {
+        let scratch = Scratch::new("receive");
+        let plain = b"plain bytes".repeat(1000);
+        for scheme in [Compression::None, Compression::Gzip, Compression::Zstd] {
+            let published = if scheme.is_none() {
+                plain.clone()
+            } else {
+                packed(scheme, &plain)
+            };
+            let destination = scratch.0.join(scheme.name());
+            let mut ignored = |_| {};
+            let hash = receive(
+                &mut &published[..],
+                scheme,
+                Algorithm::Sha256,
+                &destination,
+                &mut ignored,
+            )
+            .unwrap();
+            assert_eq!(hash, hex(&published), "{scheme:?}");
+            assert_eq!(fs::read(&destination).unwrap(), plain, "{scheme:?}");
+        }
     }
 
     #[test]

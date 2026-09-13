@@ -69,7 +69,7 @@ impl Report for Images {
     fn render_text(&self, style: Style) -> Vec<String> {
         if self.rows.is_empty() {
             return vec![style.dim(match self.origin {
-                Origin::Local => "No local images. Make one with 'vm clone'.",
+                Origin::Local => "No local images. Make one with 'vm clone' or 'vm import'.",
                 Origin::All | Origin::Remote => "No images in the catalogue. Try 'vm update'.",
             })];
         }
@@ -118,6 +118,9 @@ pub struct Inspect {
     pub format: String,
     /// How the published file is wrapped, or "none".
     pub compression: String,
+    /// The published format, where a pull converts it.
+    pub source_format: Option<String>,
+    pub media: vm_core::catalogue::Media,
     pub url: Option<String>,
     pub digest: String,
     pub seedable: bool,
@@ -137,7 +140,7 @@ pub struct Inspect {
     pub entry: String,
     /// Where the image is in the store, when held.
     pub path: Option<String>,
-    /// Machines whose disk is backed by the image.
+    /// Machines that need the image.
     pub used_by: Vec<String>,
 }
 
@@ -151,6 +154,8 @@ impl Inspect {
             arch: artifact.arch.clone(),
             format: artifact.format.clone(),
             compression: artifact.compression.name().to_owned(),
+            source_format: artifact.source_format.clone(),
+            media: artifact.media,
             url: artifact.url.clone(),
             digest: artifact.digest.to_string(),
             seedable: entry.login.is_seedable(),
@@ -172,11 +177,18 @@ impl Inspect {
 
     /// The image format, with its compression where it has one.
     fn formatting(&self) -> String {
-        if self.compression == "none" {
-            self.format.clone()
-        } else {
-            format!("{}, published {}", self.format, self.compression)
+        use std::fmt::Write as _;
+        let mut text = self.format.clone();
+        if self.media.is_cdrom() {
+            text.push_str(", a CD-ROM image");
         }
+        if let Some(format) = &self.source_format {
+            let _ = write!(text, ", converted from {format}");
+        }
+        if self.compression != "none" {
+            let _ = write!(text, ", published {}", self.compression);
+        }
+        text
     }
 
     /// The architecture shown, with any others the entry has.
@@ -213,6 +225,13 @@ impl Report for Inspect {
             ("arch", Value::string(self.arch.clone())),
             ("format", Value::string(self.format.clone())),
             ("compression", Value::string(self.compression.clone())),
+            (
+                "source_format",
+                self.source_format
+                    .clone()
+                    .map_or(Value::Null, Value::String),
+            ),
+            ("media", Value::string(self.media.name())),
             ("url", self.url.clone().map_or(Value::Null, Value::String)),
             ("digest", Value::string(self.digest.clone())),
             ("seedable", Value::Bool(self.seedable)),
@@ -440,6 +459,8 @@ pub struct Run {
     pub ssh_config: bool,
     /// The user's SSH config, when the `Include` line was added to it.
     pub ssh_config_changed: Option<String>,
+    /// The image in the CD-ROM drive.
+    pub cdrom: Option<String>,
 }
 
 fn ports_value(ports: &[Port]) -> Value {
@@ -495,6 +516,10 @@ impl Report for Run {
                     .clone()
                     .map_or(Value::Null, Value::string),
             ),
+            (
+                "cdrom",
+                self.cdrom.clone().map_or(Value::Null, Value::string),
+            ),
         ])
     }
 
@@ -531,6 +556,12 @@ impl Report for Run {
         }
         if !self.ports.is_empty() {
             lines.push(format!("  ports    {}", ports_text(&self.ports)));
+        }
+        if self.cdrom.is_some() {
+            lines.push(format!(
+                "  cdrom    {}, until vm start {} --eject",
+                self.image, self.name
+            ));
         }
         if let Some(machine) = machine_text(self.firmware, self.machine, self.disk, &self.cpu) {
             lines.push(format!("  machine  {machine}"));
@@ -934,6 +965,85 @@ impl Report for Cloned {
     }
 }
 
+/// What `vm import` brought in.
+pub struct Imported {
+    pub source: String,
+    pub outcome: vm_core::import::Imported,
+    /// Catalogues whose entry of the same name this one hides.
+    pub hides: Vec<String>,
+}
+
+impl Imported {
+    /// The format before and after, when they differ.
+    fn formatting(&self) -> String {
+        let artifact = &self.outcome.artifact;
+        if artifact.media.is_cdrom() {
+            format!("{}, kept as a CD-ROM image", self.outcome.format)
+        } else if self.outcome.format == artifact.format {
+            artifact.format.clone()
+        } else {
+            format!("{}, converted to {}", self.outcome.format, artifact.format)
+        }
+    }
+}
+
+impl Report for Imported {
+    fn to_value(&self) -> Value {
+        let imported = &self.outcome;
+        let artifact = &imported.artifact;
+        Value::map([
+            ("source", Value::string(self.source.clone())),
+            ("name", Value::string(imported.name.clone())),
+            ("tag", Value::string(imported.tag.clone())),
+            ("arch", Value::string(artifact.arch.clone())),
+            ("original_format", Value::string(imported.format.clone())),
+            ("format", Value::string(artifact.format.clone())),
+            ("media", Value::string(artifact.media.name())),
+            ("digest", Value::string(artifact.digest.to_string())),
+            ("size", artifact.size.map_or(Value::Null, Value::Integer)),
+            (
+                "url",
+                artifact.url.clone().map_or(Value::Null, Value::String),
+            ),
+            ("path", Value::string(imported.path.display().to_string())),
+            ("entry", Value::string(imported.entry.display().to_string())),
+            ("replaced", Value::Bool(imported.replaced)),
+            ("hides", Value::strings(self.hides.clone())),
+        ])
+    }
+
+    fn render_text(&self, style: Style) -> Vec<String> {
+        let imported = &self.outcome;
+        let artifact = &imported.artifact;
+        let mut lines = vec![
+            format!(
+                "Imported {} ({}, {})",
+                style.name(&format!("{}:{}", imported.name, imported.tag)),
+                artifact.arch,
+                human(artifact.size.unwrap_or_default())
+            ),
+            format!("  from     {}", self.source),
+            format!("  format   {}", self.formatting()),
+        ];
+        match &artifact.url {
+            Some(_) => lines.push("  fetch    again from its source when not held".to_owned()),
+            None => lines.push("  fetch    never; the store holds the only copy".to_owned()),
+        }
+        if !self.hides.is_empty() {
+            lines.push(format!("  hides    {}", self.hides.join(", ")));
+        }
+        if imported.replaced {
+            lines.push(style.dim("  It replaces the image of the same name."));
+        }
+        if artifact.media.is_cdrom() {
+            lines.push(style.dim(
+                "  A machine run from it boots the CD-ROM until its blank disk holds a system.",
+            ));
+        }
+        lines
+    }
+}
+
 /// What `vm rmi` took away.
 pub struct Untagged {
     pub name: String,
@@ -992,7 +1102,7 @@ impl Report for Untagged {
         }
         if !self.broke.is_empty() {
             lines.push(style.dim(&format!(
-                "  The disk behind {} is no longer there.",
+                "  The image {} used is no longer there.",
                 self.broke.join(", ")
             )));
         }
@@ -1542,6 +1652,8 @@ mod tests {
             arch: "amd64".to_owned(),
             format: "qcow2".to_owned(),
             compression: "none".to_owned(),
+            source_format: None,
+            media: vm_core::catalogue::Media::Disk,
             url: Some("https://example.test/a.qcow2".to_owned()),
             digest: "sha512:abc".to_owned(),
             seedable: false,
@@ -1577,6 +1689,8 @@ mod tests {
             arch: "arm64".to_owned(),
             format: "qcow2".to_owned(),
             compression: "none".to_owned(),
+            source_format: None,
+            media: vm_core::catalogue::Media::Disk,
             url: None,
             digest: "sha512:abc".to_owned(),
             seedable: true,
@@ -1661,6 +1775,8 @@ mod tests {
             arch: "amd64".to_owned(),
             format: "qcow2".to_owned(),
             compression: "xz".to_owned(),
+            source_format: None,
+            media: vm_core::catalogue::Media::Disk,
             url: None,
             digest: String::new(),
             seedable: true,
@@ -1687,8 +1803,16 @@ mod tests {
         };
         assert!(line(&report).contains("qcow2, published xz"));
         assert!(to_json(&report.to_value()).contains(r#""compression": "xz""#));
+        report.source_format = Some("vmdk".to_owned());
+        assert!(line(&report).ends_with("qcow2, converted from vmdk, published xz"));
+        assert!(to_json(&report.to_value()).contains(r#""source_format": "vmdk""#));
+        report.source_format = None;
         report.compression = "none".to_owned();
         assert!(line(&report).ends_with("qcow2"));
+        assert!(to_json(&report.to_value()).contains(r#""media": "disk""#));
+        report.media = vm_core::catalogue::Media::Cdrom;
+        report.format = "raw".to_owned();
+        assert!(line(&report).ends_with("raw, a CD-ROM image"));
     }
 
     fn run(firmware: Firmware, cpu: &str, firmware_changed: bool) -> Run {
@@ -1714,7 +1838,113 @@ mod tests {
             firmware_changed,
             ssh_config: false,
             ssh_config_changed: None,
+            cdrom: None,
         }
+    }
+
+    #[test]
+    fn a_machine_with_a_cdrom_says_how_to_eject_it() {
+        let mut report = run(Firmware::Bios, "max", false);
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(!text.contains("cdrom"), "{text}");
+        assert!(to_json(&report.to_value()).contains(r#""cdrom": null"#));
+        report.cdrom = Some("/store/disc".to_owned());
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(
+            text.contains("cdrom    puredarwin:minimal, until vm start pd --eject"),
+            "{text}"
+        );
+        assert!(to_json(&report.to_value()).contains(r#""cdrom": "/store/disc""#));
+    }
+
+    fn imported(format: &str, artifact: Artifact) -> Imported {
+        Imported {
+            source: "/home/x/disk".to_owned(),
+            outcome: vm_core::import::Imported {
+                name: "mine".to_owned(),
+                tag: "1".to_owned(),
+                format: format.to_owned(),
+                path: std::path::PathBuf::from("/store/blob"),
+                entry: std::path::PathBuf::from("/local/mine/1.toml"),
+                replaced: false,
+                artifact,
+            },
+            hides: Vec::new(),
+        }
+    }
+
+    fn imported_artifact() -> Artifact {
+        Artifact {
+            arch: "amd64".to_owned(),
+            format: "qcow2".to_owned(),
+            url: None,
+            digest: format!("sha256:{}", "a".repeat(64)).parse().unwrap(),
+            size: Some(1024 * 1024),
+            compression: vm_core::compression::Compression::None,
+            source_format: None,
+            media: vm_core::catalogue::Media::Disk,
+            firmware: Firmware::Bios,
+            cpu: None,
+            machine: Chipset::Q35,
+            disk: Disk::Virtio,
+        }
+    }
+
+    #[test]
+    fn an_import_says_what_it_converted_and_whether_it_can_be_fetched_again() {
+        let mut report = imported("vmdk", imported_artifact());
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(
+            text.starts_with("Imported mine:1 (amd64, 1.0 MiB)"),
+            "{text}"
+        );
+        assert!(text.contains("from     /home/x/disk"), "{text}");
+        assert!(text.contains("format   vmdk, converted to qcow2"), "{text}");
+        assert!(text.contains("fetch    never"), "{text}");
+        assert!(!text.contains("hides"), "{text}");
+        assert!(!text.contains("replaces"), "{text}");
+        report.outcome.artifact.url = Some("https://example.invalid/x".to_owned());
+        report.outcome.replaced = true;
+        report.hides = vec!["project".to_owned()];
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(text.contains("fetch    again from its source"), "{text}");
+        assert!(text.contains("hides    project"), "{text}");
+        assert!(
+            text.contains("replaces the image of the same name"),
+            "{text}"
+        );
+        let document = to_json(&report.to_value());
+        for field in [
+            r#""original_format": "vmdk""#,
+            r#""format": "qcow2""#,
+            r#""media": "disk""#,
+            r#""url": "https://example.invalid/x""#,
+            r#""replaced": true"#,
+            r#""entry": "/local/mine/1.toml""#,
+        ] {
+            assert!(document.contains(field), "{field}: {document}");
+        }
+    }
+
+    #[test]
+    fn an_imported_cdrom_image_says_it_is_kept_as_it_is() {
+        let report = imported(
+            "iso",
+            Artifact {
+                format: "raw".to_owned(),
+                media: vm_core::catalogue::Media::Cdrom,
+                ..imported_artifact()
+            },
+        );
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(
+            text.contains("format   iso, kept as a CD-ROM image"),
+            "{text}"
+        );
+        assert!(text.contains("boots the CD-ROM"), "{text}");
+        let same = imported("qcow2", imported_artifact());
+        let text = same.render_text(Style::plain()).join("\n");
+        assert!(text.contains("format   qcow2\n"), "{text}");
     }
 
     #[test]
@@ -1867,6 +2097,8 @@ mod tests {
                 digest: format!("sha256:{}", "a".repeat(64)).parse().unwrap(),
                 size: None,
                 compression: vm_core::compression::Compression::None,
+                source_format: None,
+                media: vm_core::catalogue::Media::Disk,
                 firmware: Firmware::Uefi,
                 cpu: Some("Penryn".to_owned()),
                 machine: Chipset::Q35,
@@ -1958,6 +2190,8 @@ mod tests {
             arch: "amd64".to_owned(),
             format: "qcow2".to_owned(),
             compression: "none".to_owned(),
+            source_format: None,
+            media: vm_core::catalogue::Media::Disk,
             url: None,
             digest: String::new(),
             seedable: true,

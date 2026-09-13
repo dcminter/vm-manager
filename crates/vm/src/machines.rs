@@ -92,17 +92,12 @@ pub fn run(
             });
         }
         (Pull::Always, _) | (Pull::Missing, false) => {
-            let mut bar = progress::Bar::new("  ", text);
             if text {
                 if let Some(url) = &artifact.url {
                     eprintln!("Fetching {}", style.name(url));
                 }
             }
-            let outcome = store.pull(artifact, &vm_core::store::http_agent(), &mut |update| {
-                bar.update(update);
-            });
-            bar.clear();
-            let _: Pulled = outcome?;
+            let _: Pulled = fetch(store, artifact, text)?;
             store.record(entry, artifact)?;
         }
         _ => {}
@@ -130,6 +125,23 @@ pub fn run(
             Err(error)
         }
     }
+}
+
+/// Fetches an image, drawing its progress.
+pub fn fetch(store: &Store, artifact: &vm_core::catalogue::Artifact, text: bool) -> Result<Pulled> {
+    let bar = std::cell::RefCell::new(progress::Bar::new("  ", text));
+    let outcome = store.pull(
+        artifact,
+        &vm_core::store::http_agent(),
+        &mut |update| bar.borrow_mut().update(update),
+        Some(&mut |percent| {
+            let mut bar = bar.borrow_mut();
+            bar.naming("  converting");
+            bar.portion(percent);
+        }),
+    );
+    bar.borrow().clear();
+    outcome
 }
 
 /// What `vm run` settled on from the request and the config file.
@@ -171,6 +183,11 @@ fn build(
         started: None,
         generation: 0,
         ssh_config: resolved.ssh_config,
+        media: artifact.media,
+        cdrom: artifact
+            .media
+            .is_cdrom()
+            .then(|| store.path_for(&artifact.digest)),
         password: request.password.clone(),
         ports: request.ports.clone(),
         shares: request.shares.clone(),
@@ -185,12 +202,22 @@ fn build(
         });
     }
 
-    hypervisor::create_overlay(
-        &store.path_for(&artifact.digest),
-        &directory.overlay(),
-        &artifact.format,
-        request.disk_size.as_deref(),
-    )?;
+    if artifact.media.is_cdrom() {
+        hypervisor::create_blank(
+            &directory.overlay(),
+            request
+                .disk_size
+                .as_deref()
+                .unwrap_or(machine::BLANK_DISK_SIZE),
+        )?;
+    } else {
+        hypervisor::create_overlay(
+            &store.path_for(&artifact.digest),
+            &directory.overlay(),
+            &artifact.format,
+            request.disk_size.as_deref(),
+        )?;
+    }
 
     let public = keys::generate(&directory.key(), &format!("vm-{name}"))?;
     if held.seeded {
@@ -328,6 +355,7 @@ fn report(
     reports::Run {
         ssh_config: held.ssh_config,
         ssh_config_changed: included.map(|path| path.display().to_string()),
+        cdrom: held.cdrom.as_ref().map(|path| path.display().to_string()),
         firmware: held.firmware,
         cpu: held.cpu.clone(),
         machine: held.machine,
@@ -411,11 +439,13 @@ pub struct Changes {
     pub password: Option<String>,
     /// Whether plain `ssh` reaches the machine by name.
     pub ssh_config: Option<bool>,
+    pub eject: bool,
 }
 
 impl Changes {
     pub const fn any(&self) -> bool {
-        self.memory.is_some()
+        self.eject
+            || self.memory.is_some()
             || self.password.is_some()
             || self.cpus.is_some()
             || self.firmware.is_some()
@@ -439,6 +469,14 @@ fn apply(directory: &Directory, held: &mut Instance, changes: &Changes) -> Resul
         changes.machine.unwrap_or(held.machine),
         changes.disk.unwrap_or(held.disk),
     )?;
+    if changes.eject {
+        if held.cdrom.is_none() {
+            return Err(Error::NoCdrom {
+                name: held.name.clone(),
+            });
+        }
+        held.cdrom = None;
+    }
     if let Some(memory) = changes.memory {
         held.memory = memory;
     }
@@ -507,6 +545,7 @@ fn apply(directory: &Directory, held: &mut Instance, changes: &Changes) -> Resul
     if let Some(size) = &changes.disk_size {
         hypervisor::resize_overlay(&directory.overlay(), size)?;
     }
+
     if (rewrite || renew) && held.seeded {
         if renew {
             held.generation = held.generation.saturating_add(1);
@@ -949,7 +988,7 @@ pub fn remove_image(
     let parsed: vm_core::Reference = reference.parse()?;
     let (entry, artifact) = catalogue.resolve(&parsed, host_architecture())?;
     // A clone's entry was written here, so it is removed with the image.
-    let local = entry.catalogue == vm_core::config::CLONES_CATALOGUE;
+    let local = entry.catalogue == vm_core::config::STORE_CATALOGUE;
     if !store.contains(&artifact.digest) && !local {
         // Nothing to remove, and the name would remain.
         return Err(Error::UnheldImage {
@@ -1043,7 +1082,7 @@ fn stranded(
         .collect()
 }
 
-/// The machines whose disk is backed by a given image.
+/// The machines that need a given image.
 pub fn holders(digest: &str) -> Result<Vec<String>> {
     let instances = Instances::discover()?;
     let mut names = Vec::new();
@@ -1051,7 +1090,10 @@ pub fn holders(digest: &str) -> Result<Vec<String>> {
         let Ok(directory) = instances.open(&name) else {
             continue;
         };
-        if directory.read().is_ok_and(|held| held.digest == digest) {
+        if directory
+            .read()
+            .is_ok_and(|held| held.digest == digest && held.needs_image())
+        {
             names.push(name);
         }
     }
@@ -1317,6 +1359,8 @@ mod tests {
                 started: None,
                 generation: 0,
                 ssh_config: false,
+                media: vm_core::catalogue::Media::Disk,
+                cdrom: None,
                 password: None,
                 ports: Vec::new(),
                 shares: Vec::new(),
@@ -1560,6 +1604,41 @@ mod tests {
             ..Changes::default()
         };
         apply(&directory, &mut held, &changes).unwrap();
+    }
+
+    #[test]
+    fn ejecting_takes_the_cdrom_out_for_good() {
+        let scratch = Scratch::new("eject");
+        let (directory, mut held) = scratch.machine("one");
+        held.media = vm_core::catalogue::Media::Cdrom;
+        held.cdrom = Some(std::path::PathBuf::from("/store/disc"));
+        directory.write(&held).unwrap();
+        let changes = Changes {
+            eject: true,
+            ..Changes::default()
+        };
+        assert!(changes.any());
+        apply(&directory, &mut held, &changes).unwrap();
+        let stored = directory.read().unwrap();
+        assert_eq!(stored.cdrom, None);
+        assert!(!stored.needs_image());
+        let error = apply(&directory, &mut held, &changes).unwrap_err();
+        assert_eq!(error.kind(), "no-cdrom");
+    }
+
+    #[test]
+    fn ejecting_from_a_machine_without_a_cdrom_is_refused_and_nothing_changes() {
+        let scratch = Scratch::new("noeject");
+        let (directory, mut held) = scratch.machine("one");
+        let changes = Changes {
+            eject: true,
+            memory: Some(8192),
+            ..Changes::default()
+        };
+        let error = apply(&directory, &mut held, &changes).unwrap_err();
+        assert_eq!(error.kind(), "no-cdrom");
+        assert!(error.to_string().contains("one"), "{error}");
+        assert_eq!(directory.read().unwrap().memory, 2048);
     }
 
     #[test]

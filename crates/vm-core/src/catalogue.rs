@@ -2,7 +2,8 @@ use crate::compression::Compression;
 use crate::error::{Error, Result};
 use crate::machine::{self, Chipset, Disk, Firmware};
 use crate::reference::{Digest, Reference};
-use serde::Deserialize;
+use crate::value::toml_string;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,9 +19,34 @@ pub enum Login {
     None,
 }
 
+impl FromStr for Login {
+    type Err = Error;
+
+    fn from_str(text: &str) -> Result<Self> {
+        match text {
+            "cloud-init" => Ok(Self::CloudInit),
+            "none" => Ok(Self::None),
+            _ => Err(Error::MachineSetting {
+                setting: "login",
+                value: text.to_owned(),
+                expected: "'cloud-init' or 'none'",
+            }),
+        }
+    }
+}
+
 impl Login {
+    pub const ALL: [Self; 2] = [Self::CloudInit, Self::None];
+
     pub const fn is_seedable(self) -> bool {
         matches!(self, Self::CloudInit)
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::CloudInit => "cloud-init",
+            Self::None => "none",
+        }
     }
 }
 
@@ -47,6 +73,10 @@ struct RawImage {
     /// Absent when uncompressed.
     #[serde(default)]
     compression: Compression,
+    /// Absent when published in `format`.
+    source_format: Option<String>,
+    #[serde(default)]
+    media: Media,
     #[serde(default)]
     firmware: Firmware,
     cpu: Option<String>,
@@ -69,6 +99,9 @@ pub struct Artifact {
     /// What the expanded image occupies, where the entry says.
     pub size: Option<u64>,
     pub compression: Compression,
+    /// The published image's format, where a pull converts it to `format`.
+    pub source_format: Option<String>,
+    pub media: Media,
     pub firmware: Firmware,
     /// The CPU model this image needs, where the default will not boot it.
     pub cpu: Option<String>,
@@ -80,6 +113,34 @@ impl Artifact {
     /// The CPU model to present, falling back to the default.
     pub fn cpu(&self) -> &str {
         self.cpu.as_deref().unwrap_or(machine::DEFAULT_CPU)
+    }
+}
+
+/// How a machine is given an image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Media {
+    /// The base of the machine's disk.
+    #[default]
+    Disk,
+    /// A CD-ROM beside a blank disk.
+    Cdrom,
+}
+
+impl Media {
+    pub const fn is_cdrom(self) -> bool {
+        matches!(self, Self::Cdrom)
+    }
+
+    pub const fn is_disk(&self) -> bool {
+        matches!(self, Self::Disk)
+    }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Disk => "disk",
+            Self::Cdrom => "cdrom",
+        }
     }
 }
 
@@ -244,6 +305,11 @@ impl Catalogue {
         Ok((entry, artifact))
     }
 
+    /// The entry `name:tag` names, by its tag or an alias, whatever its architectures.
+    pub fn find(&self, name: &str, tag: &str) -> Option<&Entry> {
+        self.entries.get(&key(name, tag))
+    }
+
     /// Every entry once, with aliases collapsed away.
     pub fn entries(&self) -> Vec<&Entry> {
         let mut seen = Vec::new();
@@ -260,6 +326,85 @@ impl Catalogue {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+/// An entry for the store catalogue, as `vm clone` and `vm import` write one.
+#[derive(Debug, Clone, Copy)]
+pub struct NewEntry<'a> {
+    pub name: &'a str,
+    pub tag: &'a str,
+    pub description: &'a str,
+    pub login: Login,
+    pub artifact: &'a Artifact,
+}
+
+impl NewEntry<'_> {
+    /// The entry as TOML, leaving out what defaults.
+    pub fn to_toml(&self) -> String {
+        use std::fmt::Write as _;
+        let artifact = self.artifact;
+        let mut body = format!(
+            "name = {}\ntag = {}\ndescription = {}\nlogin = \"{}\"\n\n[[image]]\narch = {}\nformat = {}\n",
+            toml_string(self.name),
+            toml_string(self.tag),
+            toml_string(self.description),
+            self.login.name(),
+            toml_string(&artifact.arch),
+            toml_string(&artifact.format),
+        );
+        if let Some(url) = &artifact.url {
+            let _ = writeln!(body, "url = {}", toml_string(url));
+        }
+        let _ = writeln!(body, "digest = \"{}\"", artifact.digest);
+        if let Some(size) = artifact.size {
+            let _ = writeln!(body, "size = {size}");
+        }
+        if !artifact.compression.is_none() {
+            let _ = writeln!(body, "compression = \"{}\"", artifact.compression.name());
+        }
+        if let Some(format) = &artifact.source_format {
+            let _ = writeln!(body, "source_format = {}", toml_string(format));
+        }
+        if artifact.media.is_cdrom() {
+            let _ = writeln!(body, "media = \"{}\"", artifact.media.name());
+        }
+        if !artifact.firmware.is_default() {
+            let _ = writeln!(body, "firmware = \"{}\"", artifact.firmware.name());
+        }
+        if !artifact.machine.is_default() {
+            let _ = writeln!(body, "machine = \"{}\"", artifact.machine.name());
+        }
+        if !artifact.disk.is_default() {
+            let _ = writeln!(body, "disk = \"{}\"", artifact.disk.name());
+        }
+        if let Some(cpu) = &artifact.cpu {
+            let _ = writeln!(body, "cpu = {}", toml_string(cpu));
+        }
+        body
+    }
+
+    /// Writes the entry as `NAME/TAG.toml` under `root`, replacing any there.
+    pub fn write(&self, root: &Path) -> Result<PathBuf> {
+        let directory = root.join(self.name);
+        fs::create_dir_all(&directory).map_err(|source| Error::Store {
+            path: directory.clone(),
+            action: "create",
+            source,
+        })?;
+        let path = directory.join(format!("{}.toml", self.tag));
+        let staging = directory.join(format!("{}.toml.new", self.tag));
+        fs::write(&staging, self.to_toml()).map_err(|source| Error::Store {
+            path: staging.clone(),
+            action: "write",
+            source,
+        })?;
+        fs::rename(&staging, &path).map_err(|source| Error::Store {
+            path: path.clone(),
+            action: "write",
+            source,
+        })?;
+        Ok(path)
     }
 }
 
@@ -293,6 +438,17 @@ fn toml_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(found)
 }
 
+/// Refuses formats a pull could not store or a machine could not use.
+fn check_media(image: &RawImage) -> std::result::Result<(), &'static str> {
+    if image.source_format.is_some() && image.format != "qcow2" {
+        return Err("an image with a source_format needs format = \"qcow2\"");
+    }
+    if image.media.is_cdrom() && (image.format != "raw" || image.source_format.is_some()) {
+        return Err("a cdrom image needs format = \"raw\" and no source_format");
+    }
+    Ok(())
+}
+
 fn read_entry(path: &Path) -> Result<Entry> {
     let text = fs::read_to_string(path).map_err(|source| Error::CatalogueRead {
         path: path.to_owned(),
@@ -312,6 +468,10 @@ fn read_entry(path: &Path) -> Result<Entry> {
                     reason: error.to_string(),
                 }
             })?;
+            check_media(&image).map_err(|reason| Error::CatalogueEntry {
+                path: path.to_owned(),
+                reason: reason.to_owned(),
+            })?;
             Ok(Artifact {
                 arch: image.arch,
                 format: image.format,
@@ -322,6 +482,8 @@ fn read_entry(path: &Path) -> Result<Entry> {
                 })?,
                 size: image.size,
                 compression: image.compression,
+                source_format: image.source_format,
+                media: image.media,
                 firmware: image.firmware,
                 cpu: match image.cpu {
                     Some(cpu) => {
@@ -428,6 +590,147 @@ digest = "sha512:{}"
             .unwrap();
         assert_eq!(artifact.compression, Compression::Gzip);
         assert_eq!(artifact.format, "raw");
+    }
+
+    fn image_entry(format: &str, settings: &str) -> String {
+        format!(
+            r#"
+name = "x"
+tag = "y"
+description = "test entry"
+login = "none"
+
+[[image]]
+arch = "amd64"
+format = "{format}"
+url = "https://example.invalid/x"
+digest = "sha256:{}"
+{settings}
+"#,
+            "a".repeat(64)
+        )
+    }
+
+    fn artifact_of(body: &str) -> Result<Artifact> {
+        let scratch = Scratch::new(&format!("media{}", body.len()));
+        scratch.write("x/y.toml", body);
+        let catalogue = scratch.load()?;
+        Ok(catalogue.resolve(&reference("x:y"), "amd64")?.1.clone())
+    }
+
+    #[test]
+    fn an_image_is_a_disk_published_as_stored_unless_the_entry_says_otherwise() {
+        let artifact = artifact_of(&image_entry("qcow2", "")).unwrap();
+        assert_eq!(artifact.media, Media::Disk);
+        assert_eq!(artifact.source_format, None);
+    }
+
+    #[test]
+    fn an_image_can_be_published_in_another_format_and_stored_as_qcow2() {
+        let artifact = artifact_of(&image_entry("qcow2", "source_format = \"vmdk\"")).unwrap();
+        assert_eq!(artifact.source_format.as_deref(), Some("vmdk"));
+        let error = artifact_of(&image_entry("raw", "source_format = \"vmdk\"")).unwrap_err();
+        assert!(error.to_string().contains("qcow2"), "{error}");
+    }
+
+    #[test]
+    fn a_cdrom_image_is_raw_and_published_as_it_is() {
+        let artifact = artifact_of(&image_entry("raw", "media = \"cdrom\"")).unwrap();
+        assert!(artifact.media.is_cdrom());
+        for body in [
+            image_entry("qcow2", "media = \"cdrom\""),
+            image_entry("qcow2", "media = \"cdrom\"\nsource_format = \"raw\""),
+        ] {
+            let error = artifact_of(&body).unwrap_err();
+            assert!(error.to_string().contains("cdrom"), "{error}");
+        }
+        assert!(artifact_of(&image_entry("raw", "media = \"tape\"")).is_err());
+    }
+
+    fn written(artifact: &Artifact, description: &str) -> (Entry, Artifact) {
+        let scratch = Scratch::new(&format!("written{}", artifact.format));
+        let path = NewEntry {
+            name: "mine",
+            tag: "1.0",
+            description,
+            login: Login::None,
+            artifact,
+        }
+        .write(&scratch.0)
+        .unwrap();
+        assert_eq!(path, scratch.0.join("mine/1.0.toml"));
+        let catalogue = scratch.load().unwrap();
+        let (entry, read) = catalogue
+            .resolve(&reference("mine:1.0"), &artifact.arch)
+            .unwrap();
+        (entry.clone(), read.clone())
+    }
+
+    fn plain_artifact() -> Artifact {
+        Artifact {
+            arch: "amd64".to_owned(),
+            format: "qcow2".to_owned(),
+            url: None,
+            digest: format!("sha256:{}", "b".repeat(64)).parse().unwrap(),
+            size: Some(10),
+            compression: Compression::None,
+            source_format: None,
+            media: Media::Disk,
+            firmware: Firmware::Bios,
+            cpu: None,
+            machine: Chipset::Q35,
+            disk: Disk::Virtio,
+        }
+    }
+
+    #[test]
+    fn a_written_entry_reads_back_as_it_was_given() {
+        let fetched = Artifact {
+            url: Some("https://example.invalid/a \"b\".vmdk.xz".to_owned()),
+            compression: Compression::Xz,
+            source_format: Some("vmdk".to_owned()),
+            firmware: Firmware::Uefi,
+            cpu: Some("Penryn,+avx".to_owned()),
+            machine: Chipset::Pc,
+            disk: Disk::Ide,
+            ..plain_artifact()
+        };
+        let (entry, read) = written(&fetched, "Imported \"x\"\\y");
+        assert_eq!(read, fetched);
+        assert_eq!(entry.description, "Imported \"x\"\\y");
+        assert_eq!(entry.login, Login::None);
+        let disc = Artifact {
+            format: "raw".to_owned(),
+            media: Media::Cdrom,
+            arch: "arm64".to_owned(),
+            ..plain_artifact()
+        };
+        assert_eq!(written(&disc, "d").1, disc);
+    }
+
+    #[test]
+    fn a_written_entry_leaves_out_what_defaults() {
+        let text = NewEntry {
+            name: "mine",
+            tag: "1.0",
+            description: "d",
+            login: Login::CloudInit,
+            artifact: &plain_artifact(),
+        }
+        .to_toml();
+        for absent in [
+            "url",
+            "compression",
+            "source_format",
+            "media",
+            "firmware",
+            "machine",
+            "disk =",
+            "cpu",
+        ] {
+            assert!(!text.contains(absent), "{absent}: {text}");
+        }
+        assert!(text.contains("login = \"cloud-init\""), "{text}");
     }
 
     fn machine_entry(settings: &str) -> String {
@@ -547,6 +850,31 @@ size = 1024
 
     fn reference(text: &str) -> Reference {
         text.parse().unwrap()
+    }
+
+    #[test]
+    fn a_login_is_read_by_its_name() {
+        for login in Login::ALL {
+            assert_eq!(login.name().parse::<Login>().unwrap(), login);
+        }
+        assert_eq!(
+            "ssh".parse::<Login>().unwrap_err().kind(),
+            "invalid-machine-setting"
+        );
+    }
+
+    #[test]
+    fn an_entry_is_found_by_its_tag_or_an_alias() {
+        let scratch = Scratch::new("find");
+        scratch.write(
+            "debian/trixie.toml",
+            &entry_toml("debian", "trixie", "\"13\""),
+        );
+        let catalogue = scratch.load().unwrap();
+        assert_eq!(catalogue.find("debian", "trixie").unwrap().tag, "trixie");
+        assert_eq!(catalogue.find("debian", "13").unwrap().tag, "trixie");
+        assert!(catalogue.find("debian", "12").is_none());
+        assert!(catalogue.find("ubuntu", "trixie").is_none());
     }
 
     #[test]
