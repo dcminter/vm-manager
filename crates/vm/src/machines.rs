@@ -1009,7 +1009,7 @@ fn stranded(
 }
 
 /// The machines whose disk is backed by a given image.
-fn holders(digest: &str) -> Result<Vec<String>> {
+pub fn holders(digest: &str) -> Result<Vec<String>> {
     let instances = Instances::discover()?;
     let mut names = Vec::new();
     for name in instances.names()? {

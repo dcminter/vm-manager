@@ -31,6 +31,14 @@ pub enum Origin {
 }
 
 impl Origin {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Local => "local",
+            Self::Remote => "remote",
+        }
+    }
+
     pub const fn of(local: bool, remote: bool) -> Self {
         match (local, remote) {
             (true, _) => Self::Local,
@@ -111,6 +119,15 @@ pub struct Inspect {
     pub cpu: String,
     pub machine: Chipset,
     pub disk: Disk,
+    /// Every architecture the entry has a build for.
+    pub architectures: Vec<String>,
+    pub origin: Origin,
+    /// The catalogue file describing the image.
+    pub entry: String,
+    /// Where the image is in the store, when held.
+    pub path: Option<String>,
+    /// Machines whose disk is backed by the image.
+    pub used_by: Vec<String>,
 }
 
 impl Inspect {
@@ -132,6 +149,11 @@ impl Inspect {
             cpu: artifact.cpu().to_owned(),
             machine: artifact.machine,
             disk: artifact.disk,
+            architectures: entry.architectures(),
+            origin: Origin::Remote,
+            entry: entry.path.display().to_string(),
+            path: None,
+            used_by: Vec::new(),
         }
     }
 
@@ -141,6 +163,21 @@ impl Inspect {
             self.format.clone()
         } else {
             format!("{}, published {}", self.format, self.compression)
+        }
+    }
+
+    /// The architecture shown, with any others the entry has.
+    fn architecture(&self) -> String {
+        let others: Vec<&str> = self
+            .architectures
+            .iter()
+            .map(String::as_str)
+            .filter(|arch| *arch != self.arch)
+            .collect();
+        if others.is_empty() {
+            self.arch.clone()
+        } else {
+            format!("{} (also {})", self.arch, others.join(", "))
         }
     }
 
@@ -172,6 +209,11 @@ impl Report for Inspect {
             ("cpu", Value::string(self.cpu.clone())),
             ("machine", Value::string(self.machine.name())),
             ("disk", Value::string(self.disk.name())),
+            ("architectures", Value::strings(self.architectures.clone())),
+            ("origin", Value::string(self.origin.name())),
+            ("entry", Value::string(self.entry.clone())),
+            ("path", self.path.clone().map_or(Value::Null, Value::String)),
+            ("used_by", Value::strings(self.used_by.clone())),
         ])
     }
 
@@ -184,7 +226,16 @@ impl Report for Inspect {
             fields.push(("Aliases", self.aliases.join(", ")));
         }
         fields.extend([
-            ("Architecture", self.arch.clone()),
+            ("Architecture", self.architecture()),
+            (
+                "Origin",
+                match self.origin {
+                    Origin::Local => "local, made on this host",
+                    Origin::All | Origin::Remote => "remote catalogue",
+                }
+                .to_owned(),
+            ),
+            ("Entry", self.entry.clone()),
             ("Format", self.formatting()),
             (
                 "Source",
@@ -198,8 +249,17 @@ impl Report for Inspect {
                 self.size.map_or_else(|| "unrecorded".to_owned(), human),
             ),
             ("Guest access", self.access().to_owned()),
-            ("Pulled", if self.held { "yes" } else { "no" }.to_owned()),
+            (
+                "Pulled",
+                self.path
+                    .as_ref()
+                    .filter(|_| self.held)
+                    .map_or_else(|| "no".to_owned(), |path| format!("yes, at {path}")),
+            ),
         ]);
+        if !self.used_by.is_empty() {
+            fields.push(("Used by", self.used_by.join(", ")));
+        }
         if let Some(machine) = machine_text(self.firmware, self.machine, self.disk, &self.cpu) {
             fields.push(("Machine", machine));
         }
@@ -1317,6 +1377,11 @@ mod tests {
             cpu: "max".to_owned(),
             machine: Chipset::Q35,
             disk: Disk::Virtio,
+            architectures: vec!["amd64".to_owned()],
+            origin: Origin::Remote,
+            entry: "/catalogue/entry.toml".to_owned(),
+            path: None,
+            used_by: Vec::new(),
         };
         let lines = report.render_text(Style::plain());
         assert!(
@@ -1324,6 +1389,79 @@ mod tests {
             "{lines:?}"
         );
         assert!(to_json(&report.to_value()).contains(r#""aliases": []"#));
+    }
+
+    #[test]
+    fn an_inspection_shows_other_architectures_origin_location_and_users() {
+        let mut report = Inspect {
+            name: "debian".to_owned(),
+            tag: "trixie".to_owned(),
+            aliases: Vec::new(),
+            description: "Debian 13".to_owned(),
+            arch: "arm64".to_owned(),
+            format: "qcow2".to_owned(),
+            compression: "none".to_owned(),
+            url: None,
+            digest: "sha512:abc".to_owned(),
+            seedable: true,
+            held: true,
+            size: None,
+            firmware: Firmware::Bios,
+            cpu: "max".to_owned(),
+            machine: Chipset::Q35,
+            disk: Disk::Virtio,
+            architectures: vec!["amd64".to_owned(), "arm64".to_owned()],
+            origin: Origin::Local,
+            entry: "/local/debian/trixie.toml".to_owned(),
+            path: Some("/store/sha512/abc".to_owned()),
+            used_by: vec!["one".to_owned(), "two".to_owned()],
+        };
+        let field = |report: &Inspect, label: &str| {
+            report
+                .render_text(Style::plain())
+                .into_iter()
+                .find(|line| line.starts_with(label))
+        };
+        assert!(
+            field(&report, "Architecture")
+                .unwrap()
+                .ends_with("arm64 (also amd64)")
+        );
+        assert!(field(&report, "Origin").unwrap().contains("local"));
+        assert!(
+            field(&report, "Entry")
+                .unwrap()
+                .ends_with("/local/debian/trixie.toml")
+        );
+        assert!(
+            field(&report, "Pulled")
+                .unwrap()
+                .ends_with("yes, at /store/sha512/abc")
+        );
+        assert!(field(&report, "Used by").unwrap().ends_with("one, two"));
+        let json = to_json(&report.to_value());
+        for expected in [
+            r#""origin": "local""#,
+            r#""path": "/store/sha512/abc""#,
+            r#""entry": "/local/debian/trixie.toml""#,
+            r#""arm64""#,
+            r#""two""#,
+        ] {
+            assert!(json.contains(expected), "{expected} in {json}");
+        }
+
+        report.architectures = vec!["arm64".to_owned()];
+        report.origin = Origin::Remote;
+        report.held = false;
+        report.path = None;
+        report.used_by = Vec::new();
+        assert!(field(&report, "Architecture").unwrap().ends_with("  arm64"));
+        assert!(field(&report, "Origin").unwrap().contains("remote"));
+        assert!(field(&report, "Pulled").unwrap().ends_with("  no"));
+        assert_eq!(field(&report, "Used by"), None);
+        let json = to_json(&report.to_value());
+        assert!(json.contains(r#""path": null"#), "{json}");
+        assert!(json.contains(r#""used_by": []"#), "{json}");
     }
 
     #[test]
@@ -1345,6 +1483,11 @@ mod tests {
             cpu: "max".to_owned(),
             machine: Chipset::Q35,
             disk: Disk::Virtio,
+            architectures: vec!["amd64".to_owned()],
+            origin: Origin::Remote,
+            entry: "/catalogue/entry.toml".to_owned(),
+            path: None,
+            used_by: Vec::new(),
         };
         let line = |report: &Inspect| {
             report
@@ -1523,6 +1666,7 @@ mod tests {
                 description: String::new(),
                 login: vm_core::catalogue::Login::None,
                 artifacts: Vec::new(),
+                path: std::path::PathBuf::from("/catalogue/puredarwin/minimal.toml"),
             },
             &Artifact {
                 arch: "amd64".to_owned(),
@@ -1589,6 +1733,11 @@ mod tests {
             cpu: "max".to_owned(),
             machine: Chipset::Q35,
             disk: Disk::Virtio,
+            architectures: vec!["amd64".to_owned()],
+            origin: Origin::Remote,
+            entry: "/catalogue/entry.toml".to_owned(),
+            path: None,
+            used_by: Vec::new(),
         };
         assert!(report.access().contains("cloud-init"));
         report.seedable = false;

@@ -58,8 +58,11 @@ enum Command {
     /// Show what an image reference resolves to
     Inspect {
         /// Image reference, such as debian:trixie
-        #[arg(add = ArgValueCandidates::new(completion::catalogue_image))]
+        #[arg(add = ArgValueCandidates::new(completion::any_catalogue_image))]
         reference: String,
+        /// Architecture of the build to show, instead of this host's
+        #[arg(long, add = ArgValueCandidates::new(completion::architecture))]
+        arch: Option<String>,
     },
     /// Fetch an image into the local store
     Pull {
@@ -496,7 +499,12 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
             *all_architectures,
             origin,
         ))),
-        Command::Inspect { reference } => Ok(Box::new(inspect(&catalogue, &store, reference)?)),
+        Command::Inspect { reference, arch } => Ok(Box::new(inspect(
+            &catalogue,
+            &store,
+            reference,
+            arch.as_deref().unwrap_or(host_architecture()),
+        )?)),
         Command::Pull { reference } => Ok(Box::new(pull(
             &catalogue, &store, style, cli.format, reference,
         )?)),
@@ -646,14 +654,26 @@ fn inspect(
     catalogue: &Catalogue,
     store: &Store,
     reference: &str,
+    arch: &str,
 ) -> vm_core::Result<reports::Inspect> {
     let reference: Reference = reference.parse()?;
-    let (entry, artifact) = catalogue.resolve(&reference, host_architecture())?;
-    Ok(reports::Inspect::new(
-        entry,
-        artifact,
-        store.contains(&artifact.digest),
-    ))
+    let (entry, artifact) = catalogue.resolve(&reference, arch)?;
+    let mut report = reports::Inspect::new(entry, artifact, store.contains(&artifact.digest));
+    report.origin = origin_of(entry, paths::local_catalogue_directory().as_deref());
+    if report.held {
+        report.path = Some(store.path_for(&artifact.digest).display().to_string());
+    }
+    report.used_by = machines::holders(&artifact.digest.to_string()).unwrap_or_default();
+    Ok(report)
+}
+
+/// Whether an entry was made on this host or came from the fetched catalogue.
+fn origin_of(entry: &vm_core::catalogue::Entry, local: Option<&std::path::Path>) -> Origin {
+    if local.is_some_and(|local| entry.path.starts_with(local)) {
+        Origin::Local
+    } else {
+        Origin::Remote
+    }
 }
 
 fn pull(
@@ -898,6 +918,50 @@ mod tests {
             Some("With tools".to_owned())
         );
         assert!(Cli::try_parse_from(["vm", "clone", "a", "b:c", "--description", ""]).is_err());
+    }
+
+    #[test]
+    fn an_entry_under_the_local_catalogue_is_local() {
+        let entry = |path: &str| vm_core::catalogue::Entry {
+            name: "x".to_owned(),
+            tag: "y".to_owned(),
+            aliases: Vec::new(),
+            description: String::new(),
+            login: vm_core::catalogue::Login::None,
+            artifacts: Vec::new(),
+            path: std::path::PathBuf::from(path),
+        };
+        let local = std::path::Path::new("/data/vm/local");
+        assert_eq!(
+            origin_of(&entry("/data/vm/local/x/y.toml"), Some(local)),
+            Origin::Local
+        );
+        assert_eq!(
+            origin_of(&entry("/data/vm/catalogue/x/y.toml"), Some(local)),
+            Origin::Remote
+        );
+        assert_eq!(
+            origin_of(&entry("/data/vm/localish/x/y.toml"), Some(local)),
+            Origin::Remote
+        );
+        assert_eq!(
+            origin_of(&entry("/data/vm/local/x/y.toml"), None),
+            Origin::Remote
+        );
+    }
+
+    #[test]
+    fn inspect_takes_an_architecture() {
+        use clap::Parser as _;
+        let arch = |arguments: &[&str]| match Cli::try_parse_from(arguments).unwrap().command {
+            Command::Inspect { arch, .. } => arch,
+            _ => panic!("not an inspect"),
+        };
+        assert_eq!(arch(&["vm", "inspect", "debian"]), None);
+        assert_eq!(
+            arch(&["vm", "inspect", "debian", "--arch", "arm64"]),
+            Some("arm64".to_owned())
+        );
     }
 
     #[test]

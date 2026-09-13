@@ -92,6 +92,8 @@ pub struct Entry {
     pub description: String,
     pub login: Login,
     pub artifacts: Vec<Artifact>,
+    /// The file the entry was read from.
+    pub path: PathBuf,
 }
 
 impl Entry {
@@ -99,7 +101,7 @@ impl Entry {
         self.artifacts.iter().find(|artifact| artifact.arch == arch)
     }
 
-    fn architectures(&self) -> Vec<String> {
+    pub fn architectures(&self) -> Vec<String> {
         self.artifacts
             .iter()
             .map(|artifact| artifact.arch.clone())
@@ -189,6 +191,15 @@ impl Catalogue {
                 wanted: arch.to_owned(),
                 available: entry.architectures(),
             })?;
+        if let Some(pinned) = reference.digest()
+            && *pinned != artifact.digest
+        {
+            return Err(Error::PinMismatch {
+                reference: reference.to_string(),
+                arch: arch.to_owned(),
+                actual: artifact.digest.to_string(),
+            });
+        }
         Ok((entry, artifact))
     }
 
@@ -293,6 +304,7 @@ fn read_entry(path: &Path) -> Result<Entry> {
         description: raw.description,
         login: raw.login,
         artifacts,
+        path: path.to_owned(),
     })
 }
 
@@ -569,6 +581,34 @@ size = 1024
         let message = error.to_string();
         assert!(message.contains("riscv64"), "{message}");
         assert!(message.contains("amd64"), "{message}");
+    }
+
+    #[test]
+    fn a_pinned_digest_must_match_the_build() {
+        let scratch = Scratch::new("pinned");
+        scratch.write("debian/trixie.toml", &entry_toml("debian", "trixie", ""));
+        let catalogue = scratch.load().unwrap();
+        let held = format!("debian:trixie@sha512:{}", "a".repeat(128));
+        assert!(catalogue.resolve(&reference(&held), "amd64").is_ok());
+        let other = format!("debian:trixie@sha512:{}", "b".repeat(128));
+        let error = catalogue.resolve(&reference(&other), "amd64").unwrap_err();
+        assert_eq!(error.kind(), "pin-mismatch");
+        let message = error.to_string();
+        assert!(message.contains(&"a".repeat(128)), "{message}");
+        assert!(message.contains("amd64"), "{message}");
+        let algorithm = format!("debian:trixie@sha256:{}", "a".repeat(64));
+        assert!(catalogue.resolve(&reference(&algorithm), "amd64").is_err());
+    }
+
+    #[test]
+    fn an_entry_records_the_file_it_came_from() {
+        let scratch = Scratch::new("path");
+        scratch.write("debian/trixie.toml", &entry_toml("debian", "trixie", ""));
+        let catalogue = scratch.load().unwrap();
+        let (entry, _) = catalogue
+            .resolve(&reference("debian:trixie"), "amd64")
+            .unwrap();
+        assert_eq!(entry.path, scratch.0.join("debian/trixie.toml"));
     }
 
     #[test]

@@ -432,6 +432,7 @@ mod tests {
             description: "test entry".to_owned(),
             login: Login::CloudInit,
             artifacts: vec![artifact()],
+            path: PathBuf::from("/catalogue/debian/trixie.toml"),
         }
     }
 

@@ -46,6 +46,11 @@ pub enum Error {
         url: String,
         status: u16,
     },
+    PinMismatch {
+        reference: String,
+        arch: String,
+        actual: String,
+    },
     DigestMismatch {
         url: String,
         expected: String,
@@ -214,6 +219,7 @@ impl Error {
             Self::Store { .. } => "store-unwritable",
             Self::Download { .. } => "download-failed",
             Self::HttpStatus { .. } => "http-error",
+            Self::PinMismatch { .. } => "pin-mismatch",
             Self::DigestMismatch { .. } => "digest-mismatch",
             Self::MalformedArchive { .. } => "malformed-archive",
             Self::EmptyCatalogue { .. } => "empty-catalogue",
@@ -320,6 +326,14 @@ impl fmt::Display for Error {
             Self::HttpStatus { url, status } => {
                 write!(f, "cannot fetch {url}: server returned HTTP {status}")
             }
+            Self::PinMismatch {
+                reference,
+                arch,
+                actual,
+            } => write!(
+                f,
+                "the catalogue has no build of '{reference}' with that digest; its {arch} build is {actual}"
+            ),
             Self::DigestMismatch {
                 url,
                 expected,

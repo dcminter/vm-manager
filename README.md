@@ -32,7 +32,7 @@ cargo run -p vm -- images
 | Command | Purpose |
 |---|---|
 | `vm images` | List the images in the local catalogue; `--local` or `--remote` narrows it |
-| `vm inspect <image>` | Show where an image comes from and how its guest is reached |
+| `vm inspect <image>` | Show an image's details, origin and users; `--arch` picks a build |
 | `vm pull <image>` | Fetch an image into the local store |
 | `vm update` | Refresh the local catalogue from its remote source |
 | `vm run <image>` | Create and start a machine |
@@ -53,7 +53,8 @@ cargo run -p vm -- images
 | `vm rmi <image>` | Delete an image from the local store |
 
 An image is named `repository:tag`, as in `debian:trixie`. The tag defaults to
-`latest`, and a build may be pinned by appending `@sha512:...`.
+`latest`. Appending `@sha512:...` pins the build: a reference whose digest does
+not match the catalogue is refused.
 
 `man vm` describes every command and option.
 

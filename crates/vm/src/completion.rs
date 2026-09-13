@@ -57,14 +57,37 @@ pub fn instances(instances: &Instances, wanted: Wanted) -> Vec<CompletionCandida
 /// Every reference the catalogue resolves on this host.
 pub fn catalogue_image() -> Vec<CompletionCandidate> {
     loaded().map_or_else(Vec::new, |(catalogue, _)| {
-        references(&catalogue, host_architecture(), &|_| true)
+        references(&catalogue, Some(host_architecture()), &|_| true)
     })
+}
+
+/// Every reference the catalogue holds, for any architecture.
+pub fn any_catalogue_image() -> Vec<CompletionCandidate> {
+    loaded().map_or_else(Vec::new, |(catalogue, _)| {
+        references(&catalogue, None, &|_| true)
+    })
+}
+
+/// Every architecture the catalogue has a build for.
+pub fn architecture() -> Vec<CompletionCandidate> {
+    loaded().map_or_else(Vec::new, |(catalogue, _)| architectures(&catalogue))
+}
+
+fn architectures(catalogue: &Catalogue) -> Vec<CompletionCandidate> {
+    let mut found: Vec<String> = catalogue
+        .entries()
+        .into_iter()
+        .flat_map(vm_core::catalogue::Entry::architectures)
+        .collect();
+    found.sort();
+    found.dedup();
+    found.into_iter().map(CompletionCandidate::new).collect()
 }
 
 /// References to images this host holds, or wrote itself.
 pub fn held_image() -> Vec<CompletionCandidate> {
     loaded().map_or_else(Vec::new, |(catalogue, store)| {
-        references(&catalogue, host_architecture(), &|artifact| {
+        references(&catalogue, Some(host_architecture()), &|artifact| {
             artifact.url.is_none() || store.contains(&artifact.digest)
         })
     })
@@ -75,16 +98,21 @@ fn loaded() -> Option<(Catalogue, Store)> {
     Some((catalogue, Store::discover().ok()?))
 }
 
-/// Each entry's `name:tag` and aliases, for the entries with a fitting build for `arch`.
+/// Each entry's `name:tag` and aliases, for the entries with a fitting build for `arch`, or any.
 pub fn references(
     catalogue: &Catalogue,
-    arch: &str,
+    arch: Option<&str>,
     keep: &dyn Fn(&vm_core::catalogue::Artifact) -> bool,
 ) -> Vec<CompletionCandidate> {
     catalogue
         .entries()
         .into_iter()
-        .filter(|entry| entry.artifact_for(arch).is_some_and(keep))
+        .filter(|entry| {
+            entry
+                .artifacts
+                .iter()
+                .any(|artifact| arch.is_none_or(|wanted| artifact.arch == wanted) && keep(artifact))
+        })
         .flat_map(|entry| {
             let help = Some(entry.description.clone().into());
             std::iter::once(&entry.tag)
@@ -299,15 +327,22 @@ mod tests {
         );
         scratch.entry("arm/only.toml", &entry("armonly", "1", "", "arm64", true));
         let catalogue = Catalogue::load(&scratch.0.join("catalogue")).unwrap();
-        let found = references(&catalogue, "amd64", &|_| true);
+        let found = references(&catalogue, Some("amd64"), &|_| true);
         let mut offered = values(&found);
         offered.sort();
         assert_eq!(offered, ["debian:13", "debian:latest", "debian:trixie"]);
         assert_eq!(found[0].get_help().unwrap().to_string(), "debian for tests");
         assert_eq!(
-            values(&references(&catalogue, "arm64", &|_| true)),
+            values(&references(&catalogue, Some("arm64"), &|_| true)),
             ["armonly:1"]
         );
+        let mut every = values(&references(&catalogue, None, &|_| true));
+        every.sort();
+        assert_eq!(
+            every,
+            ["armonly:1", "debian:13", "debian:latest", "debian:trixie"]
+        );
+        assert_eq!(values(&architectures(&catalogue)), ["amd64", "arm64"]);
     }
 
     #[test]
@@ -316,7 +351,9 @@ mod tests {
         scratch.entry("fetched/1.toml", &entry("fetched", "1", "", "amd64", true));
         scratch.entry("local/1.toml", &entry("local", "1", "", "amd64", false));
         let catalogue = Catalogue::load(&scratch.0.join("catalogue")).unwrap();
-        let found = references(&catalogue, "amd64", &|artifact| artifact.url.is_none());
+        let found = references(&catalogue, Some("amd64"), &|artifact| {
+            artifact.url.is_none()
+        });
         assert_eq!(values(&found), ["local:1"]);
     }
 

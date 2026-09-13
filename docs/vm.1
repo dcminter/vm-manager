@@ -14,6 +14,15 @@ over the stored image, its own SSH key pair, and an account created by
 cloud-init. A host port is always forwarded to the guest's SSH port, so
 .B vm ssh
 works without publishing one.
+.PP
+An image is named
+.IR repository [: tag ][@ digest ],
+as in
+.BR debian:trixie .
+The tag defaults to
+.BR latest .
+A digest pins the build: a reference whose digest does not match the
+catalogue's build for the architecture is refused.
 .SH COMMANDS
 .TP
 .B images
@@ -26,7 +35,11 @@ shows only images made on this host, such as by
 shows only images from the fetched catalogue.
 .TP
 .BI inspect " IMAGE"
-Show where an image comes from and how its guest is reached.
+Show an image's build for this host's architecture, or for
+.BR \-\-arch " ARCH" :
+its other architectures, whether it is local or from the remote catalogue, its
+catalogue entry file, its source and digest, how its guest is reached, where it
+is stored if pulled, and the machines using it.
 .TP
 .BI pull " IMAGE"
 Fetch an image into the local store and verify it against the catalogue digest.
