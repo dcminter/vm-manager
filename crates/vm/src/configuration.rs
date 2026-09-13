@@ -70,7 +70,7 @@ pub enum Added {
     /// A catalogue fetched by vm update, placed last unless --before is given
     Remote {
         name: String,
-        /// A gzipped tar archive over http or https
+        /// A catalogue pointer file over http or https
         url: String,
         /// The directory within the archive holding the entries
         #[arg(long)]

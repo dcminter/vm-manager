@@ -152,8 +152,16 @@ pub struct Updated {
     pub name: String,
     pub url: String,
     pub path: String,
-    /// The files and entries installed, or why nothing was.
-    pub outcome: std::result::Result<(usize, usize), String>,
+    /// What was installed, or why nothing was.
+    pub outcome: std::result::Result<Installed, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Installed {
+    pub version: String,
+    pub archive: String,
+    pub files: usize,
+    pub entries: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

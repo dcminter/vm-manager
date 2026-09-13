@@ -959,7 +959,7 @@ pub fn configuration_dialog(
     list_catalogues(&remotes, &locals, snapshot, &sink);
     let adding = form.group("Add a remote catalogue");
     let remote_name = entry(&adding, "Name", "");
-    let remote_url = entry(&adding, "URL of a gzipped tar archive", "");
+    let remote_url = entry(&adding, "URL of a catalogue pointer file", "");
     let remote_path = entry(&adding, "Directory within the archive", "");
     let remote_before = entry(&adding, "Place before", "");
     let adding_local = form.group("Add a local catalogue");

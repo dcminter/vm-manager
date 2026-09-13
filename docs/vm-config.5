@@ -34,14 +34,22 @@ A remote catalogue.
 .B name
 (lowercase letters, digits and dashes) identifies it;
 .B url
-is the gzipped tar to fetch;
+names a pointer file;
 .B path
-is the directory within it holding the entries, default
+is the directory holding the entries within the archive's top-level directory,
+default
 .BR catalogue .
 Without any
 .BR [[remote]] ,
-the project's catalogue on GitHub is the one remote, named
+the project's catalogue at vm\-manager.com is the one remote, named
 .BR project .
+.IP
+The pointer file sets
+.BR version ,
+the catalogue's version, and
+.BR archive ,
+its gzipped tar archive: an http or https URL, or a file name resolved beside
+the pointer.
 .TP
 .B [[local]]
 A local catalogue:
@@ -95,11 +103,11 @@ default_user = "$USER"
 
 [[remote]]
 name = "project"
-url = "https://codeload.github.com/dcminter/vm\-manager/tar.gz/refs/heads/main"
+url = "https://vm\-manager.com/catalogue.toml"
 
 [[remote]]
 name = "internal"
-url = "https://mirror.example.com/vm/catalogue.tar.gz"
+url = "https://mirror.example.com/vm/catalogue.toml"
 path = "images"
 
 [[local]]

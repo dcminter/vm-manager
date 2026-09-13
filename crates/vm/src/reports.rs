@@ -237,18 +237,28 @@ impl Report for Pull {
 impl Report for Update {
     fn to_value(&self) -> Value {
         Value::list(self.catalogues.iter().map(|held| {
-            let (files, entries, error) = match &held.outcome {
-                Ok((files, entries)) => (
-                    Value::Integer(*files as u64),
-                    Value::Integer(*entries as u64),
+            let (version, archive, files, entries, error) = match &held.outcome {
+                Ok(installed) => (
+                    Value::string(installed.version.clone()),
+                    Value::string(installed.archive.clone()),
+                    Value::Integer(installed.files as u64),
+                    Value::Integer(installed.entries as u64),
                     Value::Null,
                 ),
-                Err(reason) => (Value::Null, Value::Null, Value::string(reason.clone())),
+                Err(reason) => (
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    Value::Null,
+                    Value::string(reason.clone()),
+                ),
             };
             Value::map([
                 ("name", Value::string(held.name.clone())),
                 ("url", Value::string(held.url.clone())),
                 ("path", Value::string(held.path.clone())),
+                ("version", version),
+                ("archive", archive),
                 ("files", files),
                 ("entries", entries),
                 ("error", error),
@@ -260,10 +270,13 @@ impl Report for Update {
         self.catalogues
             .iter()
             .map(|held| match &held.outcome {
-                Ok((files, entries)) => format!(
-                    "Updated {} from {} ({entries} entries in {files} files)",
+                Ok(installed) => format!(
+                    "Updated {} to {} from {} ({} entries in {} files)",
                     style.name(&held.name),
-                    held.url
+                    installed.version,
+                    installed.archive,
+                    installed.entries,
+                    installed.files
                 ),
                 Err(reason) => format!(
                     "Could not update {}; its previous copy stays in use: {reason}",
@@ -1869,13 +1882,18 @@ mod tests {
             catalogues: vec![
                 Updated {
                     name: "project".to_owned(),
-                    url: "https://example.test/c.tar.gz".to_owned(),
+                    url: "https://example.test/catalogue.toml".to_owned(),
                     path: "/home/x/.local/share/vm/catalogues/project".to_owned(),
-                    outcome: Ok((4, 3)),
+                    outcome: Ok(Installed {
+                        version: "0.0.1".to_owned(),
+                        archive: "https://example.test/catalogue-0.0.1.tar.gz".to_owned(),
+                        files: 4,
+                        entries: 3,
+                    }),
                 },
                 Updated {
                     name: "internal".to_owned(),
-                    url: "https://internal.test/c.tar.gz".to_owned(),
+                    url: "https://internal.test/catalogue.toml".to_owned(),
                     path: "/home/x/.local/share/vm/catalogues/internal".to_owned(),
                     outcome: Err("connection refused".to_owned()),
                 },
@@ -1885,6 +1903,9 @@ mod tests {
         for expected in [
             r#""entries": 3"#,
             r#""files": 4"#,
+            r#""version": "0.0.1""#,
+            r#""archive": "https://example.test/catalogue-0.0.1.tar.gz""#,
+            r#""version": null"#,
             r#""error": null"#,
             r#""error": "connection refused""#,
             r#""name": "internal""#,
@@ -1893,7 +1914,9 @@ mod tests {
         }
         let lines = report.render_text(Style::plain());
         assert!(
-            lines[0].contains("project") && lines[0].contains("3 entries in 4 files"),
+            lines[0].contains("project")
+                && lines[0].contains("to 0.0.1 from https://example.test/catalogue-0.0.1.tar.gz")
+                && lines[0].contains("3 entries in 4 files"),
             "{lines:?}"
         );
         assert!(

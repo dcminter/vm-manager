@@ -71,6 +71,10 @@ pub enum Error {
         url: String,
         reason: String,
     },
+    MalformedPointer {
+        url: String,
+        reason: String,
+    },
     EmptyCatalogue {
         url: String,
         path: String,
@@ -281,6 +285,7 @@ impl Error {
             Self::PinMismatch { .. } => "pin-mismatch",
             Self::DigestMismatch { .. } | Self::ImportMismatch { .. } => "digest-mismatch",
             Self::MalformedArchive { .. } => "malformed-archive",
+            Self::MalformedPointer { .. } => "malformed-pointer",
             Self::EmptyCatalogue { .. } => "empty-catalogue",
             Self::SeedRefused { .. } => "seed-invalid",
             Self::SeedWrite { .. } => "seed-unwritable",
@@ -430,6 +435,9 @@ impl fmt::Display for Error {
             ),
             Self::MalformedArchive { url, reason } => {
                 write!(f, "the archive at {url} is not readable: {reason}")
+            }
+            Self::MalformedPointer { url, reason } => {
+                write!(f, "{url} is not a catalogue pointer: {reason}")
             }
             Self::EmptyCatalogue { url, path } => write!(
                 f,

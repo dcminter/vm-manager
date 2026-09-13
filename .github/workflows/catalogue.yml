@@ -53,10 +53,14 @@ jobs:
           cp -r site _site
           git tag -l 'catalogue-*' \
             | grep -xE 'catalogue-[0-9]+\.[0-9]+\.[0-9]+' \
-            | while read -r tag; do
-                git archive --format=tar.gz --prefix="$tag/" -o "_site/$tag.tar.gz" "$tag" catalogue
-              done
+            | sort -V >"$RUNNER_TEMP/tags"
+          while read -r tag; do
+            git archive --format=tar.gz --prefix="$tag/" -o "_site/$tag.tar.gz" "$tag" catalogue
+          done <"$RUNNER_TEMP/tags"
+          newest="$(tail -n 1 "$RUNNER_TEMP/tags")"
+          printf 'version = "%s"\narchive = "%s.tar.gz"\n' "${newest#catalogue-}" "$newest" >_site/catalogue.toml
           ls -l _site
+          cat _site/catalogue.toml
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

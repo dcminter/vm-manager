@@ -5,7 +5,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::glib;
 use vm_core::configuration;
-use vm_core::reports::{PullStatus, RunStatus, State, StopOutcome};
+use vm_core::reports::{PullStatus, RunStatus, State, StopOutcome, Update};
 
 use crate::forms;
 use crate::model::{self, Action, NodeId};
@@ -80,19 +80,7 @@ impl Outcome {
                 "Exported {}:{} to {}",
                 exported.name, exported.tag, exported.path
             ),
-            Self::Updated(update) => {
-                let failed: Vec<&str> = update
-                    .catalogues
-                    .iter()
-                    .filter(|held| held.outcome.is_err())
-                    .map(|held| held.name.as_str())
-                    .collect();
-                if failed.is_empty() {
-                    format!("Updated {} catalogues", update.catalogues.len())
-                } else {
-                    format!("Could not update {}", failed.join(", "))
-                }
-            }
+            Self::Updated(update) => describe_update(update),
             Self::Screenshot(shot) => {
                 format!("Saved {} ({}x{})", shot.path, shot.width, shot.height)
             }
@@ -114,6 +102,27 @@ impl Outcome {
             } => format!("Copying with {name}"),
         }
     }
+}
+
+fn describe_update(update: &Update) -> String {
+    let failed: Vec<&str> = update
+        .catalogues
+        .iter()
+        .filter(|held| held.outcome.is_err())
+        .map(|held| held.name.as_str())
+        .collect();
+    if !failed.is_empty() {
+        return format!("Could not update {}", failed.join(", "));
+    }
+    let versions: Vec<String> = update
+        .catalogues
+        .iter()
+        .filter_map(|held| {
+            let installed = held.outcome.as_ref().ok()?;
+            Some(format!("{} to {}", held.name, installed.version))
+        })
+        .collect();
+    format!("Updated {}", versions.join(", "))
 }
 
 impl VmgWindow {
@@ -445,5 +454,52 @@ impl VmgWindow {
             self.forget_inspections();
             self.refresh();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vm_core::reports::{Installed, Updated};
+
+    fn updated(name: &str, outcome: Result<&str, &str>) -> Updated {
+        Updated {
+            name: name.to_owned(),
+            url: format!("https://{name}.test/catalogue.toml"),
+            path: format!("/catalogues/{name}"),
+            outcome: outcome
+                .map(|version| Installed {
+                    version: version.to_owned(),
+                    archive: format!("https://{name}.test/c-{version}.tar.gz"),
+                    files: 1,
+                    entries: 1,
+                })
+                .map_err(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn an_update_names_each_catalogue_and_its_version() {
+        let update = Update {
+            catalogues: vec![
+                updated("project", Ok("0.0.2")),
+                updated("internal", Ok("7")),
+            ],
+        };
+        assert_eq!(
+            describe_update(&update),
+            "Updated project to 0.0.2, internal to 7"
+        );
+    }
+
+    #[test]
+    fn an_update_with_a_failure_names_only_the_failures() {
+        let update = Update {
+            catalogues: vec![
+                updated("project", Ok("0.0.2")),
+                updated("internal", Err("refused")),
+            ],
+        };
+        assert_eq!(describe_update(&update), "Could not update internal");
     }
 }

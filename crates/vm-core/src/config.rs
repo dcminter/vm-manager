@@ -3,9 +3,8 @@ use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// The project's own catalogue archive.
-pub const PROJECT_CATALOGUE_URL: &str =
-    "https://codeload.github.com/dcminter/vm-manager/tar.gz/refs/heads/main";
+/// The pointer to the project's own catalogue.
+pub const PROJECT_CATALOGUE_URL: &str = "https://vm-manager.com/catalogue.toml";
 const DEFAULT_CATALOGUE_PATH: &str = "catalogue";
 
 /// The name of the project's catalogue when no remote is configured.
@@ -19,7 +18,7 @@ pub const STORE_CATALOGUE: &str = "store";
 #[serde(deny_unknown_fields)]
 pub struct Remote {
     pub name: String,
-    /// A gzipped tar archive.
+    /// A pointer file naming the current gzipped tar archive.
     pub url: String,
     /// The directory inside the archive holding the entries.
     #[serde(default = "default_catalogue_path")]
@@ -412,7 +411,7 @@ fn position<'a>(
 }
 
 /// Whether a URL names something `vm update` can fetch.
-fn is_fetchable(url: &str) -> bool {
+pub(crate) fn is_fetchable(url: &str) -> bool {
     ["http://", "https://"].iter().any(|scheme| {
         url.strip_prefix(scheme)
             .is_some_and(|rest| !rest.is_empty())

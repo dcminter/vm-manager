@@ -27,6 +27,36 @@ pub fn serve(body: Vec<u8>) -> String {
     format!("http://{address}/image")
 }
 
+/// Answers requests for each path with its body, and anything else with 404, returning the base URL.
+pub fn serve_paths(files: Vec<(&'static str, Vec<u8>)>) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            let _ = reader.read_line(&mut request);
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|read| read > 2) {
+                line.clear();
+            }
+            let path = request.split_whitespace().nth(1).unwrap_or_default();
+            let (status, body) = files
+                .iter()
+                .find(|(served, _)| *served == path)
+                .map_or(("404 Not Found", &[][..]), |(_, body)| ("200 OK", body));
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(body);
+        }
+    });
+    format!("http://{address}")
+}
+
 /// Makes an image with `qemu-img`, saying whether it could.
 pub fn create_image(path: &Path, format: &str, size: &str) -> bool {
     std::process::Command::new("qemu-img")

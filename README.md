@@ -208,7 +208,7 @@ what it sets and what is defaulted, and changes it:
 
 ```bash
 vm config set default_user '$USER'
-vm config add remote internal https://mirror.example.com/vm/catalogue.tar.gz --path images
+vm config add remote internal https://mirror.example.com/vm/catalogue.toml --path images
 vm config add local team /srv/vm/catalogue
 vm config remove remote internal
 ```
@@ -227,11 +227,11 @@ then `store`, the catalogue `vm clone` and `vm import` write to.
 ```toml
 [[remote]]
 name = "project"
-url = "https://codeload.github.com/dcminter/vm-manager/tar.gz/refs/heads/main"
+url = "https://vm-manager.com/catalogue.toml"
 
 [[remote]]
 name = "internal"
-url = "https://mirror.example.com/vm/catalogue.tar.gz"
+url = "https://mirror.example.com/vm/catalogue.toml"
 path = "images"
 
 [[local]]
@@ -240,6 +240,16 @@ path = "/srv/vm/catalogue"
 ```
 
 Without a `[[remote]]` the project's catalogue is the only remote.
+
+A remote's `url` names a pointer file giving the catalogue's version and its
+gzipped tar archive, as a URL or a file name beside the pointer. The archive
+holds one top-level directory; `path` names the directory of entries within it,
+default `catalogue`.
+
+```toml
+version = "0.0.1"
+archive = "catalogue-0.0.1.tar.gz"
+```
 
 ## Output
 
@@ -256,7 +266,8 @@ Ubuntu 24.04 packages to the release.
 `scripts/package <trixie|noble> <version>` builds a package locally.
 
 A `catalogue-<major>.<minor>.<patch>` tag publishes the catalogue at
-`https://vm-manager.com/catalogue-<major>.<minor>.<patch>.tar.gz`.
+`https://vm-manager.com/catalogue-<major>.<minor>.<patch>.tar.gz`, and points
+`https://vm-manager.com/catalogue.toml` at the newest.
 
 ## Licence
 

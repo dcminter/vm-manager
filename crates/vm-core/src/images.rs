@@ -116,7 +116,12 @@ pub fn update(config: &Config, named: Option<&str>) -> Result<reports::Update> {
             let destination =
                 paths::remote_catalogue_directory(&remote.name).ok_or(Error::NoImageStore)?;
             let outcome = crate::update::run(remote, &destination, &agent)
-                .map(|updated| (updated.files, updated.entries))
+                .map(|updated| reports::Installed {
+                    version: updated.version,
+                    archive: updated.archive,
+                    files: updated.files,
+                    entries: updated.entries,
+                })
                 .map_err(|error| error.to_string());
             Ok(reports::Updated {
                 name: remote.name.clone(),

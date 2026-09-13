@@ -1,34 +1,126 @@
 use crate::catalogue::Catalogue;
-use crate::config::Remote;
+use crate::config::{Remote, is_fetchable};
 use crate::error::{Error, Result};
 use crate::tar;
+use serde::Deserialize;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 /// No single catalogue entry has any business being larger than this.
 const MAX_ENTRY_BYTES: u64 = 256 * 1024;
 
+const MAX_POINTER_BYTES: u64 = 64 * 1024;
+
+/// The file a remote's URL names, saying which archive is current.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Pointer {
+    version: String,
+    /// An http or https URL, or a file name beside the pointer.
+    archive: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Updated {
-    pub url: String,
+    pub version: String,
+    pub archive: String,
     pub path: PathBuf,
     pub files: usize,
     pub entries: usize,
 }
 
-/// Downloads the catalogue and installs it.
+/// Reads the pointer, then downloads the archive it names and installs it.
 pub fn run(remote: &Remote, destination: &Path, agent: &ureq::Agent) -> Result<Updated> {
-    let files = fetch(&remote.url, agent)?;
-    install(&files, remote, destination)
+    let pointer = fetch_pointer(&remote.url, agent)?;
+    let archive =
+        archive_url(&remote.url, &pointer.archive).ok_or_else(|| Error::MalformedPointer {
+            url: remote.url.clone(),
+            reason: format!(
+                "archive '{}' is neither an http or https URL nor a file name",
+                pointer.archive
+            ),
+        })?;
+    let files = fetch(&archive, agent)?;
+    install(
+        &files,
+        &pointer.version,
+        &archive,
+        &remote.path,
+        destination,
+    )
+}
+
+fn fetch_pointer(url: &str, agent: &ureq::Agent) -> Result<Pointer> {
+    let response = crate::store::get(agent, url)?;
+    let mut text = String::new();
+    response
+        .into_body()
+        .into_reader()
+        .take(MAX_POINTER_BYTES + 1)
+        .read_to_string(&mut text)
+        .map_err(|source| Error::MalformedPointer {
+            url: url.to_owned(),
+            reason: source.to_string(),
+        })?;
+    parse_pointer(&text).map_err(|reason| Error::MalformedPointer {
+        url: url.to_owned(),
+        reason,
+    })
+}
+
+fn parse_pointer(text: &str) -> std::result::Result<Pointer, String> {
+    if text.len() as u64 > MAX_POINTER_BYTES {
+        return Err(format!("it is larger than {MAX_POINTER_BYTES} bytes"));
+    }
+    let pointer: Pointer = basic_toml::from_str(text).map_err(|source| source.to_string())?;
+    let printable = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+');
+    if pointer.version.is_empty() || !pointer.version.chars().all(printable) {
+        return Err(format!(
+            "version '{}' is not letters, digits, '.', '-', '_' and '+'",
+            pointer.version.escape_default()
+        ));
+    }
+    Ok(pointer)
+}
+
+/// The archive's URL: as given when absolute, otherwise beside the pointer.
+fn archive_url(pointer_url: &str, archive: &str) -> Option<String> {
+    if archive.contains("://") {
+        return is_fetchable(archive).then(|| archive.to_owned());
+    }
+    let plain_name = !archive.is_empty()
+        && archive != "."
+        && archive != ".."
+        && !archive.contains(['/', '\\', ':', '?', '#'])
+        && !archive.chars().any(char::is_whitespace);
+    if !plain_name {
+        return None;
+    }
+    let without_query = pointer_url
+        .find(['?', '#'])
+        .map_or(pointer_url, |end| &pointer_url[..end]);
+    let authority = without_query.find("://")? + 3;
+    let base = without_query[authority..].rfind('/').map_or_else(
+        || format!("{without_query}/"),
+        |slash| without_query[..=authority + slash].to_owned(),
+    );
+    Some(format!("{base}{archive}"))
 }
 
 /// Stages and parses the entries before replacing the live catalogue.
-pub fn install(files: &[tar::File], remote: &Remote, destination: &Path) -> Result<Updated> {
-    let wanted = select(files, &remote.path);
+pub fn install(
+    files: &[tar::File],
+    version: &str,
+    archive: &str,
+    catalogue_path: &str,
+    destination: &Path,
+) -> Result<Updated> {
+    let wanted = select(files, catalogue_path);
     if wanted.is_empty() {
         return Err(Error::EmptyCatalogue {
-            url: remote.url.clone(),
-            path: remote.path.clone(),
+            url: archive.to_owned(),
+            path: catalogue_path.to_owned(),
         });
     }
     let staging = staging_path(destination);
@@ -45,7 +137,8 @@ pub fn install(files: &[tar::File], remote: &Remote, destination: &Path) -> Resu
     };
     swap(&staging, destination)?;
     Ok(Updated {
-        url: remote.url.clone(),
+        version: version.to_owned(),
+        archive: archive.to_owned(),
         path: destination.to_owned(),
         files: wanted.len(),
         entries,
@@ -53,17 +146,7 @@ pub fn install(files: &[tar::File], remote: &Remote, destination: &Path) -> Resu
 }
 
 fn fetch(url: &str, agent: &ureq::Agent) -> Result<Vec<tar::File>> {
-    let response = agent.get(url).call().map_err(|source| Error::Download {
-        url: url.to_owned(),
-        source: Box::new(source),
-    })?;
-    let status = response.status().as_u16();
-    if !(200..300).contains(&status) {
-        return Err(Error::HttpStatus {
-            url: url.to_owned(),
-            status,
-        });
-    }
+    let response = crate::store::get(agent, url)?;
     let mut body = flate2::read::GzDecoder::new(response.into_body().into_reader());
     let read = tar::read(&mut body, MAX_ENTRY_BYTES).map_err(|source| Error::Store {
         path: PathBuf::from(url),
@@ -194,8 +277,14 @@ mod tests {
         }
     }
 
-    fn remote() -> Remote {
-        crate::config::Config::default().remotes().remove(0)
+    fn install_here(files: &[tar::File], destination: &Path) -> Result<Updated> {
+        install(
+            files,
+            "1.0.0",
+            "https://example.test/c.tar.gz",
+            "catalogue",
+            destination,
+        )
     }
 
     impl Drop for Scratch {
@@ -239,7 +328,7 @@ digest = "sha512:{}"
             ("debian/trixie.toml", entry_toml("debian", "trixie")),
             ("debian/forky.toml", entry_toml("debian", "forky")),
         ]);
-        let updated = install(&files, &remote(), &scratch.catalogue()).unwrap();
+        let updated = install_here(&files, &scratch.catalogue()).unwrap();
         assert_eq!(updated.files, 2);
         assert_eq!(updated.entries, 2);
         assert!(scratch.catalogue().join("debian/trixie.toml").is_file());
@@ -249,9 +338,9 @@ digest = "sha512:{}"
     fn an_install_replaces_what_was_there_before() {
         let scratch = Scratch::new("replaces");
         let first = archive(&[("debian/trixie.toml", entry_toml("debian", "trixie"))]);
-        install(&first, &remote(), &scratch.catalogue()).unwrap();
+        install_here(&first, &scratch.catalogue()).unwrap();
         let second = archive(&[("ubuntu/noble.toml", entry_toml("ubuntu", "noble"))]);
-        install(&second, &remote(), &scratch.catalogue()).unwrap();
+        install_here(&second, &scratch.catalogue()).unwrap();
         assert!(scratch.catalogue().join("ubuntu/noble.toml").is_file());
         assert!(!scratch.catalogue().join("debian/trixie.toml").exists());
     }
@@ -260,9 +349,9 @@ digest = "sha512:{}"
     fn a_catalogue_that_does_not_parse_leaves_the_old_one_in_place() {
         let scratch = Scratch::new("rollback");
         let good = archive(&[("debian/trixie.toml", entry_toml("debian", "trixie"))]);
-        install(&good, &remote(), &scratch.catalogue()).unwrap();
+        install_here(&good, &scratch.catalogue()).unwrap();
         let bad = archive(&[("debian/broken.toml", "this is not toml".to_owned())]);
-        let error = install(&bad, &remote(), &scratch.catalogue()).unwrap_err();
+        let error = install_here(&bad, &scratch.catalogue()).unwrap_err();
         assert!(matches!(error, Error::CatalogueParse { .. }), "{error}");
         assert!(scratch.catalogue().join("debian/trixie.toml").is_file());
         let loaded = Catalogue::load(&scratch.catalogue()).unwrap();
@@ -273,7 +362,7 @@ digest = "sha512:{}"
     fn a_failed_install_leaves_no_staging_directory_behind() {
         let scratch = Scratch::new("staging");
         let bad = archive(&[("debian/broken.toml", "not toml".to_owned())]);
-        assert!(install(&bad, &remote(), &scratch.catalogue()).is_err());
+        assert!(install_here(&bad, &scratch.catalogue()).is_err());
         assert!(!staging_path(&scratch.catalogue()).exists());
     }
 
@@ -284,7 +373,7 @@ digest = "sha512:{}"
             path: "repo-main/README.md".to_owned(),
             contents: b"nothing here".to_vec(),
         }];
-        let error = install(&files, &remote(), &scratch.catalogue()).unwrap_err();
+        let error = install_here(&files, &scratch.catalogue()).unwrap_err();
         assert!(matches!(error, Error::EmptyCatalogue { .. }), "{error}");
         assert!(!scratch.catalogue().exists());
     }
@@ -293,8 +382,8 @@ digest = "sha512:{}"
     fn a_successful_install_leaves_no_retired_copy_behind() {
         let scratch = Scratch::new("retired");
         let files = archive(&[("debian/trixie.toml", entry_toml("debian", "trixie"))]);
-        install(&files, &remote(), &scratch.catalogue()).unwrap();
-        install(&files, &remote(), &scratch.catalogue()).unwrap();
+        install_here(&files, &scratch.catalogue()).unwrap();
+        install_here(&files, &scratch.catalogue()).unwrap();
         assert!(!retired_path(&scratch.catalogue()).exists());
     }
 
@@ -302,7 +391,7 @@ digest = "sha512:{}"
     fn nested_directories_in_the_archive_are_recreated() {
         let scratch = Scratch::new("nested");
         let files = archive(&[("a/b/c/deep.toml", entry_toml("deep", "one"))]);
-        install(&files, &remote(), &scratch.catalogue()).unwrap();
+        install_here(&files, &scratch.catalogue()).unwrap();
         assert!(scratch.catalogue().join("a/b/c/deep.toml").is_file());
     }
 
@@ -364,6 +453,206 @@ digest = "sha512:{}"
     fn an_archive_without_the_directory_selects_nothing() {
         let files = vec![file("repo-main/src/main.rs", "x")];
         assert!(select(&files, "catalogue").is_empty());
+    }
+
+    #[test]
+    fn a_pointer_names_a_version_and_an_archive() {
+        let pointer =
+            parse_pointer("version = \"0.0.1\"\narchive = \"catalogue-0.0.1.tar.gz\"\n").unwrap();
+        assert_eq!(pointer.version, "0.0.1");
+        assert_eq!(pointer.archive, "catalogue-0.0.1.tar.gz");
+    }
+
+    #[test]
+    fn a_pointer_missing_a_field_is_refused() {
+        assert!(parse_pointer("version = \"0.0.1\"\n").is_err());
+        assert!(parse_pointer("archive = \"c.tar.gz\"\n").is_err());
+        assert!(parse_pointer("").is_err());
+    }
+
+    #[test]
+    fn a_pointer_with_an_unknown_field_is_refused() {
+        let text = "version = \"1\"\narchive = \"c.tar.gz\"\nsha = \"x\"\n";
+        assert!(parse_pointer(text).is_err());
+    }
+
+    #[test]
+    fn a_pointer_that_is_not_toml_is_refused() {
+        assert!(parse_pointer("<html>moved</html>").is_err());
+    }
+
+    #[test]
+    fn a_version_with_odd_characters_is_refused() {
+        for version in ["", "1 0", "1.0\n", "1;rm", "\u{1b}[31m"] {
+            let text = format!("version = {version:?}\narchive = \"c.tar.gz\"\n");
+            assert!(parse_pointer(&text).is_err(), "{version:?}");
+        }
+        for version in ["1.2.3", "2026-09-13", "1.0+local_2"] {
+            let text = format!("version = {version:?}\narchive = \"c.tar.gz\"\n");
+            assert!(parse_pointer(&text).is_ok(), "{version:?}");
+        }
+    }
+
+    #[test]
+    fn an_oversized_pointer_is_refused() {
+        let text = format!(
+            "version = \"1\"\narchive = \"c.tar.gz\"\n#{}\n",
+            "x".repeat(usize::try_from(MAX_POINTER_BYTES).unwrap())
+        );
+        assert!(parse_pointer(&text).unwrap_err().contains("larger"));
+    }
+
+    #[test]
+    fn a_file_name_is_found_beside_the_pointer() {
+        let cases = [
+            (
+                "https://vm-manager.com/catalogue.toml",
+                "https://vm-manager.com/catalogue-0.0.1.tar.gz",
+            ),
+            (
+                "https://mirror.test/vm/current.toml",
+                "https://mirror.test/vm/catalogue-0.0.1.tar.gz",
+            ),
+            (
+                "https://mirror.test/vm/",
+                "https://mirror.test/vm/catalogue-0.0.1.tar.gz",
+            ),
+            (
+                "https://mirror.test",
+                "https://mirror.test/catalogue-0.0.1.tar.gz",
+            ),
+            (
+                "https://mirror.test/vm/current.toml?token=a/b#part",
+                "https://mirror.test/vm/catalogue-0.0.1.tar.gz",
+            ),
+        ];
+        for (pointer, expected) in cases {
+            assert_eq!(
+                archive_url(pointer, "catalogue-0.0.1.tar.gz").as_deref(),
+                Some(expected),
+                "{pointer}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_absolute_archive_url_is_used_as_given() {
+        assert_eq!(
+            archive_url(
+                "https://vm-manager.com/catalogue.toml",
+                "http://elsewhere.test/a/c.tar.gz"
+            )
+            .as_deref(),
+            Some("http://elsewhere.test/a/c.tar.gz")
+        );
+    }
+
+    #[test]
+    fn an_archive_that_is_neither_a_url_nor_a_file_name_is_refused() {
+        for archive in [
+            "",
+            ".",
+            "..",
+            "../c.tar.gz",
+            "sub/c.tar.gz",
+            "/c.tar.gz",
+            "c.tar.gz?x",
+            "c .tar.gz",
+            "ftp://mirror.test/c.tar.gz",
+            "file:///etc/passwd",
+            "https://",
+        ] {
+            assert_eq!(
+                archive_url("https://vm-manager.com/catalogue.toml", archive),
+                None,
+                "{archive}"
+            );
+        }
+    }
+
+    fn gzipped_catalogue(scratch: &Scratch) -> Vec<u8> {
+        let root = scratch.0.join("source");
+        let entry = root.join("catalogue-0.0.1/catalogue/debian");
+        fs::create_dir_all(&entry).unwrap();
+        fs::write(entry.join("trixie.toml"), entry_toml("debian", "trixie")).unwrap();
+        let packed = std::process::Command::new("tar")
+            .arg("-C")
+            .arg(&root)
+            .args(["-czf", "-", "catalogue-0.0.1"])
+            .output()
+            .unwrap();
+        assert!(packed.status.success());
+        packed.stdout
+    }
+
+    fn remote_at(url: String) -> Remote {
+        Remote {
+            name: "project".to_owned(),
+            url,
+            path: "catalogue".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_run_follows_the_pointer_to_the_archive() {
+        let scratch = Scratch::new("run");
+        let base = crate::testing::serve_paths(vec![
+            (
+                "/catalogue.toml",
+                b"version = \"0.0.1\"\narchive = \"catalogue-0.0.1.tar.gz\"\n".to_vec(),
+            ),
+            ("/catalogue-0.0.1.tar.gz", gzipped_catalogue(&scratch)),
+        ]);
+        let remote = remote_at(format!("{base}/catalogue.toml"));
+        let updated = run(&remote, &scratch.catalogue(), &crate::store::http_agent()).unwrap();
+        assert_eq!(updated.version, "0.0.1");
+        assert_eq!(updated.archive, format!("{base}/catalogue-0.0.1.tar.gz"));
+        assert_eq!((updated.files, updated.entries), (1, 1));
+        assert!(scratch.catalogue().join("debian/trixie.toml").is_file());
+    }
+
+    #[test]
+    fn a_pointer_to_a_missing_archive_leaves_the_old_catalogue_in_place() {
+        let scratch = Scratch::new("missing");
+        let good = archive(&[("debian/trixie.toml", entry_toml("debian", "trixie"))]);
+        install_here(&good, &scratch.catalogue()).unwrap();
+        let base = crate::testing::serve_paths(vec![(
+            "/catalogue.toml",
+            b"version = \"0.0.2\"\narchive = \"catalogue-0.0.2.tar.gz\"\n".to_vec(),
+        )]);
+        let remote = remote_at(format!("{base}/catalogue.toml"));
+        let error = run(&remote, &scratch.catalogue(), &crate::store::http_agent()).unwrap_err();
+        assert!(
+            matches!(&error, Error::Download { url, .. } | Error::HttpStatus { url, .. } if url.ends_with("0.0.2.tar.gz")),
+            "{error}"
+        );
+        assert!(scratch.catalogue().join("debian/trixie.toml").is_file());
+    }
+
+    #[test]
+    fn a_url_that_serves_an_archive_rather_than_a_pointer_is_refused() {
+        let scratch = Scratch::new("not-pointer");
+        let base =
+            crate::testing::serve_paths(vec![("/catalogue.tar.gz", gzipped_catalogue(&scratch))]);
+        let remote = remote_at(format!("{base}/catalogue.tar.gz"));
+        let error = run(&remote, &scratch.catalogue(), &crate::store::http_agent()).unwrap_err();
+        assert!(matches!(error, Error::MalformedPointer { .. }), "{error}");
+        assert!(!scratch.catalogue().exists());
+    }
+
+    #[test]
+    fn a_pointer_naming_an_unusable_archive_is_refused() {
+        let scratch = Scratch::new("unusable");
+        let base = crate::testing::serve_paths(vec![(
+            "/catalogue.toml",
+            b"version = \"1\"\narchive = \"../escape.tar.gz\"\n".to_vec(),
+        )]);
+        let remote = remote_at(format!("{base}/catalogue.toml"));
+        let error = run(&remote, &scratch.catalogue(), &crate::store::http_agent()).unwrap_err();
+        assert!(
+            matches!(&error, Error::MalformedPointer { reason, .. } if reason.contains("escape")),
+            "{error}"
+        );
     }
 
     #[test]
