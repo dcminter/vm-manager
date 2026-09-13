@@ -12,9 +12,9 @@ use std::str::FromStr;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Login {
-    /// Seedable: volumes, generated keys and hostname all work.
+    /// Seedable with keys, accounts and shares.
     CloudInit,
-    /// Boots, but nothing can be injected. Console only.
+    /// Boots with console access only.
     None,
 }
 
@@ -40,11 +40,11 @@ struct RawEntry {
 struct RawImage {
     arch: String,
     format: String,
-    /// Absent for an image made here: there is nowhere to fetch it from.
+    /// Absent for a local image.
     url: Option<String>,
     digest: String,
     size: Option<u64>,
-    /// How the published file is wrapped. Absent means it is not.
+    /// Absent when uncompressed.
     #[serde(default)]
     compression: Compression,
     #[serde(default)]
@@ -60,14 +60,11 @@ struct RawImage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Artifact {
     pub arch: String,
-    /// The format of the image itself, once any wrapper is off: what
-    /// `qemu-img` is told the backing file is.
+    /// The uncompressed image's format, as given to `qemu-img`.
     pub format: String,
     /// Where to fetch it, or nothing if it was made here by `vm clone`.
     pub url: Option<String>,
-    /// The digest of the file as published, which for a compressed artifact
-    /// is not the digest of what ends up in the store. It is what the
-    /// publisher signs and so it is what can be checked.
+    /// The digest of the file as published, before decompression.
     pub digest: Digest,
     /// What the expanded image occupies, where the entry says.
     pub size: Option<u64>,
@@ -121,8 +118,7 @@ fn key(name: &str, tag: &str) -> String {
 }
 
 impl Catalogue {
-    /// Reads every `.toml` file below `root`. A missing directory is an empty
-    /// catalogue, not an error: nothing has been fetched yet.
+    /// Reads every `.toml` file below `root`; a missing directory is empty.
     pub fn load(root: &Path) -> Result<Self> {
         let mut catalogue = Self::default();
         if !root.exists() {
@@ -134,9 +130,7 @@ impl Catalogue {
         Ok(catalogue)
     }
 
-    /// Reads several directories in order, later ones winning. Local images
-    /// are read last, so cloning over a name shadows the catalogue's own
-    /// entry rather than colliding with it.
+    /// Reads directories in order, later entries shadowing earlier ones.
     pub fn load_layered(roots: &[PathBuf]) -> Result<Self> {
         let mut catalogue = Self::default();
         for root in roots {
@@ -148,9 +142,7 @@ impl Catalogue {
         Ok(catalogue)
     }
 
-    /// Puts an entry in, displacing anything already under its names. Used by
-    /// a later layer over an earlier one; within one directory a collision is
-    /// still an error, because it is a mistake rather than an intention.
+    /// Inserts an entry, displacing any with the same names.
     fn replace(&mut self, entry: &Entry) {
         let mut keys = vec![key(&entry.name, &entry.tag)];
         keys.extend(entry.aliases.iter().map(|alias| key(&entry.name, alias)));
@@ -182,8 +174,7 @@ impl Catalogue {
         Ok(())
     }
 
-    /// Resolves a reference to the artifact for `arch`, failing with the
-    /// reason rather than a bare absence.
+    /// Resolves a reference to the artifact for `arch`.
     pub fn resolve(&self, reference: &Reference, arch: &str) -> Result<(&Entry, &Artifact)> {
         let entry = self
             .entries
@@ -343,8 +334,6 @@ mod tests {
         }
     }
 
-    /// An entry that says nothing about compression describes a file that can
-    /// be used as it arrives, which is most of them.
     #[test]
     fn an_entry_that_is_silent_describes_an_uncompressed_image() {
         let scratch = Scratch::new("plain");

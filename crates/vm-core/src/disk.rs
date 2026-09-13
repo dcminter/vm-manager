@@ -1,10 +1,4 @@
-//! What a machine's disk costs, which is two numbers rather than one.
-//!
-//! A qcow2 overlay is created at its full virtual size and fills in as the
-//! guest writes, so what the guest is promised and what the host has given up
-//! diverge from the first boot. The header is read directly: `qemu-img info`
-//! would say the same thing at the price of a process per instance, and a
-//! listing runs this once for every machine it shows.
+//! A disk's allocated size and its virtual size.
 
 use std::path::Path;
 
@@ -25,11 +19,7 @@ pub fn usage(overlay: &Path) -> Usage {
     }
 }
 
-/// What the file occupies, not what it claims to span.
-///
-/// A sparse file's length counts holes that cost nothing, and an overlay over
-/// a 40G image is mostly hole, so the blocks are the honest figure. They are
-/// counted in 512-byte units whatever the filesystem's own block size is.
+/// Bytes allocated to the file, excluding holes.
 fn allocated(overlay: &Path) -> Option<u64> {
     use std::os::unix::fs::MetadataExt as _;
     let data = std::fs::metadata(overlay).ok()?;
@@ -45,10 +35,7 @@ fn header(overlay: &Path) -> Option<Vec<u8>> {
     Some(bytes.to_vec())
 }
 
-/// The virtual size a qcow2 header records, at offset 24 and big-endian.
-///
-/// The magic is checked because anything else read at that offset is a number
-/// with no meaning, and a wrong size is worse than none.
+/// The virtual size from a qcow2 header, or `None` without qcow2 magic.
 fn capacity(header: &[u8]) -> Option<u64> {
     if header.len() < 32 || header.get(..4) != Some(b"QFI\xfb".as_slice()) {
         return None;
@@ -97,8 +84,6 @@ mod tests {
         );
     }
 
-    /// Read as a number, the same offset in a raw disk is whatever the guest
-    /// happened to write there.
     #[test]
     fn something_that_is_not_a_qcow2_has_no_size_to_read() {
         let mut header = qcow2(4096);
@@ -118,8 +103,6 @@ mod tests {
         assert_eq!(usage(&scratch.0.join("nothing.qcow2")), Usage::default());
     }
 
-    /// The two figures are independent: a file that exists occupies something
-    /// even when nothing can be made of its contents.
     #[test]
     fn a_file_that_is_not_a_disk_still_occupies_the_host() {
         let scratch = Scratch::new("notadisk");
@@ -133,8 +116,6 @@ mod tests {
         );
     }
 
-    /// A real overlay, if `qemu-img` is here to make one: it spans gigabytes
-    /// and occupies kilobytes, which is the whole reason for two figures.
     #[test]
     fn an_overlay_costs_far_less_than_it_spans() {
         let scratch = Scratch::new("overlay");

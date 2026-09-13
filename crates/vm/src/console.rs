@@ -83,7 +83,7 @@ pub fn attach(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Standard input read straight from its descriptor, because a buffered reader hides keystrokes from `poll`.
+/// Unbuffered standard input, so `poll` sees every keystroke.
 struct Keyboard;
 
 impl Read for Keyboard {
@@ -92,7 +92,7 @@ impl Read for Keyboard {
     }
 }
 
-/// Whether a keystroke is waiting, giving up after a glance so the caller can check on the guest.
+/// Whether a keystroke is waiting, with a short timeout.
 fn wait_for_keys() -> std::io::Result<bool> {
     use rustix::event::{PollFd, PollFlags, Timespec, poll};
     let stdin = std::io::stdin();
@@ -108,7 +108,7 @@ fn wait_for_keys() -> std::io::Result<bool> {
     }
 }
 
-/// Copies input to the guest until the detach key, the end of input, or the guest going away.
+/// Copies input to the guest until the detach key, end of input, or the guest stops.
 fn pump(
     input: &mut dyn Read,
     ready: &mut dyn FnMut() -> std::io::Result<bool>,
@@ -145,7 +145,7 @@ fn pump(
     }
 }
 
-/// Copies what the guest says to the terminal, and marks the console closed when it stops.
+/// Copies guest output to the terminal, marking the console closed at the end.
 fn show(guest: &mut dyn Read, out: &mut dyn Write, closed: &AtomicBool) {
     let mut buffer = [0u8; 4096];
     loop {
@@ -189,7 +189,6 @@ mod tests {
         assert_eq!(received, b"ls -l\r");
     }
 
-    /// Piped input has no detach key; the byte is the guest's like any other.
     #[test]
     fn without_a_detach_key_every_byte_is_sent_until_input_ends() {
         let (mut ours, mut theirs) = UnixStream::pair().unwrap();
@@ -203,7 +202,6 @@ mod tests {
         assert_eq!(received, b"a\x1db");
     }
 
-    /// A machine that stops while nobody is typing must not leave the terminal waiting for a key.
     #[test]
     fn a_closed_guest_ends_the_wait_for_keys() {
         let (mut ours, _theirs) = UnixStream::pair().unwrap();

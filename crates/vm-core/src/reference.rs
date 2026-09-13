@@ -4,8 +4,7 @@ use std::str::FromStr;
 
 pub const DEFAULT_TAG: &str = "latest";
 
-/// A digest as published upstream, algorithm included so the catalogue can
-/// carry whichever sum the image's publisher actually provides.
+/// A digest with its algorithm.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Digest {
     algorithm: Algorithm,
@@ -35,8 +34,7 @@ impl Algorithm {
 }
 
 impl Digest {
-    /// Names bytes that have already been hashed, for an image made here
-    /// rather than fetched from somewhere that published a sum for it.
+    /// A digest of bytes hashed locally.
     pub fn new(algorithm: Algorithm, hex: &str) -> Self {
         Self {
             algorithm,

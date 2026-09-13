@@ -1,10 +1,6 @@
 #!/usr/bin/env bash
 #
-# Walks through cutting a release: checks, version, description, tag, push.
-#
-# Nothing here builds the packages. Pushing the tag starts the workflow that
-# does, on the distributions they are for, rather than on whatever this machine
-# happens to be.
+# Checks, then prompts for a version and description, then tags and pushes.
 
 set -euo pipefail
 
@@ -35,8 +31,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test
 ./scripts/lint-docs
 
-# Nothing that boots a machine runs in the workflow, so this is the last point
-# at which anyone checks that it does.
+# The workflow boots no machines, so that is checked by hand here.
 say "Local checks the workflow cannot do"
 cat <<'NOTICE'
 The workflow runs the unit tests, and nothing that boots a virtual machine.

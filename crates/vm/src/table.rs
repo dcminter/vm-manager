@@ -1,14 +1,10 @@
-/// How wide a cell is on the screen.
-///
-/// A styled cell carries escape sequences that take no space, and counting
-/// them pads the column by the length of the colour rather than the text.
+/// Displayed width of a cell, ignoring escape sequences.
 fn width(cell: &str) -> usize {
     let mut count = 0;
     let mut escaped = false;
     for held in cell.chars() {
         if escaped {
-            // A CSI sequence runs until a letter; nothing here writes any
-            // other kind.
+            // A CSI sequence ends at a letter.
             escaped = !held.is_ascii_alphabetic();
         } else if held == '\u{1b}' {
             escaped = true;
@@ -92,8 +88,6 @@ mod tests {
         assert_eq!(render(&["NAME"], &[]), vec!["NAME".to_owned()]);
     }
 
-    /// A coloured cell is as wide as the text a reader sees, not as wide as
-    /// the escape sequences that colour it.
     #[test]
     fn styling_takes_up_no_width() {
         assert_eq!(width("\u{1b}[36mq1\u{1b}[0m"), 2);
@@ -101,8 +95,7 @@ mod tests {
         let coloured = "\u{1b}[36mq1\u{1b}[0m".to_owned();
         let output = render(&["NAME", "IMAGE"], &[vec![coloured, "debian".to_owned()]]);
         assert_eq!(output[0], "NAME  IMAGE");
-        // Four spaces: the column is as wide as its heading, and the cell it
-        // holds is two characters of text however many bytes it took.
+        // The column is as wide as its heading.
         assert!(
             output[1].ends_with("q1\u{1b}[0m    debian"),
             "{:?}",

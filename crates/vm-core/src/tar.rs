@@ -6,8 +6,7 @@ const SIZE: std::ops::Range<usize> = 124..136;
 const TYPEFLAG: usize = 156;
 const PREFIX: std::ops::Range<usize> = 345..500;
 
-/// A regular file lifted out of an archive. Nothing else is represented,
-/// because nothing else is ever extracted.
+/// A regular file from an archive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct File {
     pub path: String,
@@ -38,8 +37,7 @@ impl std::fmt::Display for Malformed {
     }
 }
 
-/// Reads the regular files from a tar stream, ignoring directories, symlinks,
-/// devices and extension headers. `limit` caps any single file.
+/// Reads the regular files from a tar stream, each capped at `limit` bytes.
 pub fn read(source: &mut impl Read, limit: u64) -> io::Result<Result<Vec<File>, Malformed>> {
     let mut files = Vec::new();
     let mut header = [0u8; BLOCK];
@@ -112,8 +110,7 @@ fn skip(source: &mut impl Read, mut count: u64) -> io::Result<()> {
     Ok(())
 }
 
-/// Both the POSIX and the older GNU magic are accepted; anything else is not a
-/// tar stream we should be reading.
+/// Whether the block carries POSIX or GNU tar magic.
 fn looks_like_a_header(header: &[u8; BLOCK]) -> bool {
     let magic = &header[257..263];
     magic == b"ustar\0" || magic == b"ustar " || magic == b"\0\0\0\0\0\0"

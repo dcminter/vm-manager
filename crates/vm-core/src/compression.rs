@@ -1,20 +1,9 @@
-//! Compression of published images.
-//!
-//! Several projects publish their disk images compressed, and the saving is
-//! large enough that they are unlikely to stop: a FreeBSD image is a third of
-//! its size in xz, and 9front's is a tenth. An image has to be expanded before
-//! it can be a backing file, so the expansion happens on the way in, once,
-//! rather than on every boot.
-//!
-//! The work is handed to the tools that already do it. They are present on any
-//! Debian system worth the name, they stream, and they are faster than
-//! anything this tree would carry of its own.
+//! Decompression of published images with the system's own tools.
 
 use crate::error::Error;
 use serde::Deserialize;
 
-/// How an artifact is published, as distinct from what it holds. The format
-/// field describes the image inside; this describes the wrapper around it.
+/// How a published file is compressed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Compression {
@@ -54,10 +43,7 @@ impl Compression {
         }
     }
 
-    /// A decompressor reading standard input and writing standard output.
-    ///
-    /// `-c` is given alongside `-d` because gzip and xz otherwise look for a
-    /// file to replace and refuse a stream.
+    /// A decompressor from standard input to standard output.
     pub fn command(self) -> Option<std::process::Command> {
         let (binary, _) = self.tool()?;
         let mut command = std::process::Command::new(binary);
@@ -65,8 +51,7 @@ impl Compression {
         Some(command)
     }
 
-    /// Says which package to install, rather than reporting that a program
-    /// nobody asked for by name was not found.
+    /// An error naming the package to install.
     pub fn missing(self, source: &std::io::Error) -> Error {
         match (self.tool(), source.kind()) {
             (Some((binary, package)), std::io::ErrorKind::NotFound) => Error::MissingTool {
@@ -112,8 +97,6 @@ mod tests {
         assert_eq!(read(r#"compression = "none""#), Compression::None);
     }
 
-    /// The suffixes people actually type are worth accepting, because the
-    /// alternative is a catalogue entry that fails to load over a spelling.
     #[test]
     fn the_common_abbreviations_are_read_too() {
         assert_eq!(read(r#"compression = "gz""#), Compression::Gzip);
@@ -135,8 +118,6 @@ mod tests {
         }
     }
 
-    /// The three of them are Debian priority standard or better, so a run that
-    /// cannot find one has a broken host rather than a missing catalogue.
     #[test]
     fn the_decompressors_are_present_and_expand_what_they_made() {
         for (held, packer) in [
@@ -163,8 +144,6 @@ mod tests {
         assert!(error.to_string().contains("xz-utils"), "{error}");
     }
 
-    /// A failure that is not absence is a failure to start, and saying a
-    /// package is missing would send the reader after the wrong thing.
     #[test]
     fn another_failure_is_reported_as_itself() {
         let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);

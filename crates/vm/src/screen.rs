@@ -7,7 +7,7 @@ use vm_core::instance::{Directory, Instance, Instances};
 use vm_core::qmp;
 use vm_core::value::Value;
 
-/// The viewer launched for a screen, chosen because it connects to a Unix socket path directly.
+/// The VNC viewer, which connects to a Unix socket directly.
 const VIEWER: &str = "xtigervncviewer";
 
 fn running(name: &str) -> Result<(Directory, Instance)> {
@@ -105,7 +105,7 @@ pub fn capture(name: &str, file: Option<&Path>) -> Result<reports::Screenshot> {
     })
 }
 
-/// An absolute path, because the hypervisor that writes the file has a working directory of its own.
+/// An absolute path, since the hypervisor has its own working directory.
 fn destination(name: &str, file: Option<&Path>) -> Result<PathBuf> {
     let wanted = file.map_or_else(|| PathBuf::from(format!("{name}.png")), Path::to_path_buf);
     if wanted.is_absolute() {
@@ -142,7 +142,6 @@ mod tests {
         assert!(path.ends_with("pd.png"), "{}", path.display());
     }
 
-    /// The hypervisor's working directory is not ours, so a relative name must not reach it.
     #[test]
     fn a_relative_file_is_made_absolute_against_this_directory() {
         let path = destination("pd", Some(Path::new("shots/boot.png"))).unwrap();

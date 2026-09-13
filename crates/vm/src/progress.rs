@@ -33,9 +33,7 @@ impl Bar {
         self.draw(&describe(progress));
     }
 
-    /// Names what the bar is measuring, for work that comes in passes. The
-    /// figure starts again with the name, and an unchanged one changes
-    /// nothing, so this can be said on every report.
+    /// Labels the current pass, restarting the figure when the label changes.
     pub fn naming(&mut self, label: &str) {
         if self.label != label {
             label.clone_into(&mut self.label);
@@ -43,8 +41,7 @@ impl Bar {
         }
     }
 
-    /// Work measured only in proportion, as a conversion is: `qemu-img` knows
-    /// how far through it is and not how many bytes that will come to.
+    /// Reports progress known only as a percentage.
     pub fn portion(&mut self, percent: u8) {
         if !self.interactive || self.last_percent == Some(percent) {
             return;
@@ -134,8 +131,6 @@ mod tests {
         );
     }
 
-    /// Work in passes reuses one bar, and the figure has to start again with
-    /// each pass or the second one is drawn only where it exceeds the first.
     #[test]
     fn naming_a_new_pass_starts_the_figure_again() {
         let mut bar = Bar::new("first", false);
@@ -154,8 +149,6 @@ mod tests {
         assert_eq!(blocks(50).matches('#').count(), WIDTH / 2);
     }
 
-    /// Every drawing of it overwrites the last, so they have to be the same
-    /// width or the tail of a longer one is left behind.
     #[test]
     fn every_bar_is_the_same_width() {
         for percent in 0..=100 {

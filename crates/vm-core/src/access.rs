@@ -1,15 +1,9 @@
-//! Reaching a guest, by wrapping `ssh` and `scp` rather than replacing them.
-//!
-//! An in-process SSH client would quietly lose the user's `~/.ssh/config`,
-//! their agent, their jump hosts and their `ProxyCommand`. What is built here
-//! is the argument list, which is the part worth testing; running it is the
-//! caller's business.
+//! Arguments for the system `ssh` and `scp` to reach a guest.
 
 use crate::error::{Error, Result};
 use crate::instance::{Directory, Instance};
 
-/// Where a file is, for `vm cp`. A path with no instance in front of it is on
-/// this machine.
+/// A `vm cp` location, on a guest or on the host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Location {
     Host(String),
@@ -17,11 +11,7 @@ pub enum Location {
 }
 
 impl Location {
-    /// Reads `name:path` as a guest location and anything else as a host one.
-    ///
-    /// A Windows-style `C:\` is not a concern, but a relative path holding a
-    /// colon is, so only a leading segment that could be an instance name is
-    /// read as one.
+    /// Reads `name:path` as a guest location when `name` is a valid instance name.
     pub fn parse(text: &str) -> Self {
         match text.split_once(':') {
             Some((name, path)) if is_name(name) => Self::Guest {
@@ -56,11 +46,7 @@ fn is_name(text: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
-/// The settings both commands share, and the ones an SSH configuration entry holds.
-///
-/// The instance keeps its own `known_hosts`, so rebuilding a machine never
-/// provokes a warning about the user's, and `IdentitiesOnly` stops an agent
-/// holding many keys from offering all of them and being refused for it.
+/// SSH settings shared by `ssh`, `scp` and config entries.
 pub fn settings(
     instance: &Instance,
     directory: &Directory,
@@ -96,8 +82,7 @@ pub fn ssh(instance: &Instance, directory: &Directory, command: &[String]) -> Re
     Ok(arguments)
 }
 
-/// The arguments for `scp`. Exactly one side names the guest; copying between
-/// two guests would need each to reach the other, which neither can.
+/// The arguments for `scp`, with exactly one side on the guest.
 pub fn scp(
     instance: &Instance,
     directory: &Directory,
@@ -211,8 +196,6 @@ mod tests {
         assert!(arguments.iter().any(|held| held == "IdentitiesOnly=yes"));
     }
 
-    /// A rebuilt machine presents a new host key on the same port, which
-    /// against the user's own file is a warning they have to clear by hand.
     #[test]
     fn the_instance_keeps_its_own_host_keys() {
         let scratch = Scratch::new("hosts");
@@ -277,8 +260,6 @@ mod tests {
         assert_eq!(error.kind(), "instance-stopped");
     }
 
-    /// An image with no cloud-init took no key, so there is nothing to offer
-    /// and no account to offer it to. Saying so beats a password prompt.
     #[test]
     fn an_unseeded_instance_has_no_way_in() {
         let scratch = Scratch::new("unseeded");
@@ -320,8 +301,6 @@ mod tests {
         }
     }
 
-    /// A colon in a path is not an instance name, and reading it as one would
-    /// send a local copy to a machine that does not exist.
     #[test]
     fn a_path_holding_a_colon_is_not_an_instance() {
         for text in ["/a/b:c", "a b:c", "-x:y", ":/etc/hostname"] {

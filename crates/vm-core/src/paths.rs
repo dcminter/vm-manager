@@ -2,14 +2,12 @@ use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-/// Overrides the catalogue location; set by tests and by anyone pointing the
-/// tool at a catalogue of their own.
+/// Overrides the catalogue location.
 pub const CATALOGUE_ENV: &str = "VM_CATALOGUE";
 
 const PACKAGED_CATALOGUE: &str = "/usr/share/vm/catalogue";
 
-/// Environment lookup, abstracted so paths are testable without mutating the
-/// process environment, which is shared and unsafe to change.
+/// Environment lookup, so paths are testable without changing the process environment.
 pub trait Environment {
     fn var(&self, name: &str) -> Option<OsString>;
 }
@@ -50,13 +48,7 @@ pub fn images_directory_in(environment: &impl Environment) -> Option<PathBuf> {
     data_directory_in(environment).map(|path| path.join("images"))
 }
 
-/// Where monitor sockets live.
-///
-/// Deliberately not under the instance directory: a Unix socket path is
-/// bounded at 107 bytes by the kernel, and a state directory under a long home
-/// plus a long instance name crosses that. The runtime directory is short by
-/// convention and the socket names are short by construction, so the bound is
-/// met rather than hoped for.
+/// Where sockets live, short enough for the kernel's socket path limit.
 pub fn runtime_directory_in(environment: &impl Environment) -> PathBuf {
     environment
         .var("XDG_RUNTIME_DIR")
@@ -72,17 +64,13 @@ pub fn runtime_directory() -> PathBuf {
     runtime_directory_in(&SystemEnvironment)
 }
 
-/// Taken from the filesystem rather than from a C library, so that the tree
-/// stays free of unsafe code. A failure here only costs a shared fallback
-/// directory, which the sticky bit on `/tmp` still keeps private per user.
+/// The user id, read from `/proc` to avoid unsafe code.
 fn user_id() -> u32 {
     use std::os::unix::fs::MetadataExt as _;
     std::fs::metadata("/proc/self").map_or(0, |data| data.uid())
 }
 
-/// Where `vm clone` writes entries for images made here. Kept apart from the
-/// fetched catalogue, which `vm update` replaces wholesale and would otherwise
-/// take local images with it.
+/// Where `vm clone` writes catalogue entries, apart from what `vm update` replaces.
 pub fn local_catalogue_directory_in(environment: &impl Environment) -> Option<PathBuf> {
     data_directory_in(environment).map(|path| path.join("local"))
 }
@@ -126,8 +114,7 @@ pub fn ssh_config() -> Option<PathBuf> {
     ssh_config_in(&SystemEnvironment)
 }
 
-/// The catalogue to read: an explicit override, then the copy `vm update`
-/// fetches, then the copy shipped with the package, then a checkout's own.
+/// The catalogue: the override, the fetched copy, the packaged copy, then a checkout's.
 pub fn catalogue_directory() -> PathBuf {
     catalogue_directory_in(&SystemEnvironment, &|path| path.is_dir())
 }
@@ -307,8 +294,6 @@ mod tests {
         );
     }
 
-    /// The reason this directory exists at all: whatever it resolves to must
-    /// leave room for a socket name inside the kernel's limit.
     #[test]
     fn the_runtime_directory_leaves_room_for_a_socket_name() {
         for held in [

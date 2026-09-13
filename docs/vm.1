@@ -9,200 +9,147 @@ vm \- create and manage QEMU virtual machines from prebuilt OS images
 .SH DESCRIPTION
 .B vm
 runs virtual machines from prebuilt cloud images, with a command set modelled
-on Docker. There is no daemon: each machine is a detached QEMU process, and
-everything it owns lives in one directory under
-.IR $XDG_STATE_HOME/vm/instances .
-.PP
-A machine is given its own writable disk over the stored image, its own SSH key
-pair, and a cloud-init seed that installs that key for an account of its own.
-A host port is forwarded to its SSH port whether or not one was published, so
+on Docker. Each machine is a detached QEMU process with its own writable disk
+over the stored image, its own SSH key pair, and an account created by
+cloud-init. A host port is always forwarded to the guest's SSH port, so
 .B vm ssh
-works on a machine started with no arguments at all.
+works without publishing one.
 .SH COMMANDS
 .TP
 .B images
-List the images in the local catalogue, with the size each takes in the store.
-An image that has not been fetched is listed with the size the catalogue
-records for it, so what a pull will cost is known before it is made. The figure
-is what the image occupies once it is here; an entry published compressed
-transfers less than that and is expanded on the way in.
+List the images in the local catalogue, with the size each occupies once
+fetched.
 .TP
 .BI inspect " IMAGE"
 Show where an image comes from and how its guest is reached.
 .TP
 .BI pull " IMAGE"
-Fetch an image into the local store, verifying it against the catalogue digest.
-An entry published compressed is expanded as it arrives, with
+Fetch an image into the local store and verify it against the catalogue digest.
+A compressed image is expanded with
 .BR xz (1),
 .BR gzip (1)
 or
-.BR zstd (1)
-according to what the entry states; the digest checked is the publisher's own
-and so covers the file as published.
+.BR zstd (1);
+the digest covers the file as published.
 .TP
 .B update
 Refresh the local catalogue from its remote source.
 .TP
 .BI run " IMAGE"
 Create and start a machine. See
-.B OPTIONS FOR RUN
-below.
+.BR "OPTIONS FOR RUN" .
 .TP
 .BI start " NAME"
-Start a machine that exists but is not running. It takes the same
+Start a stopped machine. Takes
 .BR \-\-memory ", " \-\-cpus ", " \-\-publish ", " \-\-volume ", " \-\-user ,
 .BR \-\-disk\-size ", " \-\-firmware ", " \-\-cpu ", " \-\-machine ", " \-\-disk ,
 .B \-\-password
 and
 .B \-\-add\-ssh\-config
-options as
-.BR run ,
-each of which changes the machine for this start and every one after it;
-what is not given is left as it was. A list of forwards or shares replaces the
-one the machine had, and
-.B \-\-no\-publish
-or
-.B \-\-no\-volume
-leaves it with none;
-.B \-\-no\-password
-takes the account's password away, and
+as
+.B run
+does; each change persists, and settings not given are kept. Forwards and shares
+are replaced as a list.
+.BR \-\-no\-publish ", " \-\-no\-volume ", " \-\-no\-password
+and
 .B \-\-no\-ssh\-config
-takes the machine's SSH configuration entry away. A running machine is not changed: these are
-read when a machine starts, so it must be stopped first.
+remove them. A running machine cannot be changed.
 .IP
-A disk prepared for only one firmware does not boot under the other, and a guest
-without a driver for the disk controller does not find its disk. Nothing on the
-disk is changed by trying, and changing the setting back restores the machine.
-.IP
-A new account or password reaches the guest through its seed, which FreeBSD
-reads only on a machine's first boot; there, give them to
+A disk prepared for one firmware does not boot under the other, and a guest
+without a driver for its disk controller does not find its disk; changing the
+setting back restores the machine. FreeBSD reads a new account or password only
+on first boot, so give those to
 .BR run .
 .TP
 .BI ssh " NAME " [\fICOMMAND\fR]
-Open a shell on a machine, or run a command in it. Wraps
+Open a shell on a machine, or run a command in it, through
 .BR ssh (1),
 so
-.IR ~/.ssh/config ,
-the agent and
-.B ProxyCommand
-all still apply. A machine given
-.B \-\-add\-ssh\-config
-is also reached by plain
-.BR ssh (1),
-.BR scp (1)
-or
-.BR rsync (1)
-under its own name.
+.I ~/.ssh/config
+and the agent apply.
 .TP
 .BI cp " FROM TO"
-Copy files to or from a machine. One side is written as
+Copy files to or from a machine, writing one side as
 .IR NAME:PATH .
 .TP
 .B ps
-List machines.
+List running machines;
 .B \-\-all
-includes those that are not running. The status of a running machine is what it
-says of itself through its monitor, so a paused one is listed as paused.
-.IP
-The memory and disk columns give what the machine is costing the host against
-what it was promised: memory a running hypervisor holds now out of what it was
-started with, and the bytes its disk occupies out of the size the guest sees. A
-machine that is not running holds no memory, so only the figure it was given is
-shown. The document formats carry all four figures, in mebibytes, as
-.IR memory ", " memory_used ", " disk " and " disk_used .
-.IP
+includes stopped ones.
 .B \-\-follow
-lists them again every second until interrupted. On a terminal each listing
-replaces the last, so it reads as a display; redirected, or in a document
-format, one listing follows another and a YAML stream separates them with
-.BR \-\-\- .
+refreshes every second. Memory and disk are shown as used out of allotted; the
+document formats give
+.IR memory ", " memory_used ", " disk " and " disk_used
+in mebibytes.
 .TP
 .BI stop " NAME"
-Ask the guest to shut down, waiting
+Ask the guest to shut down, and kill it after
 .B \-\-timeout
-seconds before insisting.
+seconds (default 30).
 .TP
 .BI pause " NAME"
-Stop a machine's processors. The guest is not told and takes no part: its
-memory, its disk and everything it holds open stay as they are, held by a
-hypervisor that is still running. Nothing is written anywhere, so a paused
-machine survives neither a host reboot nor
+Stop a machine's processors. Nothing is saved, so a paused machine does not
+survive a host reboot or
 .BR "vm kill" .
-A paused guest answers nothing, so
 .B vm ssh
 and
 .B vm cp
-say so rather than wait.
+refuse a paused machine.
 .TP
 .BI resume " NAME"
-Let a paused machine carry on from where it stopped.
+Resume a paused machine.
 .TP
 .BI kill " NAME"
 Stop a machine without telling the guest.
 .TP
 .BI console " NAME"
-Attach the terminal to the machine's serial console, as if at a terminal plugged
-into it. Ctrl-] detaches and leaves the machine running. One terminal can be
-attached at a time. Output reaches
-.B vm logs
-whether or not anyone is attached.
+Attach the terminal to the machine's serial console. Ctrl-] detaches. One
+terminal can attach at a time.
 .TP
 .BI screen " NAME"
 Open
 .BR xtigervncviewer (1)
-on the machine's screen, which every machine serves over VNC on a socket in the
-runtime directory. Where there is no display to open it on, or in a document
-format, the socket path is reported instead, with the
+on the machine's screen. Without a display, or in a document format, print the
+VNC socket and an
 .BR ssh (1)
-command that forwards it to another machine.
+command that forwards it.
 .TP
 .BI screenshot " NAME " [\fIFILE\fR]
-Save what the machine's screen shows as a PNG, to
+Save the machine's screen as a PNG, to
 .I FILE
-or to
-.I NAME.png
-in the current directory.
+or
+.IR NAME.png .
 .TP
 .BI logs " NAME"
-Show what the machine has written to its console, across every boot since it
-was created.
+Show the machine's console output from every boot.
 .B \-\-follow
-writes new output as it arrives, until the machine stops, and
-.BI \-n " COUNT"
-shows only the last few lines.
+streams it until the machine stops;
+.BI \-n ", " \-\-lines " COUNT"
+shows only the last lines.
 .TP
 .BI rmi " IMAGE"
-Delete an image from the local store. An image the catalogue provides is listed
-again as unfetched; one made here by
+Delete an image name from the local store. A catalogue image is listed again as
+unfetched; an image made by
 .B vm clone
-has nowhere to be fetched from, so its catalogue entry goes with it. Machines
-are built on their image, so one that is still in use is refused unless
-.B \-\-force
-is given.
-.IP
-What is removed is the name. Images are held by digest, so two clones of an
-unchanged disk are one file under two names, and the file goes only with the
-last name for it; until then the command says which names are keeping it.
+loses its catalogue entry. An image in use by a machine is refused without
+.BR \-\-force .
+Names for identical images share one file, which is deleted with the last name.
 .TP
 .BI clone " NAME IMAGE"
-Save a machine's disk as a new image, named
-.IR repository:tag .
-A running guest is paused for the duration unless
+Save a machine's disk as the image
+.IR repository:tag ,
+flattening it and then verifying it. A running guest is paused meanwhile unless
 .B \-\-force
 is given.
-.IP
-It runs in two passes, both shown: the disk is flattened, and the result is read
-back and verified, because an image is addressed by its digest and the digest
-cannot be known before the bytes exist.
 .TP
 .BI rm " NAME"
 Delete a machine and its disk.
 .B \-\-force
-removes one that is running.
+removes a running one.
 .SH OPTIONS FOR RUN
 .TP
 .BI \-\-name " NAME"
-Name the machine rather than take the one it invents.
+The machine's name. Invented if omitted.
 .TP
 .BI \-m ", " \-\-memory " AMOUNT"
 Memory, in mebibytes unless suffixed with M or G. Default 2G.
@@ -211,56 +158,45 @@ Memory, in mebibytes unless suffixed with M or G. Default 2G.
 Processors. Default 2.
 .TP
 .BI \-p ", " \-\-publish " HOST:GUEST"
-Forward a host port to a guest port. May be repeated.
+Forward a host port to a guest port. Repeatable.
 .TP
 .BI \-v ", " \-\-volume " HOST:GUEST"
-Share a host directory with the guest over virtiofs. May be repeated. A share
-is mounted at every boot from the machine's seed and is not written to the
-guest's
-.IR /etc/fstab ,
-so a machine started without it simply does not have it.
+Share a host directory with the guest over virtiofs, mounted at every boot.
+Repeatable.
 .TP
 .BI \-\-user " NAME"
 The account to create in the guest. Default
 .BR vm .
 .TP
 .BI \-\-disk\-size " SIZE"
-Grow the machine's disk to this size, such as 40G.
+Grow the disk to this size, such as 40G.
 .TP
 .BI \-\-pull " WHEN"
-.BR always ", " missing " (the default) or " never .
+.BR always ", " missing " (default) or " never .
 .TP
 .BI \-\-firmware " FIRMWARE"
 .BR bios " or " uefi ,
-in place of the firmware the image asks for. Most images ask for BIOS.
+overriding the image.
 .TP
 .BI \-\-cpu " MODEL"
 A QEMU CPU model, such as
 .BR Penryn,+avx ,
-in place of the one the image asks for. Most images ask for
+overriding the image. Most images use
 .BR max .
 .TP
 .BI \-\-machine " TYPE"
 .BR q35 " or " pc ,
-in place of the machine type the image asks for. Most images ask for
-.BR q35 .
+overriding the image.
 .TP
 .BI \-\-disk " CONTROLLER"
-.BR virtio ", " ide " or " sata ,
-in place of the disk controller the image asks for. An IDE disk needs the
-.B pc
-machine and a SATA disk needs
-.BR q35 .
-Most images ask for
-.BR virtio .
+.BR virtio ", " ide " (pc only) or " sata " (q35 only),"
+overriding the image.
 .TP
 .B \-\-password
-Ask for a password the account can log in with at
-.BR "vm console" .
-It is asked for twice on a terminal and read as one line of standard input
-otherwise, and never taken as an argument, where other users could read it.
-SSH still takes only the machine's key. Refused for an image that takes no
-seed.
+Set a password for logging in at
+.BR "vm console" ,
+read from the terminal twice or as one line of standard input. SSH still
+accepts only the machine's key. Refused for an image without cloud-init.
 .TP
 .B \-\-add\-ssh\-config
 Let plain
@@ -268,72 +204,49 @@ Let plain
 .BR scp (1)
 and
 .BR rsync (1)
-reach the machine by its name, as in
-.BR "ssh NAME" .
-The entry holding the port, account, key and host keys that
-.B vm ssh
-would pass is written to
+reach the machine by name. The entry is kept as
 .I ssh_config
-in the machine's directory, rewritten each time the machine starts, since its
-port may change, and removed with the machine. The first time, a line
-including every machine's entry is put at the top of
+in the machine's directory, rewritten at each start and removed with the
+machine. An
+.B Include
+line for all entries is added to the top of
 .IR ~/.ssh/config ,
-which is created if it is not there; nothing else in that file is changed,
-and a file that is a link is changed where it points. A name that
-.I ~/.ssh/config
-already gives to a
+creating the file if needed. A name already used by a
 .B Host
-is refused, since the machine's entry would take it over. Refused for an image
-that takes no seed.
+there is refused, as is an image without cloud-init.
 .B add_ssh_config
 in
 .BR vm\-config (5)
-turns this on for every
-.BR run .
+makes this the default.
 .TP
 .B \-\-no\-ssh\-config
 Add no entry, whatever
 .BR vm\-config (5)
 says.
 .SH OUTPUT
-Every command writes a table by default and machine-readable output on request:
+Commands write text by default, or a document with
 .B \-\-format json
 or
 .BR "\-\-format yaml" .
-In those formats the document is the only thing on standard output, with
-progress and errors on standard error. Errors take the requested format too,
-carrying a stable
-.B kind
-alongside the message.
-.PP
+A document is the only thing on standard output; progress and errors go to
+standard error. Errors carry a stable
+.BR kind .
 .B vm logs \-\-follow
-writes the console as it arrives, and
+and
 .B vm console
-holds a conversation with it, neither of which a document format can do, so
-both are refused there.
-.PP
+accept only text.
 .B vm ssh
-is the exception: it replaces itself with
-.BR ssh (1),
-so what reaches the terminal is the guest's output and not this tool's. A
-script that needs to connect for itself should read
+hands the terminal to
+.BR ssh (1);
+scripts can read
 .B ssh_port
 and
 .B user
 from
 .BR "vm ps \-\-format json" .
 .SH SHELL COMPLETION
-Completion for
-.BR bash ,
-.B zsh
-and
-.B fish
-is installed with the package. It offers machine names fitting the command,
-image references from the catalogue, held images for
-.BR "vm rmi" ,
-and machine settings. Each shell script asks
-.B vm
-for its completions, so it loads with
+The package installs completion for bash, zsh and fish. Without it, load it with
+one of:
 .RS
 .nf
 source <(COMPLETE=bash vm)
@@ -341,55 +254,52 @@ source <(COMPLETE=zsh vm)
 COMPLETE=fish vm | source
 .fi
 .RE
-for bash, zsh and fish respectively.
 .SH FILES
 .TP
 .I $XDG_CONFIG_HOME/vm/config.toml
-Optional settings: where
-.B vm update
-fetches from, whether
-.B vm run
-fetches on demand, and whether it adds SSH configuration entries. See
+Optional settings. See
 .BR vm\-config (5).
 .TP
 .I $XDG_DATA_HOME/vm/images
-The image store, addressed by digest.
+The image store.
 .TP
 .I $XDG_DATA_HOME/vm/catalogue
-The catalogue as last fetched.
+The fetched catalogue.
 .TP
 .I $XDG_DATA_HOME/vm/local
-Catalogue entries for images made here by
+Catalogue entries for images made by
 .BR "vm clone" .
 .TP
 .I $XDG_STATE_HOME/vm/instances
-One directory per machine, readable only by its owner: its disk, key, console
-log, record, SSH configuration entry if it has one and, for a UEFI machine, the
-firmware's variable store. The console
-log is appended to, so a machine that failed to boot and was started again
-keeps the evidence.
+One private directory per machine: its disk, key, console log, record, SSH
+config entry and UEFI variable store.
 .TP
 .I ~/.ssh/config
-Gains one
+Gains an
 .B Include
-line, the first time a machine is given
+line when a machine is first given
 .BR \-\-add\-ssh\-config .
 .TP
 .I $XDG_RUNTIME_DIR/vm
-Monitor, console, screen and share sockets, kept short because the kernel
-bounds the length of a socket path.
+Monitor, console, screen and share sockets.
 .SH ENVIRONMENT
 .TP
 .B VM_FORMAT
 The default output format.
 .TP
 .B COMPLETE
-Set to a shell name, makes
-.B vm
-print completion for that shell instead of running a command.
+A shell name; prints completion for that shell.
 .TP
 .B VM_CATALOGUE
 Overrides the catalogue directory.
+.SH NOTES
+A guest can
+.BR ping (8)
+only if
+.I /proc/sys/net/ipv4/ping_group_range
+on the host includes one of the user's groups. Only echo requests pass, so
+.BR traceroute (1)
+sees nothing past the host.
 .SH EXIT STATUS
 0 on success, 1 on failure.
 .SH SEE ALSO

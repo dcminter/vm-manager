@@ -1,12 +1,4 @@
-//! A FAT16 image builder.
-//!
-//! It is scoped to what a cloud-init `NoCloud` seed needs: a volume label, a
-//! handful of small files in the root directory, and long filenames so that
-//! lowercase `user-data` is visible to the guest.
-//!
-//! Nothing here reads a filesystem. The output is deterministic — the same
-//! files always produce the same bytes — so it can be asserted against a
-//! fixture rather than mounted.
+//! A deterministic FAT16 image builder for cloud-init seeds.
 
 const SECTOR: usize = 512;
 const SECTORS_PER_CLUSTER: usize = 1;
@@ -15,9 +7,7 @@ const FAT_COPIES: usize = 2;
 const ROOT_ENTRIES: usize = 512;
 const ENTRY: usize = 32;
 
-/// Chosen so that the table lands on an exact sector boundary and the count
-/// sits inside the FAT16 range; below 4085 clusters a driver reads the volume
-/// as FAT12 instead.
+/// Aligns the table to a sector and stays within FAT16's cluster range.
 const CLUSTERS: usize = 8190;
 const FAT_SECTORS: usize = (CLUSTERS + 2) * 2 / SECTOR;
 const ROOT_SECTORS: usize = ROOT_ENTRIES * ENTRY / SECTOR;
@@ -28,8 +18,7 @@ const DATA_SECTOR: usize = ROOT_SECTOR + ROOT_SECTORS;
 const TOTAL_SECTORS: usize = DATA_SECTOR + CLUSTERS * SECTORS_PER_CLUSTER;
 const CLUSTER_BYTES: usize = SECTOR * SECTORS_PER_CLUSTER;
 
-/// A fixed timestamp keeps the image reproducible. 1980-01-01 is the earliest
-/// a FAT date field can express.
+/// 1980-01-01, the earliest FAT date, fixed for reproducibility.
 const DATE: u16 = (1 << 5) | 1;
 const TIME: u16 = 0;
 const VOLUME_ID: u32 = 0x00CD_1DA7;
@@ -43,8 +32,7 @@ const _: () = assert!(
     "outside this range the volume is read as FAT12 or FAT32"
 );
 
-/// Where the thirteen name positions sit inside a long-filename entry, in
-/// order. They are scattered around the fields the entry pretends to have.
+/// The offsets of the thirteen name characters in a long-filename entry.
 const SLOTS: [usize; 13] = [1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30];
 
 /// A file to place in the root directory.
@@ -79,11 +67,7 @@ impl std::fmt::Display for Refused {
     }
 }
 
-/// Builds a FAT16 image holding `files` in the root directory under `label`.
-///
-/// The label is what cloud-init's `NoCloud` source matches on, so it is written
-/// both to the boot sector and to a volume-label directory entry; some readers
-/// consult one and some the other.
+/// Builds a FAT16 image of `files`, with `label` in both the boot sector and the root directory.
 pub fn image(label: &str, files: &[File<'_>]) -> Result<Vec<u8>, Refused> {
     let label = volume_label(label)?;
     let entries = directory(&label, files)?;
@@ -154,7 +138,7 @@ fn total_bytes(files: &[File<'_>]) -> u64 {
 )]
 fn boot_sector(label: &[u8; 11]) -> [u8; SECTOR] {
     let mut sector = [0u8; SECTOR];
-    // A jump that leads nowhere: the volume is data, never booted from.
+    // The volume is never booted.
     sector[0..3].copy_from_slice(&[0xEB, 0x3C, 0x90]);
     sector[3..11].copy_from_slice(b"MSWIN4.1");
     put16(&mut sector, 11, SECTOR as u16);
@@ -223,8 +207,7 @@ fn short_entry(short: [u8; 11], cluster: usize, size: usize) -> [u8; ENTRY] {
     entry
 }
 
-/// Long-filename entries, in the reverse order the specification requires:
-/// the last fragment of the name comes first, immediately before the 8.3 entry.
+/// Long-filename entries, last fragment first as the specification requires.
 fn long_entries(name: &str, short: [u8; 11]) -> Result<Vec<[u8; ENTRY]>, Refused> {
     let units: Vec<u16> = name.encode_utf16().collect();
     if units.len() > 255 {
@@ -258,9 +241,7 @@ fn long_entries(name: &str, short: [u8; 11]) -> Result<Vec<[u8; ENTRY]>, Refused
     Ok(out)
 }
 
-/// The checksum that ties long entries to their 8.3 entry. A reader that finds
-/// a mismatch discards the long name, so this is what keeps `user-data`
-/// readable rather than `USER-D~1`.
+/// The checksum linking long entries to their 8.3 entry.
 fn checksum(short: &[u8; 11]) -> u8 {
     short
         .iter()
@@ -281,9 +262,7 @@ fn volume_label(label: &str) -> Result<[u8; 11], Refused> {
     Ok(out)
 }
 
-/// Derives an 8.3 name, numbering it away from any already used. The long
-/// entry carries the real name; this exists only so that a reader without
-/// long-name support still sees something.
+/// An unused 8.3 name derived from the long name.
 fn short_name(name: &str, taken: &[[u8; 11]]) -> Result<[u8; 11], Refused> {
     if name.is_empty() || name.contains('/') || name.contains('\\') {
         return Err(Refused::Name {
@@ -523,8 +502,6 @@ mod tests {
         assert_eq!(long[13], checksum(&name));
     }
 
-    /// The checksum algorithm is fixed by the specification, so it is worth
-    /// pinning against a name whose value is known.
     #[test]
     fn the_checksum_is_the_documented_rotation() {
         let mut sum = 0u8;

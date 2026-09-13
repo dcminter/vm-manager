@@ -23,8 +23,7 @@ pub enum Pulled {
     Fetched,
 }
 
-/// Images on disk, addressed by digest so that two tags naming the same build
-/// share one file.
+/// Images on disk, addressed by digest.
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
@@ -57,13 +56,12 @@ impl Store {
         self.path_for(digest).is_file()
     }
 
-    /// Fetches the artifact unless it is already held. The digest is verified
-    /// in the same pass that writes the file, and a mismatch keeps nothing.
-    /// The address to fetch an artifact from, or a refusal if it has none.
+    /// The address to fetch an artifact from.
     fn source(artifact: &Artifact) -> Result<&String> {
         artifact.url.as_ref().ok_or(Error::NotFetchable)
     }
 
+    /// Fetches the artifact unless held, verifying its digest as it is written.
     pub fn pull(
         &self,
         artifact: &Artifact,
@@ -108,9 +106,7 @@ impl Store {
                 status,
             });
         }
-        // Progress counts what crosses the wire, so a stated size only stands
-        // in for the header where the two measure the same thing. For a
-        // compressed artifact the entry's size is what it expands to.
+        // For a compressed artifact the entry's size is the expanded size, not the download's.
         let stated = artifact
             .compression
             .is_none()
@@ -151,16 +147,14 @@ impl Store {
         Ok(())
     }
 
-    /// A path inside the store to build a new image at, so that adopting it
-    /// afterwards is a rename rather than a copy across filesystems.
+    /// A path inside the store to build an image at, so adopting it is a rename.
     pub fn staging(&self, label: &str) -> Result<PathBuf> {
         let directory = self.root.join("blobs");
         create_directory(&directory)?;
         Ok(directory.join(format!(".building-{label}")))
     }
 
-    /// Takes a file built at [`Store::staging`] into the store, naming it by
-    /// what it turned out to contain.
+    /// Moves a file built at [`Store::staging`] into the store under its digest.
     pub fn adopt(
         &self,
         staged: &Path,
@@ -172,8 +166,7 @@ impl Store {
             action: "read",
             source,
         })?;
-        // A whole pass over the file, which on an image is gigabytes and takes
-        // long enough that it has to be visible rather than look like a hang.
+        // Hashing an image takes long enough to need progress.
         let total = file.metadata().ok().map(|data| data.len());
         let mut observe = |received| report(Progress { received, total });
         let mut sink = std::io::sink();
@@ -197,8 +190,7 @@ impl Store {
         Ok(digest)
     }
 
-    /// Removes a build, returning the bytes it occupied. A build that is not
-    /// held is not an error: the point is that it is gone.
+    /// Removes a build if held, returning the bytes freed.
     pub fn discard(&self, digest: &Digest) -> Result<u64> {
         let path = self.path_for(digest);
         let size = fs::metadata(&path).map_or(0, |data| data.len());
@@ -213,16 +205,14 @@ impl Store {
         }
     }
 
-    /// Removes the record that a reference was fetched, and the directory it
-    /// sat in once nothing is left in it.
+    /// Removes a reference's record, and its directory once empty.
     pub fn forget(&self, name: &str, tag: &str, arch: &str) {
         let directory = self.root.join("refs").join(name);
         let _ = fs::remove_file(directory.join(format!("{tag}-{arch}.toml")));
         let _ = fs::remove_dir(&directory);
     }
 
-    /// Records which reference a build was fetched for, so listings and later
-    /// removal have something to read.
+    /// Records which reference a build was fetched for.
     pub fn record(&self, entry: &Entry, artifact: &Artifact) -> Result<()> {
         let directory = self.root.join("refs").join(&entry.name);
         create_directory(&directory)?;
@@ -243,14 +233,7 @@ impl Store {
     }
 }
 
-/// Streams a download through a decompressor, which writes the expanded image
-/// straight to the file.
-///
-/// The digest a publisher states covers the file they published, so it is
-/// taken on the way in rather than off the result. The store therefore holds,
-/// for a compressed artifact, a blob whose name is not its own hash; nothing
-/// reads it back that way, and the alternative is either a second digest in
-/// every entry or a checksum nobody else can confirm.
+/// Streams a download through a decompressor, hashing the compressed bytes.
 fn expand(
     mut command: std::process::Command,
     artifact: &Artifact,
@@ -273,8 +256,7 @@ fn expand(
     };
     let outcome = digest::copy_hashing(body, &mut stdin, artifact.digest.algorithm(), observe)
         .map(|(_, hash)| hash);
-    // The decompressor reads to end of input, so it will not finish until the
-    // pipe is closed, and it is closed here rather than at the end of a scope.
+    // The decompressor finishes only once its input is closed.
     drop(stdin);
     let finished = child
         .wait_with_output()
@@ -282,9 +264,7 @@ fn expand(
             scheme,
             reason: source.to_string(),
         })?;
-    // A decompressor that gives up closes its input, and the write that
-    // follows fails with a broken pipe rather than with a reason. Its own
-    // complaint is the one worth repeating, so it is read first.
+    // The decompressor's own error explains a broken pipe, so it is read first.
     if !finished.status.success() {
         return Err(Error::Decompress {
             scheme,
@@ -335,8 +315,7 @@ fn rename(from: &Path, to: &Path) -> Result<()> {
     })
 }
 
-/// An agent that trusts the system's certificate store, so an internal CA
-/// works without configuration.
+/// An HTTP agent that trusts the system certificate store.
 pub fn http_agent() -> ureq::Agent {
     let tls = ureq::tls::TlsConfig::builder()
         .root_certs(ureq::tls::RootCerts::PlatformVerifier)
@@ -394,8 +373,7 @@ mod tests {
         }
     }
 
-    /// Compresses with the tool that will be asked to undo it, so the test
-    /// exercises the real stream format rather than a fixture of one.
+    /// Compresses with the real tool.
     fn packed(scheme: Compression, plain: &[u8]) -> Vec<u8> {
         let packer = match scheme {
             Compression::Xz => "xz",
@@ -468,8 +446,6 @@ mod tests {
         assert!(!store.contains(&digest()));
     }
 
-    /// Removing what is not held is the outcome that was asked for, so it is
-    /// not an error.
     #[test]
     fn discarding_what_is_not_held_reclaims_nothing() {
         let scratch = Scratch::new("discardnone");
@@ -581,13 +557,10 @@ mod tests {
         assert_eq!(outcome, Pulled::AlreadyPresent);
     }
 
-    /// The whole point: what comes out is the image, and what is hashed is
-    /// what the publisher signed.
     #[test]
     fn each_scheme_is_expanded_and_the_published_digest_is_what_is_checked() {
         let scratch = Scratch::new("expand");
-        // Long enough to cross the copy buffer, and compressible enough that
-        // the packed form is nothing like it.
+        // Larger than the copy buffer, and compressible.
         let plain: Vec<u8> = (0..400_000u32).map(|held| (held % 251) as u8).collect();
         for scheme in [Compression::Gzip, Compression::Xz, Compression::Zstd] {
             let source = packed(scheme, &plain);
@@ -599,8 +572,6 @@ mod tests {
         }
     }
 
-    /// A truncated download reaches the decompressor as a truncated stream,
-    /// and the reason it gives is better than the broken pipe that follows.
     #[test]
     fn a_stream_that_is_not_what_it_claims_is_refused_in_its_own_words() {
         let scratch = Scratch::new("corrupt");
@@ -617,8 +588,6 @@ mod tests {
         }
     }
 
-    /// Progress is reported against what arrives, not what it becomes, because
-    /// only the first of those can be compared with a content length.
     #[test]
     fn expanding_reports_the_bytes_that_arrived() {
         let scratch = Scratch::new("progress");
@@ -639,8 +608,6 @@ mod tests {
         assert!(seen.iter().is_sorted(), "{seen:?}");
     }
 
-    /// An uncompressed entry must keep the path it had, hashing straight into
-    /// the file with nothing in between.
     #[test]
     fn an_uncompressed_artifact_asks_for_no_decompressor() {
         assert!(artifact().compression.command().is_none());

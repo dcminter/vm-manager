@@ -1,10 +1,4 @@
-//! Launching the hypervisor, and the seam behind which that happens.
-//!
-//! Supervision is a trait for two reasons: systemd user units are a later
-//! alternative to launching processes directly, and a fake implementation is
-//! what makes the rest of the lifecycle testable without booting anything.
-//! The trait is narrow because QMP is the control channel under every
-//! implementation, so only starting differs.
+//! Launching the hypervisor behind a trait, so the lifecycle is testable without booting.
 
 use crate::error::{Error, Result};
 use crate::instance::{Directory, Instance};
@@ -14,8 +8,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// The QEMU binary for an architecture. Only the host's own is useful without
-/// emulation, but the name is per-architecture either way.
+/// The QEMU binary for an architecture.
 pub fn binary_for(arch: &str) -> &'static str {
     match arch {
         "arm64" => "qemu-system-aarch64",
@@ -25,13 +18,12 @@ pub fn binary_for(arch: &str) -> &'static str {
     }
 }
 
-/// What to start, fully resolved. Nothing here is interpreted further.
+/// A fully resolved program to start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Launch {
     pub program: String,
     pub arguments: Vec<String>,
-    /// Where the process's own output goes. Not the guest's console, which
-    /// QEMU writes itself.
+    /// The process's own output, not the guest console.
     pub log: PathBuf,
 }
 
@@ -40,11 +32,7 @@ pub trait Supervisor {
     fn start(&self, launch: &Launch) -> Result<Handle>;
 }
 
-/// Launches the hypervisor as a detached process.
-///
-/// It is put in a process group of its own, so that a terminal interrupt after
-/// `vm run` returns does not reach a machine the user has already been told is
-/// running. Nothing of this process's own stdio is inherited.
+/// Launches a detached process in its own process group, so terminal interrupts miss it.
 #[derive(Debug, Clone, Copy)]
 pub struct Detached;
 
@@ -78,8 +66,7 @@ impl Supervisor for Detached {
                     }
                 }
             })?;
-        // Read while it is certainly alive: the start time is what tells this
-        // process apart from whoever inherits its pid later.
+        // The start time distinguishes this process from a later reuse of its pid.
         Handle::of(child.id()).ok_or_else(|| Error::Launch {
             program: launch.program.clone(),
             source: std::io::Error::other("the hypervisor exited before it could be recorded"),
@@ -88,7 +75,7 @@ impl Supervisor for Detached {
 }
 
 fn missing(program: &str) -> Error {
-    // The program may be a full path: what identifies the tool is its name.
+    // The program may be a full path.
     let program = Path::new(program)
         .file_name()
         .map_or(program, |name| name.to_str().unwrap_or(program));
@@ -111,18 +98,12 @@ fn missing(program: &str) -> Error {
     }
 }
 
-/// Builds the hypervisor's arguments for an instance.
-///
-/// Separated from starting it so that the command line can be asserted
-/// without a hypervisor present, which is most of what there is to get wrong.
+/// The hypervisor's arguments for an instance.
 pub fn arguments(instance: &Instance, directory: &Directory) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut push = |argument: &str| out.push(argument.to_owned());
 
-    // Shared memory is a condition of virtiofs working at all, and the backend
-    // has to be in place from the first boot rather than added when a share
-    // is, so every instance is built this way whether it shares anything now
-    // or not.
+    // virtiofs needs shared memory from the first boot.
     push("-object");
     push(&format!(
         "memory-backend-memfd,id=mem,size={}M,share=on",
@@ -162,11 +143,7 @@ pub fn arguments(instance: &Instance, directory: &Directory) -> Vec<String> {
     ));
     if instance.seeded {
         push("-drive");
-        // Writable, though nothing is meant to write to it. FreeBSD's
-        // nuageinit mounts the volume read-write and gives up when it
-        // cannot, so a read-only seed is a seed that is never read. The
-        // file belongs to this instance alone and is rewritten on every
-        // start, so there is nothing here for a guest to spoil.
+        // Writable, because FreeBSD's nuageinit ignores a seed it cannot mount read-write.
         push(&format!(
             "file={},{},format=raw",
             directory.seed().display(),
@@ -177,12 +154,10 @@ pub fn arguments(instance: &Instance, directory: &Directory) -> Vec<String> {
     push(&network(instance));
     push("-device");
     push("virtio-net-pci,netdev=net0");
-    // Without this the guest waits on entropy during early boot, which under
-    // emulation is long enough to look like a hang.
+    // Early boot otherwise stalls waiting for entropy.
     push("-device");
     push("virtio-rng-pci");
-    // Each share is a socket a `virtiofsd` is already listening on; the guest
-    // sees the tag, which is what its fstab line names.
+    // Each share is a socket its `virtiofsd` already listens on.
     for (index, share) in instance.shares.iter().enumerate() {
         push("-chardev");
         push(&format!(
@@ -197,7 +172,7 @@ pub fn arguments(instance: &Instance, directory: &Directory) -> Vec<String> {
     }
     push("-display");
     push("none");
-    // On from launch, because QMP cannot add a VNC server to a machine started without one.
+    // QMP cannot add a VNC server later.
     push("-vnc");
     push(&format!("unix:{}", directory.screen_socket().display()));
     // Logged with append so a machine started again keeps the evidence of the last boot.
@@ -217,8 +192,7 @@ pub fn arguments(instance: &Instance, directory: &Directory) -> Vec<String> {
     out
 }
 
-/// User-mode networking: no privilege, no bridge, and port forwarding that is
-/// the direct analogue of publishing a container's port.
+/// User-mode networking with port forwards.
 fn network(instance: &Instance) -> String {
     use std::fmt::Write as _;
     let mut netdev =
@@ -233,28 +207,17 @@ fn network(instance: &Instance) -> String {
                 );
                 netdev
             });
-    // The forward `vm ssh` uses. It is deliberately not in the published list:
-    // the user did not ask for it, and listing it there would invite removing
-    // it from a machine that is reached through it.
+    // The forward `vm ssh` uses, kept out of the published list.
     if let Some(port) = instance.ssh_port {
         let _ = write!(netdev, ",hostfwd=tcp:127.0.0.1:{port}-:22");
     }
     netdev
 }
 
-/// Where `virtiofsd` is installed when it is not on `PATH`.
-///
-/// Debian and Ubuntu both put it in `/usr/libexec`, which is on nobody's
-/// `PATH`, with a compatibility symlink under `/usr/lib/qemu`. That is a
-/// reasonable place for a daemon started by other programs rather than by
-/// people, so these are searched rather than treated as the user's problem.
+/// Where Debian and Ubuntu install `virtiofsd` outside `PATH`.
 const VIRTIOFSD_DIRECTORIES: [&str; 3] = ["/usr/libexec", "/usr/lib/qemu", "/usr/lib/virtiofsd"];
 
-/// What to run to serve one share.
-///
-/// `PATH` wins where it has an answer, so a locally built or overridden
-/// `virtiofsd` is still the one used. Where nothing is found the bare name is
-/// returned, and the spawn fails with the message that names the package.
+/// The `virtiofsd` to run, preferring `PATH`.
 pub fn virtiofsd() -> String {
     let path = std::env::var("PATH").unwrap_or_default();
     locate("virtiofsd", &path, &VIRTIOFSD_DIRECTORIES, &|at| {
@@ -268,17 +231,11 @@ fn locate(name: &str, path: &str, extras: &[&str], exists: &dyn Fn(&Path) -> boo
         .chain(extras.iter().map(PathBuf::from))
         .map(|directory| directory.join(name))
         .find(|candidate| exists(candidate));
-    // Where nothing matched, the bare name goes back: spawning it fails with
-    // the error that names the package, which is the useful thing to say.
+    // The bare name fails to spawn with an error naming the package.
     found.map_or_else(|| name.to_owned(), |at| at.display().to_string())
 }
 
-/// What to run to serve one share.
-///
-/// The sandbox is off because the alternative needs privileges this tool does
-/// not ask for: `virtiofsd` chroots by default, which wants `CAP_SYS_ADMIN`.
-/// What is shared is a directory the user already named, served to a guest the
-/// same user started, so the sandbox would be guarding them from themselves.
+/// What to run to serve one share, unsandboxed because the sandbox needs `CAP_SYS_ADMIN`.
 pub fn share_launch(source: &Path, socket: &Path, log: PathBuf) -> Launch {
     Launch {
         program: virtiofsd(),
@@ -293,8 +250,7 @@ pub fn share_launch(source: &Path, socket: &Path, log: PathBuf) -> Launch {
     }
 }
 
-/// Grows an existing disk. Shrinking is refused by `qemu-img` itself, which
-/// is the right answer: the guest's filesystem would still be the old size.
+/// Grows a disk; `qemu-img` refuses to shrink one.
 pub fn resize_overlay(overlay: &Path, size: &str) -> Result<()> {
     let output = Command::new("qemu-img")
         .arg("resize")
@@ -328,12 +284,7 @@ pub fn resize_overlay(overlay: &Path, size: &str) -> Result<()> {
     }
 }
 
-/// Creates the instance's writable disk over an image in the store. The image
-/// itself is never written to: it backs every instance built from it.
-///
-/// The overlay is always qcow2, because that is what an overlay has to be.
-/// The backing format is whatever the catalogue says the image is: several
-/// projects publish raw disks, and `qemu-img` refuses to guess.
+/// Creates the instance's qcow2 disk over an image in the store.
 pub fn create_overlay(
     image: &Path,
     overlay: &Path,
@@ -477,8 +428,6 @@ mod tests {
         assert_eq!(pair(&arguments, "-smp"), Some("8".to_owned()));
     }
 
-    /// virtiofs needs shared memory, and it cannot be introduced later without
-    /// restarting the machine, so it is there from the first boot.
     #[test]
     fn shared_memory_is_configured_whether_or_not_anything_is_shared() {
         let scratch = Scratch::new("memfd");
@@ -528,7 +477,6 @@ mod tests {
         );
     }
 
-    /// An old guest with no virtio driver finds its disks where an IDE controller puts them.
     #[test]
     fn a_pc_machine_with_ide_disks_puts_both_disks_on_the_ide_controller() {
         let scratch = Scratch::new("ide");
@@ -578,7 +526,6 @@ mod tests {
         );
     }
 
-    /// The code is shared and must not be written; the variables are the machine's own.
     #[test]
     fn a_uefi_machine_is_given_shared_code_and_its_own_variables() {
         let scratch = Scratch::new("uefi");
@@ -626,8 +573,6 @@ mod tests {
             .find(|held| held.contains("seed.img"))
             .unwrap();
         assert!(seed.contains("format=raw"), "{seed}");
-        // Read-only would be the obvious choice and it is the wrong one:
-        // a guest that mounts the volume read-write finds nothing at all.
         assert!(!seed.contains("readonly"), "{seed}");
     }
 
@@ -784,8 +729,7 @@ mod tests {
         let scratch = Scratch::new("noshares");
         let arguments = arguments(&instance("one"), &scratch.directory("one"));
         assert!(!arguments.iter().any(|held| held.contains("vhost-user-fs")));
-        // The console has a chardev of its own, so the share ones are what
-        // this is looking for.
+        // The console has its own chardev.
         assert!(!arguments.iter().any(|held| held.contains("vfs")));
     }
 
@@ -807,11 +751,6 @@ mod tests {
         assert!(launch.arguments.contains(&"/home/x/work".to_owned()));
     }
 
-    /// `virtiofsd` is its own package, and a share asked for without it is the
-    /// most likely way to meet a missing tool, so the message has to name it.
-    /// The absence is staged with a path that is certainly not there, so this
-    /// says the same thing on a machine that has it installed and one that
-    /// does not.
     #[test]
     fn a_share_server_that_is_not_installed_names_its_package() {
         let scratch = Scratch::new("novirtiofsd");
@@ -828,8 +767,6 @@ mod tests {
         );
     }
 
-    /// Debian keeps it out of PATH, so a search that only consulted PATH would
-    /// report a package that is installed as missing.
     #[test]
     fn a_tool_off_the_path_is_found_where_the_distribution_puts_it() {
         let found = locate("virtiofsd", "/usr/bin:/bin", &["/usr/libexec"], &|at| {
@@ -845,8 +782,6 @@ mod tests {
         assert_eq!(found, "/opt/mine/bin/virtiofsd");
     }
 
-    /// Nothing found means the bare name, which fails with the message that
-    /// names the package rather than one naming a path nobody asked for.
     #[test]
     fn a_tool_that_is_nowhere_is_left_as_a_name() {
         assert_eq!(
@@ -910,9 +845,6 @@ mod tests {
         assert_eq!(error.kind(), "state-unusable");
     }
 
-    /// The detached process is real, so this checks the parts that matter:
-    /// that it starts, that it is identified, and that its output lands in the
-    /// log rather than on the terminal.
     #[test]
     fn a_started_process_is_identified_and_its_output_captured() {
         let scratch = Scratch::new("start");
@@ -946,7 +878,7 @@ mod tests {
             .arg("64M")
             .status();
         if !made.is_ok_and(|status| status.success()) {
-            return; // qemu-img is not installed here; the CLI reports that itself.
+            return; // qemu-img is not installed.
         }
         resize_overlay(&overlay, "128M").unwrap();
         let info = Command::new("qemu-img")
@@ -986,7 +918,7 @@ mod tests {
             .arg("64M")
             .status();
         if !made.is_ok_and(|status| status.success()) {
-            return; // qemu-img is not installed here; the CLI reports that itself.
+            return; // qemu-img is not installed.
         }
         let overlay = scratch.0.join("overlay.qcow2");
         create_overlay(&image, &overlay, "qcow2", "128M".into()).unwrap();
@@ -1000,8 +932,6 @@ mod tests {
         assert!(text.contains("backing-filename"), "{text}");
     }
 
-    /// Several projects publish raw disks, and an overlay over one has to say
-    /// so: left to guess, `qemu-img` warns and later refuses to open it.
     #[test]
     fn an_overlay_over_a_raw_image_records_the_backing_format() {
         let scratch = Scratch::new("rawoverlay");
@@ -1012,7 +942,7 @@ mod tests {
             .arg("64M")
             .status();
         if !made.is_ok_and(|status| status.success()) {
-            return; // qemu-img is not installed here; the CLI reports that itself.
+            return; // qemu-img is not installed.
         }
         let overlay = scratch.0.join("overlay.qcow2");
         create_overlay(&image, &overlay, "raw", None).unwrap();
@@ -1026,8 +956,6 @@ mod tests {
             text.contains(r#""backing-filename-format": "raw""#),
             "{text}"
         );
-        // The warning qemu-img prints for a backing file of unstated format
-        // is the thing this is here to keep out.
         assert!(
             String::from_utf8_lossy(&info.stderr).is_empty(),
             "{}",

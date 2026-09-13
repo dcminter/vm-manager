@@ -1,8 +1,4 @@
-//! Turning a machine's disk back into an image.
-//!
-//! An instance writes to an overlay over the image it was built from. A clone
-//! flattens the two into one standalone file, hashes it, and puts it in the
-//! store under a name of the user's choosing.
+//! Flattening a machine's disk into a new image.
 
 use crate::error::{Error, Result};
 use crate::instance::Instance;
@@ -15,11 +11,7 @@ use std::process::Command;
 /// How far along a conversion is, in whole percent.
 pub type Converting<'a> = &'a mut dyn FnMut(u8);
 
-/// Which pass a clone is in the middle of.
-///
-/// There are two, and they take comparable time on a large image: the disk is
-/// flattened, and then read back to be hashed, because an image is addressed
-/// by its digest and the digest cannot be known before the bytes exist.
+/// A clone's pass: flattening, then hashing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
     Converting,
@@ -27,9 +19,7 @@ pub enum Stage {
 }
 
 impl Stage {
-    /// What to call the pass to a user. The second one is hashing, but what it
-    /// is for is establishing that the image is the bytes it claims to be, and
-    /// that is the part worth waiting through.
+    /// The pass's name for display.
     pub const fn label(self) -> &'static str {
         match self {
             Self::Converting => "converting",
@@ -38,11 +28,10 @@ impl Stage {
     }
 }
 
-/// How far along a clone is: which pass, and how much of it is done.
+/// Receives the current pass and its percentage.
 pub type Reporter<'a> = &'a mut dyn FnMut(Stage, u8);
 
-/// Local images are hashed with SHA-256. Nothing external publishes a sum for
-/// them, so the only requirement is that it names the bytes.
+/// The digest algorithm for local images.
 pub const ALGORITHM: Algorithm = Algorithm::Sha256;
 
 /// What a clone produced.
@@ -57,14 +46,7 @@ pub struct Cloned {
     pub entry: PathBuf,
 }
 
-/// Flattens an overlay and everything behind it into one image.
-///
-/// `qemu-img convert` reads through the backing chain, so what comes out
-/// stands on its own and does not refer to the store copy it grew from.
-///
-/// The input format is stated rather than left to be probed. Left to guess,
-/// `qemu-img` falls back to raw, so a damaged overlay converts successfully
-/// into an image of its own wreckage instead of being refused.
+/// Flattens an overlay and its backing chain into one image, stating the input format so damage is refused.
 pub fn convert(
     overlay: &Path,
     destination: &Path,
@@ -74,28 +56,21 @@ pub fn convert(
     let mut command = Command::new("qemu-img");
     command
         .arg("convert")
-        // `-p` writes a percentage whether or not it is talking to a terminal,
-        // rewriting one line with a carriage return. It is asked for either
-        // way so that there is only one code path to have got right.
+        // Progress, on one line rewritten by carriage returns.
         .arg("-p")
         .arg("-f")
         .arg("qcow2")
         .arg("-O")
         .arg("qcow2");
     if in_use {
-        // A running hypervisor holds a write lock on the disk, and reading it
-        // means saying so. This is only asked for when the machine is known to
-        // be running: a stopped one keeps the lock check, so a disk something
-        // else is still writing to is refused rather than read.
+        // Bypasses the lock a running hypervisor holds.
         command.arg("-U");
     }
     let mut child = command
         .arg(overlay)
         .arg(destination)
         .stdout(std::process::Stdio::piped())
-        // Held rather than inherited so that a failure is reported as an error
-        // of ours rather than printed over whatever else is on the terminal.
-        // Nothing here writes enough of it to fill a pipe.
+        // Captured to report as an error.
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|source| {
@@ -128,10 +103,7 @@ pub fn convert(
     })
 }
 
-/// Reads the conversion's progress until it stops writing any.
-///
-/// This is also what waits for the child to get on with it: nothing else is
-/// read until its output ends, which it does when the process does.
+/// Reads the conversion's progress until the process ends.
 fn watch(stdout: std::process::ChildStdout, report: Converting<'_>) {
     use std::io::BufRead as _;
     let mut reader = std::io::BufReader::new(stdout);
@@ -147,10 +119,7 @@ fn watch(stdout: std::process::ChildStdout, report: Converting<'_>) {
     }
 }
 
-/// The whole percent out of `    (37.50/100%)`.
-///
-/// The fraction is dropped rather than rounded, because this is read only to
-/// decide what to draw and a bar has nowhere to put it.
+/// The whole percent from `    (37.50/100%)`.
 fn percentage(text: &str) -> Option<u8> {
     let open = text.rfind('(')?;
     let slash = text.get(open..)?.find('/')? + open;
@@ -162,8 +131,7 @@ fn percentage(text: &str) -> Option<u8> {
     whole.parse().ok()
 }
 
-/// How much of a known total has been read, in whole percent. A pass whose
-/// length is not known reports nothing rather than a figure it made up.
+/// Whole percent of a known total, or zero when the total is unknown.
 fn proportion(progress: &crate::store::Progress) -> u8 {
     let Some(total) = progress.total.filter(|total| *total > 0) else {
         return 0;
@@ -172,10 +140,7 @@ fn proportion(progress: &crate::store::Progress) -> u8 {
     u8::try_from(percent.min(100)).unwrap_or(100)
 }
 
-/// Clones an instance's disk into the store as the image `name:tag`.
-///
-/// Whether the guest was paused first is the caller's business; by the time
-/// this runs, the disk is as consistent as it is going to be.
+/// Clones an instance's disk into the store as `name:tag`.
 pub fn image(
     store: &Store,
     local: &Path,
@@ -216,10 +181,7 @@ pub fn image(
     })
 }
 
-/// Writes the catalogue entry that makes a cloned image nameable.
-///
-/// The scalars come before the `[[image]]` table because TOML has no way to
-/// write a bare key after one.
+/// Writes the catalogue entry naming a cloned image.
 fn write_entry(
     local: &Path,
     instance: &Instance,
@@ -354,15 +316,11 @@ mod tests {
         }
     }
 
-    /// The digits alone would parse out of a byte count as readily as out of a
-    /// percentage; the shape is what identifies it.
     #[test]
     fn a_figure_too_large_for_a_percentage_is_refused() {
         assert_eq!(percentage("(300.00/100%)"), None);
     }
 
-    /// A conversion that runs reports at least that it finished. `qemu-img`
-    /// writes a first line before any work and a last one after all of it.
     #[test]
     fn a_conversion_reports_its_progress() {
         let scratch = Scratch::new("progress");
@@ -407,8 +365,6 @@ mod tests {
         assert_eq!(at(1000, 1000), 100);
     }
 
-    /// Nothing to measure against, so there is no figure to give. Neither a
-    /// zero total nor a runaway count may produce one out of range.
     #[test]
     fn a_pass_of_unknown_length_reports_nothing() {
         use crate::store::Progress;
@@ -435,8 +391,6 @@ mod tests {
         );
     }
 
-    /// The flag that lets a disk be read while a hypervisor holds it. Asking
-    /// for it when nothing holds the disk would hide a genuine clash.
     #[test]
     fn a_disk_in_use_is_read_without_taking_the_lock() {
         let scratch = Scratch::new("lock");
@@ -510,8 +464,6 @@ mod tests {
         assert!(!text.contains("disk ="), "{text}");
     }
 
-    /// There is nowhere to fetch a local image from, and the absence has to
-    /// survive being written out and read back.
     #[test]
     fn a_cloned_entry_has_no_address_to_fetch_from() {
         let scratch = Scratch::new("nourl");
@@ -564,8 +516,6 @@ mod tests {
         assert_eq!(entry_is_readable(&scratch.0).entries().len(), 2);
     }
 
-    /// Without an explicit input format this passes: `qemu-img` falls back to
-    /// reading anything at all as a raw disk.
     #[test]
     fn converting_something_that_is_not_a_disk_is_refused() {
         let scratch = Scratch::new("notadisk");

@@ -1,12 +1,4 @@
-//! Liveness for processes this tool did not keep as children.
-//!
-//! A detached hypervisor is reparented to init as soon as the command that
-//! launched it exits, so there is no child to wait on and nothing but the pid
-//! recorded on disk. A pid alone is not enough: they are reused, and a stale
-//! record naming a pid that now belongs to someone else's process would report
-//! an instance as running and then act on a stranger. The process start time
-//! from `/proc` disambiguates, because a reused pid cannot have started when
-//! the original did.
+//! Liveness of detached processes, identified by pid and start time.
 
 use crate::error::{Error, Result};
 use std::fs;
@@ -16,8 +8,7 @@ use std::process::Command;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Handle {
     pub pid: u32,
-    /// Field 22 of `/proc/<pid>/stat`, in clock ticks since boot. Its units do
-    /// not matter; only that it differs between one process and the next.
+    /// Field 22 of `/proc/<pid>/stat`, which tells a reused pid apart.
     pub started: u64,
 }
 
@@ -27,12 +18,7 @@ impl Handle {
         start_time(&read_stat(pid)?).map(|started| Self { pid, started })
     }
 
-    /// Whether this exact process is still running. A pid that has been
-    /// reused answers no, which is the point, and so does one that has exited
-    /// but not yet been reaped.
-    ///
-    /// Its first thread can exit before the rest, and those still hold its open
-    /// files, a disk's lock among them, so it is running until every thread is gone.
+    /// Whether this exact process has any thread still running.
     pub fn is_running(&self) -> bool {
         read_stat(self.pid).is_some_and(|stat| {
             start_time(&stat) == Some(self.started) && alive(&stat, thread_stats(self.pid))
@@ -58,9 +44,7 @@ fn thread_stats(pid: u32) -> impl Iterator<Item = String> {
         .filter_map(|task| fs::read_to_string(task.path().join("stat")).ok())
 }
 
-/// The second field of the line is the executable name in parentheses, and it
-/// may hold both spaces and parentheses of its own, so the fields after it are
-/// found from the last closing parenthesis rather than by splitting the line.
+/// Field 22, counted from the last `)` because the name may contain spaces and parentheses.
 fn start_time(stat: &str) -> Option<u64> {
     // Field 3 is the first of these, so field 22 is the twentieth.
     fields(stat)?.split_whitespace().nth(19)?.parse().ok()
@@ -70,9 +54,7 @@ fn fields(stat: &str) -> Option<&str> {
     Some(&stat[stat.rfind(')')? + 1..])
 }
 
-/// A process that has exited but whose parent has not yet collected it still
-/// has an entry under `/proc` and still answers with its original start time.
-/// It is not running, and treating it as running would wait forever.
+/// Whether the stat line is of a zombie or dead task.
 fn is_dead(stat: &str) -> bool {
     matches!(
         fields(stat).and_then(|rest| rest.split_whitespace().next()),
@@ -80,9 +62,7 @@ fn is_dead(stat: &str) -> bool {
     )
 }
 
-/// Signals a process. Used only where the monitor has already failed to
-/// answer: every ordinary stop goes through QMP, which tells the guest what is
-/// happening rather than taking it away.
+/// Signals a process.
 pub fn signal(handle: &Handle, signal: Signal) -> Result<()> {
     if !handle.is_running() {
         return Ok(());
@@ -105,9 +85,7 @@ pub fn signal(handle: &Handle, signal: Signal) -> Result<()> {
                 }
             }
         })?;
-    // A process that has exited between the check and the signal is the
-    // outcome that was wanted, so a refusal is only reported if it is still
-    // there afterwards.
+    // A process that exited meanwhile is the outcome wanted.
     if status.success() || !handle.is_running() {
         Ok(())
     } else {
@@ -118,13 +96,7 @@ pub fn signal(handle: &Handle, signal: Signal) -> Result<()> {
     }
 }
 
-/// Resident memory, in bytes: what a process costs the host now rather than
-/// what it was promised.
-///
-/// A hypervisor is given its guest's memory as an address space and takes it
-/// as the guest touches it, so a machine started with 2G may be holding a
-/// fraction of that. `VmRSS` is in kibibytes and says so; the unit is not
-/// parsed, because `/proc` has never written anything else there.
+/// Resident memory in bytes.
 pub fn resident(pid: u32) -> Option<u64> {
     let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
@@ -134,9 +106,9 @@ pub fn resident(pid: u32) -> Option<u64> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
-    /// Ask. A hypervisor treats this as a request to quit.
+    /// A request to quit.
     Terminate,
-    /// Take. Nothing in the guest is told.
+    /// Immediate termination.
     Kill,
 }
 
@@ -156,8 +128,7 @@ mod tests {
     use super::*;
     use std::process::{Child, Stdio};
 
-    /// A process of our own to ask questions about. `sleep` is in coreutils,
-    /// which is Essential, so it is present wherever the tests run.
+    /// A child process to inspect.
     fn sleeper() -> Child {
         Command::new("sleep")
             .arg("30")
@@ -199,8 +170,6 @@ mod tests {
         assert!(!handle.is_running());
     }
 
-    /// The whole reason the start time is recorded: a record naming a pid that
-    /// has since been reused must not report the new process as the old one.
     #[test]
     fn a_handle_with_the_wrong_start_time_is_not_running() {
         let mut child = sleeper();
@@ -245,8 +214,6 @@ mod tests {
         assert_eq!(start_time(stat), Some(9_876_543));
     }
 
-    /// A child of this process that has exited is a zombie until it is waited
-    /// on, and a zombie is not something to keep waiting for.
     #[test]
     fn a_process_that_has_exited_but_not_been_reaped_is_not_running() {
         let mut child = sleeper();
@@ -293,8 +260,6 @@ mod tests {
         assert_eq!(start_time("1234 (sleep) S 1 2 3"), None);
     }
 
-    /// This process is holding something, and whatever it is, it is more than
-    /// a page and less than the machine.
     #[test]
     fn a_running_process_reports_what_it_is_holding() {
         let held = resident(std::process::id()).unwrap();

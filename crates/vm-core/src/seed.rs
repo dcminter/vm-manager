@@ -1,8 +1,4 @@
-//! The cloud-init `NoCloud` seed: a small vfat volume labelled `cidata` holding
-//! `user-data` and `meta-data`, attached to the guest as a second drive.
-//!
-//! This is the only channel by which anything reaches the guest before it
-//! boots, so both key injection and volume mounting are written here.
+//! The cloud-init `NoCloud` seed: a vfat volume labelled `cidata`.
 
 use crate::error::{Error, Result};
 use crate::fat;
@@ -10,12 +6,10 @@ use crate::value::{Value, to_yaml};
 use std::fs;
 use std::path::Path;
 
-/// The label cloud-init's `NoCloud` source matches on. Nothing else is looked at.
+/// The volume label cloud-init's `NoCloud` source looks for.
 pub const LABEL: &str = "cidata";
 
-/// The shell the account is given where the image has it. Corrected after the
-/// fact on an image that does not, which is cheaper than knowing in advance
-/// what every image ships.
+/// The preferred shell, corrected on images without it.
 const SHELL: &str = "/bin/bash";
 
 /// A share to mount in the guest, named by its virtiofs tag.
@@ -28,15 +22,14 @@ pub struct Mount {
 /// Everything the guest is told about itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Seed {
-    /// Identifies this boot to cloud-init. A change re-runs the per-instance
-    /// modules, so it must be stable for the life of the instance.
+    /// cloud-init re-runs per-instance modules when this changes.
     pub instance_id: String,
     pub hostname: String,
     /// The account the key is installed for, and the one `vm ssh` connects as.
     pub user: String,
     pub authorized_key: String,
     pub mounts: Vec<Mount>,
-    /// A `$6$` hash for console login, `*` to take one away, or nothing to leave the account keyless-only.
+    /// A `$6$` hash, `*` to remove the password, or `None` for key-only access.
     pub password: Option<String>,
 }
 
@@ -48,19 +41,16 @@ impl Seed {
         ]))
     }
 
-    /// Fixes applied on the guest, as shell lines because FreeBSD's nuageinit accepts no argument lists.
+    /// Guest fixes as shell lines, since FreeBSD's nuageinit takes no argument lists.
     fn corrections(&self) -> Value {
         let user = &self.user;
         Value::list([
-            // A shell the image does not have is one ssh cannot exec, so the
-            // account would authenticate and then have nothing to run.
+            // ssh cannot exec a missing shell.
             Value::string(format!(
                 "test -x {SHELL} || usermod -s /bin/sh {user} || \
                  pw usermod {user} -s /bin/sh || chsh -s /bin/sh {user} || true"
             )),
-            // The sudo rule above is written to a file only sudo reads. An
-            // image that carries doas instead is told in its own terms, or the
-            // account has no way to become root at all.
+            // Images with doas instead of sudo need their own rule.
             Value::string(format!(
                 "command -v sudo >/dev/null || {{ command -v doas >/dev/null && \
                  echo permit nopass {user} >> /etc/doas.conf; }} || true"
@@ -68,7 +58,7 @@ impl Seed {
         ])
     }
 
-    /// The cloud-config document; SSH takes only the generated key, whatever the password.
+    /// The cloud-config document.
     pub fn user_data(&self) -> String {
         let mut fields = vec![
             ("hostname", Value::string(&self.hostname)),
@@ -78,11 +68,7 @@ impl Seed {
                 Value::list([Value::map([
                     ("name", Value::string(&self.user)),
                     ("shell", Value::string(SHELL)),
-                    // Disabled, not locked. cloud-init's lock writes a '!'
-                    // into the shadow entry, and OpenSSH built without PAM —
-                    // which is how Alpine ships it — refuses a locked account
-                    // outright, public key and all. A '*' is not a hash any
-                    // password can produce, so this shuts the same door.
+                    // `*` rather than a lock, which OpenSSH without PAM treats as refusing keys too.
                     (
                         "passwd",
                         Value::string(self.password.as_deref().unwrap_or("*")),
@@ -97,15 +83,9 @@ impl Seed {
             ),
             ("ssh_pwauth", Value::Bool(false)),
             ("disable_root", Value::Bool(true)),
-            // The shell asked for above is the one a person wants and nearly
-            // every image has. A musl image such as Alpine has none, and a
-            // shell that is not there is one ssh cannot exec at all, so the
-            // account would authenticate and then be useless. Asking and
-            // correcting beats settling for /bin/sh on every image for the
-            // sake of the few that have nothing else.
             ("runcmd", self.corrections()),
         ];
-        // The users module leaves an existing account's password alone, so a change goes through chpasswd.
+        // The users module leaves an existing password alone, so chpasswd sets it.
         if let Some(password) = &self.password {
             fields.push((
                 "chpasswd",
@@ -123,11 +103,7 @@ impl Seed {
             ));
         }
         if !self.mounts.is_empty() {
-            // Mounted per boot rather than written into the guest's fstab. A
-            // share belongs to the run, not to the disk: an fstab entry would
-            // outlive the share it names, fail at the next boot without it,
-            // and take the guest's local-fs.target down with it. cloud-init
-            // will not take an entry out again once it has written one.
+            // Mounted each boot, since an fstab entry would outlive the share.
             fields.push((
                 "bootcmd",
                 Value::list(self.mounts.iter().flat_map(|mount| {
@@ -151,8 +127,7 @@ impl Seed {
         format!("#cloud-config\n{}", to_yaml(&Value::map(fields)))
     }
 
-    /// Builds the seed image. Its contents are a function of this struct
-    /// alone, so the same instance always seeds the same bytes.
+    /// Builds the seed image deterministically.
     pub fn image(&self) -> Result<Vec<u8>> {
         self.check()?;
         let user_data = self.user_data();
@@ -183,9 +158,7 @@ impl Seed {
         })
     }
 
-    /// Rejects anything that would reach the guest as a broken cloud-config
-    /// rather than as an error here. A guest that fails to seed is diagnosed
-    /// over a serial console, which is a much worse place to find a typo.
+    /// Rejects values that would produce a broken cloud-config.
     fn check(&self) -> Result<()> {
         let refuse = |reason: String| Err(Error::SeedRefused { reason });
         if !is_hostname(&self.hostname) {
@@ -246,8 +219,7 @@ fn is_plain(text: &str) -> bool {
         .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
 }
 
-/// A shallow shape check, not a validation of the key material: enough to
-/// catch a path pasted where its contents belonged.
+/// A shape check that catches a path given in place of a key.
 fn is_public_key(text: &str) -> bool {
     let text = text.trim();
     let mut parts = text.split_whitespace();
@@ -303,8 +275,6 @@ mod tests {
         assert!(text.contains(KEY), "{text}");
     }
 
-    /// No password can produce a '*', so nothing logs in by one, and sshd is
-    /// told not to offer the option in the first place.
     #[test]
     fn password_login_is_disabled() {
         let text = seed().user_data();
@@ -314,8 +284,6 @@ mod tests {
         assert!(text.contains('*'), "{text}");
     }
 
-    /// A locked account is refused by OpenSSH built without PAM whatever key
-    /// is offered, so the account must be disabled rather than locked.
     #[test]
     fn the_account_is_not_locked() {
         assert!(
@@ -324,16 +292,13 @@ mod tests {
         );
     }
 
-    /// An image without the shell asked for would authenticate and then have
-    /// nothing to run, so the shell is corrected on the way up.
     #[test]
     fn a_shell_the_image_lacks_is_corrected() {
         let text = seed().user_data();
         assert!(text.contains("runcmd:"), "{text}");
         assert!(text.contains("test -x /bin/bash"), "{text}");
         assert!(text.contains("usermod -s /bin/sh vm"), "{text}");
-        // FreeBSD has no usermod, and an account left pointing at a shell
-        // that is not there cannot log in at all.
+        // FreeBSD has no usermod.
         assert!(text.contains("pw usermod vm -s /bin/sh"), "{text}");
     }
 
@@ -357,8 +322,6 @@ mod tests {
         assert!(text.contains("- mkdir"), "{text}");
     }
 
-    /// Nothing is written to the guest's fstab: an entry there would outlive
-    /// the share and fail the next boot that went without it.
     #[test]
     fn a_mount_leaves_nothing_behind_in_the_guest() {
         let mut seed = seed();
@@ -501,7 +464,6 @@ mod tests {
         assert!(!text.contains("chpasswd"), "{text}");
     }
 
-    /// The users entry covers a first boot; chpasswd covers an account that already exists.
     #[test]
     fn a_password_reaches_both_the_new_account_and_an_existing_one() {
         let mut held = seed();

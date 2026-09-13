@@ -1,11 +1,4 @@
-//! A client for QEMU's machine protocol.
-//!
-//! One newline-terminated JSON document per message, over a Unix socket. This
-//! is the control channel for every instance operation that does not need the
-//! guest's cooperation: powering down, pausing, querying, taking a screenshot.
-//!
-//! The transport is a type parameter so that the protocol can be tested
-//! against a recorded conversation rather than a running hypervisor.
+//! A client for the QEMU Machine Protocol.
 
 use crate::error::{Error, Result};
 use crate::value::{Value, from_json, to_json_line};
@@ -44,7 +37,7 @@ impl<R: BufRead, W: Write> std::fmt::Debug for Client<R, W> {
     }
 }
 
-/// What [`connect`] returns: the protocol over a Unix socket.
+/// A client over a Unix socket.
 pub type Connection = Client<BufReader<UnixStream>, UnixStream>;
 
 /// Opens a monitor socket and completes the handshake.
@@ -57,9 +50,7 @@ pub fn connect_with_timeout(path: &Path, timeout: Duration) -> Result<Connection
         path: path.to_owned(),
         source,
     };
-    // A Unix socket path is bounded by the kernel, not by the filesystem, and
-    // a state directory under a long home can cross it. QEMU refuses the same
-    // path at launch, so say so here rather than reporting it as missing.
+    // The kernel bounds a socket path's length.
     if path.as_os_str().len() > MAX_SOCKET_PATH {
         return Err(fail(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -74,14 +65,12 @@ pub fn connect_with_timeout(path: &Path, timeout: Duration) -> Result<Connection
 }
 
 impl<R: BufRead, W: Write> Client<R, W> {
-    /// Reads the greeting and leaves capability negotiation behind, so that a
-    /// caller never has to remember that commands are refused before it.
+    /// Reads the greeting and negotiates capabilities.
     pub fn new(reader: R, writer: W) -> Result<Self> {
         Self::with_timeout(reader, writer, TIMEOUT)
     }
 
-    /// As [`Client::new`], told what patience the transport was given, so that
-    /// a timeout can say how long it waited.
+    /// As [`Client::new`], with the timeout to name in errors.
     pub fn with_timeout(reader: R, writer: W, timeout: Duration) -> Result<Self> {
         let mut client = Self {
             reader,
@@ -109,8 +98,7 @@ impl<R: BufRead, W: Write> Client<R, W> {
         &self.version
     }
 
-    /// Runs a command and returns what it returned. Events that arrive while
-    /// waiting are kept rather than discarded; see [`Client::take_events`].
+    /// Runs a command, keeping events that arrive meanwhile.
     pub fn execute(&mut self, command: &str, arguments: Option<Value>) -> Result<Value> {
         let mut fields = vec![("execute".to_owned(), Value::string(command))];
         if let Some(arguments) = arguments {
@@ -142,14 +130,12 @@ impl<R: BufRead, W: Write> Client<R, W> {
         }
     }
 
-    /// Reads whatever events have arrived without waiting for more. Used by
-    /// the lifecycle to notice that a guest shut itself down.
+    /// Events received so far, without waiting.
     pub fn take_events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)
     }
 
-    /// ACPI power button. The guest may ignore it, so the caller needs its own
-    /// patience and its own fallback.
+    /// Presses the ACPI power button, which the guest may ignore.
     pub fn powerdown(&mut self) -> Result<()> {
         self.execute("system_powerdown", None).map(|_| ())
     }
@@ -157,8 +143,7 @@ impl<R: BufRead, W: Write> Client<R, W> {
     /// Ends the hypervisor process without telling the guest.
     pub fn quit(&mut self) -> Result<()> {
         match self.execute("quit", None) {
-            // A reply is success, and so is the socket closing under the
-            // command: that is what the command does.
+            // The socket closing is the command succeeding.
             Ok(_) | Err(Error::QmpClosed) => Ok(()),
             Err(other) => Err(other),
         }
@@ -172,9 +157,7 @@ impl<R: BufRead, W: Write> Client<R, W> {
         self.execute("cont", None).map(|_| ())
     }
 
-    /// The run state, as QEMU names it: `running`, `paused`, `prelaunch` and
-    /// the rest. Passed through rather than mapped, so a state this tool has
-    /// never heard of still reaches the user.
+    /// The run state as QEMU names it.
     pub fn status(&mut self) -> Result<String> {
         let reply = self.execute("query-status", None)?;
         reply
@@ -186,9 +169,7 @@ impl<R: BufRead, W: Write> Client<R, W> {
             })
     }
 
-    /// A connection ending and a connection timing out are both outcomes the
-    /// lifecycle has to act on, so neither is left inside a generic I/O fault.
-    /// A guest that powers itself down leaves by this route.
+    /// Separates a closed connection and a timeout from other I/O errors.
     fn classify(&self, source: std::io::Error) -> Error {
         Self::classify_with(source, self.timeout)
     }
@@ -265,8 +246,7 @@ mod tests {
 
     const GREETING: &str = r#"{"QMP": {"version": {"qemu": {"micro": 2, "minor": 1, "major": 9}, "package": ""}, "capabilities": ["oob"]}}"#;
 
-    /// A recorded conversation. The written side is kept so that what the
-    /// client said can be asserted as well as what it understood.
+    /// A recorded conversation that keeps what the client wrote.
     struct Wire {
         written: Vec<u8>,
     }
@@ -382,8 +362,6 @@ mod tests {
         assert_eq!(reply.get("running"), Some(&Value::Bool(true)));
     }
 
-    /// The monitor's names for these are not the ones the command line uses,
-    /// so the mapping is worth pinning down.
     #[test]
     fn pausing_and_resuming_are_stop_and_cont() {
         let mut paused = client(&[r#"{"return": {}}"#]);
@@ -474,16 +452,13 @@ mod tests {
         assert_eq!(client.powerdown().unwrap_err().kind(), "qmp-protocol-error");
     }
 
-    /// A guest that powers itself down ends the connection, so this is an
-    /// outcome the lifecycle acts on rather than an I/O fault to report.
     #[test]
     fn a_socket_that_closes_while_waiting_is_reported_as_closed() {
         let mut client = client(&[]);
         assert_eq!(client.status().unwrap_err().kind(), "qmp-closed");
     }
 
-    /// A writer that carries the handshake and then fails the way a socket
-    /// does when the process at the far end has gone.
+    /// A writer that fails after the handshake, as a closed socket does.
     struct Broken {
         kind: std::io::ErrorKind,
         allowed: usize,
@@ -550,8 +525,6 @@ mod tests {
         assert!(error.to_string().contains("longer than"), "{error}");
     }
 
-    /// `quit` takes the far end down, so the socket closing under it is the
-    /// command succeeding rather than failing.
     #[test]
     fn quit_treats_the_connection_ending_as_success() {
         let mut client = client(&[]);

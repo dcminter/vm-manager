@@ -16,16 +16,13 @@ pub struct Updated {
     pub entries: usize,
 }
 
-/// Replaces the fetched catalogue with a freshly downloaded one. The new
-/// catalogue is staged and parsed before it replaces the old, so a broken
-/// download never leaves the tool without a working catalogue.
+/// Downloads the catalogue and installs it.
 pub fn run(config: &Config, destination: &Path, agent: &ureq::Agent) -> Result<Updated> {
     let files = fetch(&config.catalogue_url, agent)?;
     install(&files, config, destination)
 }
 
-/// Stages the entries, checks they parse, and only then replaces the live
-/// catalogue. A download that is malformed leaves the old one untouched.
+/// Stages and parses the entries before replacing the live catalogue.
 pub fn install(files: &[tar::File], config: &Config, destination: &Path) -> Result<Updated> {
     let wanted = select(files, &config.catalogue_path);
     if wanted.is_empty() {
@@ -79,8 +76,7 @@ fn fetch(url: &str, agent: &ureq::Agent) -> Result<Vec<tar::File>> {
     })
 }
 
-/// Keeps the `.toml` files below the configured directory, dropping the
-/// single wrapping directory that archive services add.
+/// The `.toml` files below the configured directory, without the archive's wrapping directory.
 fn select(files: &[tar::File], catalogue_path: &str) -> Vec<(String, Vec<u8>)> {
     let wanted = format!("{}/", catalogue_path.trim_matches('/'));
     files
@@ -130,8 +126,7 @@ fn write_entry(staging: &Path, relative: &str, contents: &[u8]) -> Result<()> {
     })
 }
 
-/// Puts the staged catalogue in place, keeping the old one until the new one
-/// has landed so an interruption cannot leave nothing behind.
+/// Moves the staged catalogue into place, keeping the old one until it lands.
 fn swap(staging: &Path, destination: &Path) -> Result<()> {
     let retired = retired_path(destination);
     remove(&retired)?;

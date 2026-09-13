@@ -16,8 +16,7 @@ pub struct ImageRow {
     pub arch: String,
     pub description: String,
     pub held: bool,
-    /// What the build takes on disk, as the catalogue records it. An entry
-    /// that omits it leaves the column blank rather than claiming a zero.
+    /// Size on disk as the catalogue records it, if it does.
     pub size: Option<u64>,
 }
 
@@ -112,8 +111,7 @@ impl Inspect {
         }
     }
 
-    /// The image's own format, and the wrapper it arrives in where there is
-    /// one. Written together because the second only qualifies the first.
+    /// The image format, with its compression where it has one.
     fn formatting(&self) -> String {
         if self.compression == "none" {
             self.format.clone()
@@ -312,7 +310,7 @@ pub struct Run {
     pub firmware_changed: bool,
     /// Whether plain `ssh` reaches the machine by name.
     pub ssh_config: bool,
-    /// The user's SSH configuration, when this run or start added the `Include` line to it.
+    /// The user's SSH config, when the `Include` line was added to it.
     pub ssh_config_changed: Option<String>,
 }
 
@@ -517,16 +515,13 @@ fn machine_text(firmware: Firmware, machine: Chipset, disk: Disk, cpu: &str) -> 
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
-/// One instance, as `vm ps` lists it.
-/// What a machine is doing. Running and stopped are settled by looking for the
-/// process; anything finer has to be asked of the machine itself.
+/// What a machine is doing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum State {
     Stopped,
     /// The record could not be read, so nothing else is known.
     Damaged,
-    /// What the monitor says it is doing: `running`, `paused`, or a word this
-    /// tool has never heard of. Passed through rather than mapped.
+    /// The monitor's run state, passed through unmapped.
     Live(String),
 }
 
@@ -540,8 +535,7 @@ impl State {
     }
 }
 
-/// Bytes as the record keeps them. Rounding down is what a size is: 1.9 GiB
-/// held is 1 GiB and a bit, not 2.
+/// Bytes to mebibytes, rounding down.
 const fn mebibytes(bytes: u64) -> u64 {
     bytes >> 20
 }
@@ -555,12 +549,9 @@ pub struct MachineRow {
     pub pid: Option<u32>,
     pub ssh_port: Option<u16>,
     pub user: String,
-    /// Mebibytes throughout: what the record and the hypervisor both deal in,
-    /// left as figures here and made readable only for the table.
+    /// In mebibytes.
     pub memory: Option<u64>,
-    /// What the hypervisor is holding now. A guest is given its memory as an
-    /// address space and takes it as it touches it, so this is the figure the
-    /// host feels, and it is absent for a machine that is not running.
+    /// Memory the hypervisor holds now; absent when not running.
     pub memory_used: Option<u64>,
     pub disk: Option<u64>,
     pub disk_used: Option<u64>,
@@ -587,8 +578,7 @@ impl MachineRow {
         }
     }
 
-    /// An instance whose record cannot be read is still listed, because the
-    /// user needs to know it is there in order to remove it.
+    /// An instance whose record cannot be read, listed so it can be removed.
     pub fn damaged(name: &str) -> Self {
         Self {
             name: name.to_owned(),
@@ -626,8 +616,7 @@ pub struct Machines {
     pub all: bool,
 }
 
-/// Ages rather than timestamps: a list is read to see what is there now, and
-/// a date needs a calendar to interpret.
+/// How long ago, in the largest whole unit.
 fn age(created: u64) -> String {
     if created == 0 {
         return String::new();
@@ -655,8 +644,7 @@ impl Report for Machines {
                     row.pid
                         .map_or(Value::Null, |pid| Value::Integer(u64::from(pid))),
                 ),
-                // What a script needs to reach the guest without `vm ssh`,
-                // which replaces this process and so reports nothing itself.
+                // What a script needs to reach the guest without `vm ssh`.
                 (
                     "ssh_port",
                     row.ssh_port
@@ -715,8 +703,7 @@ pub enum StopOutcome {
     PoweredDown,
     /// It was taken down without being asked, as `vm kill` does.
     Killed,
-    /// It was asked and did not answer. A machine still early in its boot has
-    /// no ACPI handler yet, so this is what stopping one looks like.
+    /// The guest ignored the power button.
     Unresponsive,
     /// There was no monitor to ask through, so it was signalled instead.
     Unreachable,
@@ -826,15 +813,11 @@ pub struct Untagged {
     pub arch: String,
     pub digest: String,
     pub size: u64,
-    /// Whether the catalogue entry went with it, which is so for an image made
-    /// here and not for one the catalogue provides.
+    /// Whether the catalogue entry was removed too.
     pub forgotten: bool,
-    /// Machines whose disk was backed by it. Only ever non-empty under
-    /// `--force`, and worth saying out loud because they will not start again.
+    /// Machines left without a backing image by `--force`.
     pub broke: Vec<String>,
-    /// Other names for the same bytes, which is why the bytes are still there.
-    /// An image made here cannot be fetched back, so the file goes only with
-    /// the last name for it.
+    /// Other names keeping the file.
     pub kept_by: Vec<String>,
 }
 
@@ -860,8 +843,6 @@ impl Report for Untagged {
 
     fn render_text(&self, style: Style) -> Vec<String> {
         let reference = style.name(&format!("{}:{}", self.name, self.tag));
-        // Nothing reclaimed is not worth a figure: the bytes either stayed
-        // because something else names them, or they were already gone.
         let mut lines = vec![if self.size > 0 {
             format!("Removed {reference} ({} reclaimed)", human(self.size))
         } else {
@@ -908,8 +889,7 @@ impl Report for Console {
         ])
     }
 
-    /// Verbatim: the guest wrote these, and this is not the place to decorate
-    /// them.
+    /// Verbatim.
     fn render_text(&self, _: Style) -> Vec<String> {
         self.lines.clone()
     }
@@ -1021,8 +1001,6 @@ mod tests {
         assert_eq!(text, "Resumed one");
     }
 
-    /// Asking for what a machine is already doing is the outcome that was
-    /// wanted, so it reads as a statement rather than a refusal.
     #[test]
     fn a_machine_already_doing_it_is_not_a_failure() {
         let report = Switched {
@@ -1038,8 +1016,6 @@ mod tests {
         assert!(document.contains(r#""changed": false"#), "{document}");
     }
 
-    /// QEMU has more run states than this tool knows about, and one it has
-    /// never heard of has to reach the user rather than be called running.
     #[test]
     fn a_state_this_tool_does_not_know_is_passed_through() {
         assert_eq!(
@@ -1078,8 +1054,6 @@ mod tests {
         assert!(to_json(&report.to_value()).contains(r#""status": "paused""#));
     }
 
-    /// The figure is the catalogue's, so it is there before the image is and
-    /// says what pulling it would cost.
     #[test]
     fn an_image_is_listed_with_the_size_it_takes() {
         let report = images();
@@ -1093,8 +1067,6 @@ mod tests {
         );
     }
 
-    /// An entry that records no size leaves the column empty rather than
-    /// claiming the image takes nothing.
     #[test]
     fn an_image_of_unknown_size_says_nothing_about_it() {
         let mut report = images();
@@ -1104,8 +1076,6 @@ mod tests {
         assert!(to_json(&report.to_value()).contains(r#""size": null"#));
     }
 
-    /// Two figures on one scale: what the machine has taken of what it was
-    /// promised, for memory and for its disk.
     #[test]
     fn a_machine_is_listed_with_what_it_holds_and_what_it_may() {
         let text = machines().render_text(Style::plain()).join("\n");
@@ -1128,8 +1098,6 @@ mod tests {
         }
     }
 
-    /// A machine that is not running holds nothing, so there is one figure to
-    /// give rather than two, and the disk it left behind is still there.
     #[test]
     fn a_stopped_machine_reports_only_what_it_was_given() {
         let mut report = machines();
@@ -1171,8 +1139,6 @@ mod tests {
         assert!(!text.contains("catalogue"), "{text}");
     }
 
-    /// Under --force a machine is left without a disk, which is not something
-    /// to find out later.
     #[test]
     fn a_removed_image_names_the_machines_it_broke() {
         let report = Untagged {
@@ -1193,9 +1159,6 @@ mod tests {
         assert!(document.contains(r#""one""#), "{document}");
     }
 
-    /// Two clones of an unchanged disk are one file under two names. Taking
-    /// one name away must not take the file, and saying nothing would leave
-    /// the user thinking they had reclaimed the space.
     #[test]
     fn a_name_removed_from_shared_bytes_says_they_stayed() {
         let report = Untagged {
@@ -1315,8 +1278,6 @@ mod tests {
         assert!(to_json(&report.to_value()).contains(r#""aliases": []"#));
     }
 
-    /// A wrapper is worth saying, because it explains why the file that
-    /// arrives is not the size the entry records.
     #[test]
     fn an_inspection_names_the_compression_only_when_there_is_some() {
         let mut report = Inspect {

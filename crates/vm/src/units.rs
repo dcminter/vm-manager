@@ -1,5 +1,4 @@
-//! Sizes as a person reads them. Documents carry the figures themselves; this
-//! is only for the text output.
+//! Human-readable sizes for text output.
 
 const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
 
@@ -8,11 +7,7 @@ pub fn human(bytes: u64) -> String {
     render(size, unit, bytes)
 }
 
-/// Two figures against one scale, as in `1.4 of 12.0 GiB`.
-///
-/// The larger sets the unit so that the pair can be compared at a glance;
-/// written each in its own, `900.0 MiB of 12.0 GiB` makes the reader do the
-/// arithmetic the units were supposed to save them.
+/// Two figures in the larger one's unit, as in `1.4 of 12.0 GiB`.
 pub fn human_pair(used: u64, total: u64) -> String {
     let (_, unit) = scale(total);
     let divisor = divisor(unit);
@@ -21,9 +16,7 @@ pub fn human_pair(used: u64, total: u64) -> String {
     if unit == 0 {
         return format!("{used} of {total} B");
     }
-    // Far enough apart, the shared unit rounds the smaller figure away and
-    // says nothing at all. Something is better read in its own unit than
-    // reported as none of the other's.
+    // A figure that would round to nothing keeps its own unit.
     if used > 0 && at(used) < 0.05 {
         return format!("{} of {}", human(used), human(total));
     }
@@ -86,8 +79,6 @@ mod tests {
         assert_eq!(human_pair(3 * gib / 2, 12 * gib), "1.5 of 12.0 GiB");
     }
 
-    /// The point of the shared unit: the smaller figure keeps its proportion
-    /// rather than being promoted into a unit of its own.
     #[test]
     fn a_much_smaller_figure_is_written_in_the_larger_unit() {
         let gib = 1024 * 1024 * 1024;
@@ -95,8 +86,6 @@ mod tests {
         assert_eq!(human_pair(0, 2 * gib), "0.0 of 2.0 GiB");
     }
 
-    /// A new machine has written a few megabytes to a disk that spans tens of
-    /// gigabytes, and `0.0 of 40.0 GiB` would be a figure that says nothing.
     #[test]
     fn a_figure_the_shared_unit_would_round_away_keeps_its_own() {
         let gib = 1024 * 1024 * 1024;
@@ -106,8 +95,6 @@ mod tests {
         );
     }
 
-    /// Nothing written is nothing, and it reads better against the total than
-    /// alone.
     #[test]
     fn a_figure_that_really_is_nothing_keeps_the_shared_unit() {
         let gib = 1024 * 1024 * 1024;

@@ -1,13 +1,6 @@
 #!/usr/bin/env bash
 #
-# Builds a binary .deb for one distribution.
-#
-#   scripts/package <trixie|noble> <version> [output directory]
-#
-# A staged tree and dpkg-deb rather than debhelper: dh-cargo expects the
-# distribution's own packaged crates, and this tree needs a Rust newer than
-# either distribution ships. dpkg-deb is the same native tooling one layer
-# down, and what it produces is a package either can install.
+# Builds a binary .deb: scripts/package <trixie|noble> <version> [output directory]
 
 set -euo pipefail
 
@@ -18,10 +11,7 @@ outdir="${3:-target/packages}"
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$here"
 
-# Dependencies differ between the two. virtiofsd is its own package on Trixie;
-# on Noble it has moved about between releases, so the build checks that what
-# is claimed actually exists rather than shipping a package that will not
-# install. See verify_dependencies below.
+# Dependencies differ per distribution; verify_dependencies checks they exist.
 case "$distribution" in
 trixie)
     suffix="deb13"
@@ -41,16 +31,13 @@ noble)
     ;;
 esac
 
-# The tilde sorts before the bare version, so neither package outranks a later
-# plain release, and the two never compare equal to each other.
+# The tilde sorts below a plain release of the same version.
 full_version="${version}~${suffix}"
 architecture="$(dpkg --print-architecture)"
 package="vm-manager_${full_version}_${architecture}"
 staging="target/package/${package}"
 
-# Checks every package named in the control file exists here. A .deb claiming
-# a dependency the distribution does not have is one apt refuses to install,
-# and finding that out from a user is finding it out too late.
+# Fails if a dependency in the control file does not exist in this distribution.
 verify_dependencies() {
     if ! command -v apt-cache >/dev/null 2>&1; then
         echo "package: apt-cache is not here, so dependencies go unchecked" >&2
@@ -106,8 +93,7 @@ install -m 0644 LICENSE "$staging/usr/share/doc/vm-manager/copyright"
     echo " -- Dave Minter <dave@paperstack.com>  $(date -R)"
 } | gzip -9nc >"$staging/usr/share/doc/vm-manager/changelog.Debian.gz"
 
-# umask decides what cp and gzip leave behind, and a package should not carry
-# whoever built it around with it.
+# Keeps file modes independent of the builder's umask.
 find "$staging/usr" -type d -exec chmod 0755 {} +
 find "$staging/usr" -type f -exec chmod 0644 {} +
 chmod 0755 "$staging/usr/bin/vm"
@@ -141,9 +127,7 @@ install -d "$outdir"
 dpkg-deb --root-owner-group --build "$staging" "$outdir/$package.deb" >/dev/null
 echo "Wrote $outdir/$package.deb"
 
-# A package that does not satisfy lintian's structural checks is one to fix
-# before it reaches anybody, but lintian is not everywhere, so its absence is
-# reported rather than fatal.
+# lintian is optional; its absence is reported, not fatal.
 if command -v lintian >/dev/null 2>&1; then
     lintian --suppress-tags \
         changelog-file-missing-in-native-package,no-manual-page,maintainer-script-lacks-debhelper-token \

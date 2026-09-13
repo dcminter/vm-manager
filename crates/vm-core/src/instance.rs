@@ -1,8 +1,4 @@
-//! Instances: what was asked for, where it lives, and whether it is running.
-//!
-//! There is no daemon, so the state directory is the only record that an
-//! instance exists. Creating its directory is the lock that stops two `vm run`
-//! commands claiming one name, because a directory can only be created once.
+//! Instances, recorded only in the state directory.
 
 use crate::error::{Error, Result};
 use crate::machine::{self, Chipset, Disk, Firmware};
@@ -21,11 +17,7 @@ pub struct Port {
     pub guest: u16,
 }
 
-/// A host directory shared into the guest over virtiofs.
-///
-/// Each share is served by a `virtiofsd` of its own, so each carries the
-/// process serving it. They are children to reap alongside the hypervisor;
-/// left behind they would hold the share open against a machine that is gone.
+/// A host directory shared into the guest over virtiofs, with the `virtiofsd` serving it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Share {
@@ -50,17 +42,14 @@ impl Share {
     }
 }
 
-/// What an instance is, as written to `instance.toml`.
-///
-/// Scalars come before the lists because that is the order TOML itself
-/// requires: a table cannot be followed by a bare key.
+/// An instance as written to `instance.toml`; TOML requires scalars before lists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Instance {
     pub name: String,
     /// The reference as the user wrote it, kept for display.
     pub image: String,
-    /// What it resolved to. The reference may move; this does not.
+    /// The digest the reference resolved to.
     pub digest: String,
     pub arch: String,
     /// Seconds since the epoch.
@@ -68,16 +57,16 @@ pub struct Instance {
     /// Mebibytes.
     pub memory: u64,
     pub cpus: u32,
-    /// Absent in records written before firmware could be chosen, which were all BIOS.
+    /// Defaults to BIOS when absent.
     #[serde(default, skip_serializing_if = "Firmware::is_default")]
     pub firmware: Firmware,
-    /// Absent in records written before the model could be chosen, which were all the default.
+    /// Defaults to `max` when absent.
     #[serde(default = "default_cpu")]
     pub cpu: String,
-    /// Absent in records written before the chipset could be chosen, which were all q35.
+    /// Defaults to q35 when absent.
     #[serde(default, skip_serializing_if = "Chipset::is_default")]
     pub machine: Chipset,
-    /// Absent in records written before the disk controller could be chosen, which were all virtio.
+    /// Defaults to virtio when absent.
     #[serde(default, skip_serializing_if = "Disk::is_default")]
     pub disk: Disk,
     /// The account cloud-init was told to create, and the one `vm ssh` uses.
@@ -85,30 +74,22 @@ pub struct Instance {
     /// Whether the image can be seeded at all, from its catalogue entry.
     pub seeded: bool,
     pub monitor: PathBuf,
-    /// The host port forwarded to the guest's SSH port. Allocated at run time
-    /// so that a machine can be reached without having been asked to publish
-    /// anything, and absent when the image takes no key.
+    /// The host port forwarded to the guest's SSH port; absent when the image takes no key.
     pub ssh_port: Option<u16>,
     /// Absent until the hypervisor is launched, and again once it has gone.
     pub pid: Option<u32>,
     /// Paired with the pid so a reused pid is not mistaken for this one.
     pub started: Option<u64>,
-    /// How many times the seed has been rewritten. It is part of the instance
-    /// id cloud-init reads, and a changed id is what makes the guest act on a
-    /// seed it has already consumed. Absent in a record written before the
-    /// first rewrite, and left out while it is zero so that those records keep
-    /// the instance id they were created with.
+    /// Seed rewrites, part of the cloud-init instance id; omitted while zero.
     #[serde(default, skip_serializing_if = "is_first")]
     pub generation: u32,
-    /// The account's console password as a `$6$` hash, or `*` once one has been taken away.
+    /// The console password as a `$6$` hash, or `*` once removed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
-    /// Whether plain `ssh` reaches the machine by name, through an entry in its directory.
+    /// Whether the directory holds an SSH config entry for the machine.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ssh_config: bool,
-    /// An empty list is left out rather than written as `[]`: TOML has no way
-    /// to write a bare key after a table, so a written-out empty list after a
-    /// populated one makes the file unwritable.
+    /// Omitted when empty, because TOML cannot follow a table with a bare key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<Port>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -128,8 +109,7 @@ const fn is_first(generation: &u32) -> bool {
 }
 
 impl Instance {
-    /// The process, if this instance claims to have one. Whether it is still
-    /// running is a separate question, which [`Handle::is_running`] answers.
+    /// The recorded process, whether or not it still runs.
     pub const fn handle(&self) -> Option<Handle> {
         match (self.pid, self.started) {
             (Some(pid), Some(started)) => Some(Handle { pid, started }),
@@ -142,8 +122,7 @@ impl Instance {
         self.handle().is_some_and(|handle| handle.is_running())
     }
 
-    /// Forgets a process that is no longer running. Stale state is reaped on
-    /// read rather than by anything sweeping in the background.
+    /// Forgets a process that is no longer running.
     pub const fn forget_process(&mut self) {
         self.pid = None;
         self.started = None;
@@ -177,8 +156,7 @@ impl Instances {
         &self.root
     }
 
-    /// Claims a name. The directory creation is the lock: a second attempt on
-    /// the same name fails rather than joining the first.
+    /// Claims a name; creating the directory is the lock.
     pub fn create(&self, name: &str) -> Result<Directory> {
         check_name(name)?;
         let path = self.root.join(name);
@@ -217,9 +195,7 @@ impl Instances {
         }
     }
 
-    /// Every instance that has a directory, in name order. A directory without
-    /// a readable record is skipped rather than failing the listing, so one
-    /// damaged instance does not hide the rest.
+    /// Every instance directory, in name order.
     pub fn names(&self) -> Result<Vec<String>> {
         let listing = match fs::read_dir(&self.root) {
             Ok(listing) => listing,
@@ -267,13 +243,12 @@ impl Directory {
         &self.name
     }
 
-    /// The monitor socket, which lives in the runtime directory rather than
-    /// here: a Unix socket path is bounded at 107 bytes and this one is not.
+    /// The monitor socket, in the runtime directory to stay within the socket path limit.
     pub fn monitor(&self) -> &Path {
         &self.monitor
     }
 
-    /// Makes the directory private to its owner, since it holds a private key and may hold a password hash.
+    /// Makes the directory private, since it holds a private key.
     pub fn restrict(&self) -> Result<()> {
         use std::os::unix::fs::PermissionsExt as _;
         fs::set_permissions(&self.path, fs::Permissions::from_mode(0o700)).map_err(|source| {
@@ -321,16 +296,14 @@ impl Directory {
         self.path.join("id_ed25519.pub")
     }
 
-    /// Where the `virtiofsd` for one share listens. In the runtime directory
-    /// for the same reason the monitor is: the kernel's limit on the length
-    /// of a socket path does not care that this one is ours.
+    /// The socket one share's `virtiofsd` listens on.
     pub fn share_socket(&self, index: usize) -> PathBuf {
         let mut path = self.monitor.clone();
         path.set_extension(format!("fs{index}"));
         path
     }
 
-    /// The serial console, which a client attaches to and QEMU also logs to [`Directory::console`].
+    /// The serial console socket.
     pub fn console_socket(&self) -> PathBuf {
         let mut path = self.monitor.clone();
         path.set_extension("console");
@@ -349,8 +322,7 @@ impl Directory {
         self.path.join(format!("virtiofsd-{index}.log"))
     }
 
-    /// A host-key file of this instance's own, so that rebuilding a machine
-    /// never provokes a warning about the user's own `known_hosts`.
+    /// The instance's own host-key file.
     pub fn known_hosts(&self) -> PathBuf {
         self.path.join("known_hosts")
     }
@@ -373,8 +345,7 @@ impl Directory {
         })
     }
 
-    /// Writes the record through a temporary file, so that an interrupted
-    /// write leaves the previous record rather than half of a new one.
+    /// Writes the record atomically.
     pub fn write(&self, instance: &Instance) -> Result<()> {
         let text = basic_toml::to_string(instance).map_err(|source| Error::InstanceRecord {
             path: self.record(),
@@ -393,13 +364,7 @@ impl Directory {
         })
     }
 
-    /// Removes everything this instance owns in the runtime directory: the
-    /// monitor socket, one socket per share, and the pid file `virtiofsd`
-    /// writes beside its own and leaves behind when it exits.
-    ///
-    /// They all begin with the same short identifier, so this is a sweep
-    /// rather than a count that would have to be kept in step with the record
-    /// and would miss anything a later version adds.
+    /// Removes every runtime file sharing this instance's socket id.
     pub fn clear_runtime(&self) {
         let (Some(parent), Some(stem)) = (self.monitor.parent(), self.monitor.file_stem()) else {
             return;
@@ -420,8 +385,7 @@ impl Directory {
         }
     }
 
-    /// Removes the instance, runtime sockets included. The caller is
-    /// responsible for having stopped it first.
+    /// Removes a stopped instance, runtime files included.
     pub fn remove(&self) -> Result<()> {
         self.clear_runtime();
         fs::remove_dir_all(&self.path).map_err(|source| Error::State {
@@ -432,24 +396,20 @@ impl Directory {
     }
 }
 
-/// Seconds since the epoch, for the creation stamp. A clock before 1970 is not
-/// worth an error path.
+/// Seconds since the epoch, or zero before it.
 pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs())
 }
 
-/// A short, stable name for a socket. Derived from the instance name rather
-/// than stored, so it is the same on every run, and short so that the path
-/// stays inside the kernel's limit however long the instance name is.
+/// A short identifier derived from the name, keeping socket paths within the kernel limit.
 fn socket_id(name: &str) -> String {
     use sha2::Digest as _;
     hexadecimal(&sha2::Sha256::digest(name.as_bytes()), 8)
 }
 
-/// Instance names double as guest hostnames, so they are held to what a
-/// hostname allows rather than to what a directory allows.
+/// Names double as guest hostnames, so they follow hostname rules.
 fn check_name(name: &str) -> Result<()> {
     let refuse = |reason: &'static str| {
         Err(Error::InstanceName {
@@ -475,8 +435,7 @@ fn check_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Invents a name from the image it is built on, in the way `docker run`
-/// does: usable without being asked for, and readable afterwards.
+/// Invents a name from the repository, as `docker run` does.
 pub fn suggest_name(repository: &str, taken: &dyn Fn(&str) -> bool) -> String {
     let stem: String = repository
         .rsplit('/')
@@ -521,11 +480,7 @@ fn hexadecimal(bytes: &[u8], count: usize) -> String {
         })
 }
 
-/// Builds the cloud-init seed for an instance from its record.
-/// What cloud-init calls this machine.
-///
-/// The per-instance modules run once for a given id, so rewriting the seed
-/// only means anything if the id changes with it.
+/// The cloud-init instance id, which changes with each seed rewrite.
 fn instance_id(instance: &Instance) -> String {
     match instance.generation {
         0 => format!("{}-{}", instance.name, instance.created),
@@ -615,7 +570,6 @@ mod tests {
         assert_eq!(directory.name(), "one");
     }
 
-    /// The lock. Two commands racing for one name must not both proceed.
     #[test]
     fn a_name_cannot_be_claimed_twice() {
         let scratch = Scratch::new("twice");
@@ -653,8 +607,6 @@ mod tests {
         assert_eq!(directory.read().unwrap(), held);
     }
 
-    /// TOML cannot express a key after a table, so every combination of
-    /// populated and empty lists has to be written and read back.
     #[test]
     fn a_record_survives_the_round_trip_whichever_lists_are_empty() {
         let scratch = Scratch::new("combinations");
@@ -744,7 +696,6 @@ mod tests {
         assert_eq!((read.machine, read.disk), (Chipset::Q35, Disk::Virtio));
     }
 
-    /// Every machine made before these settings existed was BIOS with the default model.
     #[test]
     fn a_record_without_machine_settings_reads_as_the_defaults() {
         let scratch = Scratch::new("oldrecord");
@@ -830,9 +781,6 @@ mod tests {
         assert!(!directory.monitor().exists());
     }
 
-    /// `virtiofsd` writes a pid file beside its socket and leaves it there, so
-    /// removing the socket alone would fill the runtime directory with the
-    /// remains of every machine that ever had a share.
     #[test]
     fn removing_an_instance_takes_the_share_sockets_and_what_they_leave_behind() {
         let scratch = Scratch::new("runtime");
@@ -900,8 +848,6 @@ mod tests {
         assert_eq!(mode & 0o777, 0o700, "{mode:o}");
     }
 
-    /// The reason the socket does not live in the instance directory: this
-    /// path would be well past the kernel's limit if it did.
     #[test]
     fn the_monitor_socket_stays_inside_the_kernels_limit() {
         let instances = Instances::at(
@@ -1057,8 +1003,6 @@ mod tests {
         assert!(seed.image().is_ok(), "the seed should be buildable");
     }
 
-    /// The instance id must not change between boots of one instance, or
-    /// cloud-init treats the machine as new and configures it again.
     #[test]
     fn the_seed_identifier_is_stable_across_boots() {
         let held = instance("demo");
@@ -1069,8 +1013,6 @@ mod tests {
         );
     }
 
-    /// And it must change when the guest is meant to configure itself again,
-    /// which is the whole of what a generation is for.
     #[test]
     fn a_new_generation_is_a_machine_cloud_init_has_not_met() {
         let held = instance("demo");
@@ -1083,8 +1025,6 @@ mod tests {
         );
     }
 
-    /// A record written before generations existed keeps the identity it was
-    /// created with, so an upgrade does not reconfigure every guest.
     #[test]
     fn a_record_without_a_generation_keeps_the_identity_it_had() {
         let held = instance("demo");
@@ -1092,7 +1032,6 @@ mod tests {
         assert_eq!(instance_id(&held), "demo-1700000000");
     }
 
-    /// It is left out of the record while it is zero, for the same reason.
     #[test]
     fn a_first_generation_is_not_written_to_the_record() {
         let scratch = Scratch::new("generation");

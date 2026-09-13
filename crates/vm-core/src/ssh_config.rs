@@ -1,8 +1,4 @@
-//! Entries that let plain `ssh`, `scp` and `rsync` reach a machine by its name.
-//!
-//! Each machine's entry lives in its own directory, so removing the machine
-//! removes the entry. The user's own configuration gains one `Include` line
-//! that reads every machine's entry, and is not otherwise touched.
+//! Per-machine SSH config entries, read through one `Include` line in the user's config.
 
 use crate::access;
 use crate::error::{Error, Result};
@@ -45,7 +41,7 @@ fn quote(value: &str) -> String {
     }
 }
 
-/// Keyword and arguments of a configuration line, which may be written `Key value` or `Key=value`.
+/// A config line's keyword and arguments, in `Key value` or `Key=value` form.
 fn words(line: &str) -> Option<(&str, Vec<&str>)> {
     let line = line.trim();
     if line.is_empty() || line.starts_with('#') {
@@ -64,7 +60,7 @@ fn words(line: &str) -> Option<(&str, Vec<&str>)> {
     ))
 }
 
-/// A line before any `Host` or `Match` applies to every host; one after applies only within that block.
+/// Whether the line appears before any `Host` or `Match`, where it applies globally.
 fn includes(text: &str, line: &str) -> bool {
     for held in text.lines() {
         if held.trim() == line {
@@ -79,7 +75,7 @@ fn includes(text: &str, line: &str) -> bool {
     false
 }
 
-/// The user's configuration with the `Include` line in front, or nothing when it is already there.
+/// The config with the `Include` line prepended, or `None` if already present.
 pub fn with_include(text: &str, line: &str) -> Option<String> {
     if includes(text, line) {
         return None;
@@ -88,7 +84,7 @@ pub fn with_include(text: &str, line: &str) -> Option<String> {
     Some(format!("{INCLUDE_COMMENT}\n{line}\n{separator}{text}"))
 }
 
-/// Whether a `Host` line already names this host, which the machine's entry would take over.
+/// Whether a `Host` line already matches this name.
 pub fn names_host(text: &str, name: &str) -> bool {
     text.lines().filter_map(words).any(|(keyword, patterns)| {
         keyword.eq_ignore_ascii_case("host")
@@ -134,7 +130,7 @@ pub fn remove(directory: &Directory) -> Result<()> {
     }
 }
 
-/// Puts the `Include` line at the top of the user's configuration, returning whether it had to.
+/// Adds the `Include` line to the user's config, returning whether it was missing.
 pub fn ensure_include(user_config: &Path, instances: &Path) -> Result<bool> {
     let failure = |path: &Path, action| {
         let path = path.to_owned();
@@ -146,7 +142,7 @@ pub fn ensure_include(user_config: &Path, instances: &Path) -> Result<bool> {
     };
     let (text, target, mode) = match fs::read_to_string(user_config) {
         Ok(text) => {
-            // A configuration managed elsewhere is often a link, which a rename would replace.
+            // Write through a symlink rather than replacing it.
             let target = fs::canonicalize(user_config)
                 .map_err(failure(user_config, "resolve the SSH configuration"))?;
             let mode = fs::metadata(&target)
@@ -172,7 +168,7 @@ pub fn ensure_include(user_config: &Path, instances: &Path) -> Result<bool> {
     })
 }
 
-/// Writes through a temporary file, so an interrupted write leaves the previous file whole.
+/// Writes a file atomically with the given mode.
 fn replace(path: &Path, text: &str, mode: u32) -> Result<()> {
     let mut staging = path.as_os_str().to_owned();
     staging.push(".vm-new");
@@ -477,7 +473,6 @@ mod tests {
         assert!(lines.contains(&key.as_str()), "{text}");
     }
 
-    /// The `Include` pattern is what `ssh` expands, so it has to match where entries are written.
     #[test]
     fn the_include_pattern_matches_where_an_entry_is_written() {
         let scratch = Scratch::new("pattern");

@@ -16,8 +16,7 @@ pub struct Config {
     /// The directory inside that archive holding the entries.
     #[serde(default = "default_catalogue_path")]
     pub catalogue_path: String,
-    /// Whether `vm run` fetches an image it does not hold. Turning this off
-    /// makes a missing image an error rather than a download.
+    /// Whether `vm run` fetches an image it does not hold.
     #[serde(default = "default_auto_pull")]
     pub auto_pull: bool,
     /// Whether `vm run` adds an SSH configuration entry without being asked to.
@@ -49,8 +48,7 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Reads the user's configuration. An absent file is the default, not an
-    /// error; an unreadable or invalid one is reported rather than ignored.
+    /// Reads the user's config; an absent file gives the defaults.
     pub fn load() -> Result<Self> {
         crate::paths::config_directory().map_or_else(
             || Ok(Self::default()),

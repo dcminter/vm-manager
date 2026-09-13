@@ -2,8 +2,7 @@ use crate::reference::{Algorithm, Digest};
 use sha2::{Digest as _, Sha256, Sha512};
 use std::io::{self, Read, Write};
 
-/// Hashes everything written through it, so a download is verified in the same
-/// pass that writes it to disk.
+/// A writer that hashes everything written through it.
 pub struct Hashing<W> {
     inner: W,
     state: State,

@@ -124,15 +124,13 @@ enum Command {
         /// Processors
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=255))]
         cpus: Option<u32>,
-        /// Forward a host port to a guest port, as host:guest, replacing the
-        /// forwards it had
+        /// Forward a host port to a guest port, as host:guest, replacing existing forwards
         #[arg(long, short, value_parser = machines::parse_port, conflicts_with = "no_publish")]
         publish: Vec<vm_core::instance::Port>,
         /// Forward nothing
         #[arg(long)]
         no_publish: bool,
-        /// Share a host directory with the guest, as host:guest, replacing the
-        /// shares it had
+        /// Share a host directory with the guest, as host:guest, replacing existing shares
         #[arg(long, short = 'v', value_parser = machines::parse_share, conflicts_with = "no_volume")]
         volume: Vec<vm_core::instance::Share>,
         /// Share nothing
@@ -312,8 +310,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// A list given on the command line replaces what an instance had; asking for
-/// nothing is different from saying nothing.
+/// A list given on the command line replaces the old one; `None` means none was given.
 fn replacement<T: Clone>(given: &[T], none: bool) -> Option<Vec<T>> {
     if none {
         Some(Vec::new())
@@ -333,8 +330,7 @@ fn asked_password(asked: bool) -> vm_core::Result<Option<String>> {
     }
 }
 
-/// What a command left behind: something to write out, or nothing, because it
-/// wrote as it went and there is no last word to add.
+/// A report to write, or nothing if the command wrote as it went.
 enum Outcome {
     Reported(Box<dyn Report>),
     Written,
@@ -347,8 +343,7 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Outcome> {
     catalogue_command(cli, style).map(Outcome::Reported)
 }
 
-/// The commands that read no catalogue and no store, so they work even when
-/// neither is in place. `None` means this was not one of them.
+/// Runs a command that needs no catalogue or store; `None` if this is not one.
 fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> {
     let report: Box<dyn Report> = match &cli.command {
         Command::Ps { all, follow } => {
@@ -535,8 +530,7 @@ const fn toggle(on: bool, off: bool) -> Option<bool> {
     }
 }
 
-/// The catalogue as read: what was fetched, with anything cloned here
-/// layered over it.
+/// The fetched catalogue, with local clones layered over it.
 fn catalogue_layers() -> Vec<std::path::PathBuf> {
     let mut layers = vec![paths::catalogue_directory()];
     layers.extend(paths::local_catalogue_directory());
@@ -581,11 +575,7 @@ fn images(catalogue: &Catalogue, store: &Store, all_architectures: bool) -> repo
     reports::Images { rows }
 }
 
-/// What a held build takes, for an entry that does not say.
-///
-/// The catalogue is the authority on what a pull will cost, because it can
-/// answer for an image nobody has fetched. Once one is here, the file itself
-/// answers, and it is the same number.
+/// The size of a held image, for an entry that does not state one.
 fn held_size(store: &Store, artifact: &vm_core::catalogue::Artifact) -> Option<u64> {
     std::fs::metadata(store.path_for(&artifact.digest))
         .ok()
@@ -648,8 +638,6 @@ mod tests {
 
     use super::*;
 
-    /// Saying nothing leaves an instance as it was. Saying "none" is a change
-    /// like any other, and the two must not look the same.
     #[test]
     fn nothing_given_is_different_from_nothing_wanted() {
         let given = [1, 2];
@@ -658,9 +646,6 @@ mod tests {
         assert_eq!(replacement::<i32>(&[], true), Some(Vec::new()));
     }
 
-    /// The flags conflict, so this is the parser's job rather than a rule the
-    /// reader has to know: --no-publish wins only because it cannot be given
-    /// alongside a forward.
     #[test]
     fn a_list_and_its_refusal_cannot_be_asked_for_together() {
         use clap::Parser as _;
@@ -670,9 +655,6 @@ mod tests {
         assert!(outcome.is_err());
     }
 
-    /// Following a listing is not the same as listing everything, and the two
-    /// have to be combinable: a display of what is there includes what is not
-    /// running.
     #[test]
     fn a_listing_can_be_followed_and_can_include_what_is_stopped() {
         use clap::Parser as _;
@@ -694,8 +676,6 @@ mod tests {
         ));
     }
 
-    /// Unlike `vm logs --follow`, this one streams a document as readily as a
-    /// table, so no format is refused.
     #[test]
     fn a_followed_listing_is_not_refused_a_document_format() {
         use clap::Parser as _;
@@ -801,8 +781,6 @@ mod tests {
         );
     }
 
-    /// Every command is reachable, and none of them collides with another over
-    /// a short flag.
     #[test]
     fn the_command_line_is_consistent() {
         use clap::CommandFactory as _;

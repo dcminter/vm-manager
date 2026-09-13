@@ -177,8 +177,7 @@ pub enum Error {
     QmpIo {
         source: std::io::Error,
     },
-    /// The far end went away. Expected after `quit`, and after a guest powers
-    /// itself down, so it is not a fault by itself.
+    /// The monitor closed the connection, as it does after `quit` or a guest power-down.
     QmpClosed,
     QmpTimeout {
         seconds: u64,
@@ -194,8 +193,7 @@ pub enum Error {
 }
 
 impl Error {
-    /// A stable slug for structured output. These names are an interface:
-    /// scripts match on them, so they outlive any rewording of the message.
+    /// A stable identifier for structured output.
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::Reference { .. } => "invalid-reference",

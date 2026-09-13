@@ -1,8 +1,4 @@
-//! The instance commands: starting a machine, listing them, stopping one and
-//! removing it.
-//!
-//! Everything here is the composition; the pieces it composes — the state
-//! directory, the seed, the monitor, the supervisor — carry their own tests.
+//! Instance commands.
 
 use crate::progress;
 use crate::reports;
@@ -18,16 +14,14 @@ use vm_core::store::{Pulled, Store};
 use vm_core::value::Value;
 use vm_core::{host_architecture, hypervisor, instance, keys, process, qmp, seed};
 
-/// How long to wait for a machine to open its monitor before concluding that
-/// it did not start. Under emulation a machine is slow to boot but quick to
-/// answer, because the monitor is open before the guest runs at all.
+/// How long a machine has to open its monitor before it counts as failed.
 const MONITOR_WAIT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Pull {
     /// Fetch the image even if it is already held.
     Always,
-    /// Fetch it only if it is not held. The default.
+    /// Fetch it only if it is not held (default).
     Missing,
     /// Never fetch; a missing image is an error.
     Never,
@@ -50,7 +44,7 @@ pub struct Request {
     pub disk: Option<Disk>,
     /// A `$6$` hash for console login.
     pub password: Option<String>,
-    /// Whether to add an SSH configuration entry; absent means as the configuration file says.
+    /// Whether to add an SSH config entry; absent defers to the config file.
     pub ssh_config: Option<bool>,
 }
 
@@ -122,8 +116,7 @@ pub fn run(
         vm_core::ssh_config::check_name(&user_ssh_config()?, &name)?;
     }
     let directory = instances.create(&name)?;
-    // Everything after this point owns a claimed name, so a failure has to
-    // give it back rather than leave a directory nothing can start.
+    // From here a failure must release the claimed name.
     match build(
         store, &directory, entry, artifact, request, &instances, ssh_config,
     ) {
@@ -175,8 +168,7 @@ fn build(
     distinguish(&mut held.shares);
 
     if held.seeded {
-        // A published forward to the guest's SSH port is the one to use; only
-        // allocate when the user has not already arranged one.
+        // Prefer a published forward to port 22 over allocating one.
         held.ssh_port = Some(match held.ports.iter().find(|port| port.guest == 22) {
             Some(port) => port.host,
             None => free_port()?,
@@ -208,11 +200,7 @@ fn build(
     ))
 }
 
-/// Starts the hypervisor and waits for it to answer.
-///
-/// A machine that dies on its arguments dies within a moment of starting, so
-/// waiting for its monitor is what separates "started" from "reported as
-/// started". What it says about acceleration comes free with the wait.
+/// Starts the hypervisor and waits for its monitor, reporting whether KVM is in use.
 fn launch(directory: &Directory, held: &mut Instance) -> Result<Option<bool>> {
     prepare_runtime(directory.monitor())?;
     if held.firmware == Firmware::Uefi {
@@ -220,8 +208,7 @@ fn launch(directory: &Directory, held: &mut Instance) -> Result<Option<bool>> {
     }
     // Sockets left behind by a machine that is gone would refuse the new one.
     directory.clear_runtime();
-    // The hypervisor connects to these sockets, so something has to be
-    // listening on them before it starts.
+    // The hypervisor connects to these sockets, so they must be listening first.
     if let Err(error) = serve_shares(directory, held) {
         reap_shares(held);
         return Err(error);
@@ -266,8 +253,7 @@ fn serve_shares(directory: &Directory, held: &mut Instance) -> Result<()> {
         let handle = vm_core::hypervisor::Detached.start(&launch)?;
         held.shares[index].pid = Some(handle.pid);
         held.shares[index].started = Some(handle.started);
-        // The hypervisor refuses a socket that is not there yet, and the
-        // server takes a moment to create it.
+        // The hypervisor refuses a socket that does not exist yet.
         await_socket(&socket, &handle)?;
     }
     Ok(())
@@ -293,8 +279,7 @@ fn await_socket(socket: &Path, handle: &process::Handle) -> Result<()> {
     })
 }
 
-/// Ends every share server an instance owns. A server left behind holds its
-/// socket and its share open against a machine that is no longer there.
+/// Ends every share server an instance owns.
 fn reap_shares(held: &mut Instance) {
     for share in &mut held.shares {
         if let Some(handle) = share.handle() {
@@ -304,7 +289,7 @@ fn reap_shares(held: &mut Instance) {
     }
 }
 
-/// Writes the machine's SSH configuration entry, returning the user's configuration if it gained the `Include` line.
+/// Writes the SSH config entry, returning the user's config path if it gained the `Include` line.
 fn publish(
     directory: &Directory,
     held: &Instance,
@@ -361,8 +346,7 @@ pub fn start(name: &str, changes: &Changes) -> Result<reports::Run> {
     let directory = instances.open(name)?;
     let mut held = directory.read()?;
     if held.is_running() {
-        // Every one of these is read when the hypervisor starts, so a machine
-        // that is already running would report a change it had not made.
+        // Settings take effect at start, so a running machine cannot change.
         if changes.any() {
             return Err(Error::ChangeWhileRunning {
                 name: name.to_owned(),
@@ -383,8 +367,7 @@ pub fn start(name: &str, changes: &Changes) -> Result<reports::Run> {
         vm_core::ssh_config::check_name(&user_ssh_config()?, name)?;
     }
     apply(&directory, &mut held, changes)?;
-    // The port it used last time may belong to something else by now, and a
-    // forward that cannot bind would take the whole machine down with it.
+    // The last port used may now be taken.
     if held.seeded && !held.ssh_port.is_some_and(port_is_free) {
         held.ssh_port = Some(free_port()?);
     }
@@ -401,8 +384,7 @@ pub fn start(name: &str, changes: &Changes) -> Result<reports::Run> {
     ))
 }
 
-/// What `vm start` was asked to change. Absent means "as it was", which is not
-/// the same as an empty list: clearing the ports is asked for explicitly.
+/// What `vm start` was asked to change; `None` leaves a setting as it was.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Changes {
     pub memory: Option<u64>,
@@ -438,12 +420,7 @@ impl Changes {
     }
 }
 
-/// Folds the changes into the record before it is started again.
-///
-/// The seed is rewritten only for what the guest reads from it. Memory,
-/// processors and forwards are the hypervisor's business and the guest never
-/// learns of them, but a share it should mount and an account it should create
-/// are cloud-init's, and it acts on those once per instance id.
+/// Folds the changes into the record, rewriting the seed where the guest reads them.
 fn apply(directory: &Directory, held: &mut Instance, changes: &Changes) -> Result<()> {
     if !changes.any() {
         return Ok(());
@@ -458,7 +435,7 @@ fn apply(directory: &Directory, held: &mut Instance, changes: &Changes) -> Resul
     if let Some(cpus) = changes.cpus {
         held.cpus = cpus;
     }
-    // The variable store is kept across a switch to BIOS so a return to UEFI finds its boot entries.
+    // The variable store is kept so a return to UEFI finds its boot entries.
     if let Some(firmware) = changes.firmware {
         held.firmware = firmware;
     }
@@ -471,14 +448,11 @@ fn apply(directory: &Directory, held: &mut Instance, changes: &Changes) -> Resul
     if let Some(disk) = changes.disk {
         held.disk = disk;
     }
-    // Two different things: the seed's contents changing, and the guest being
-    // told it is a machine it has not seen before.
     let mut rewrite = false;
     let mut renew = false;
     if let Some(ports) = changes.ports.clone() {
         held.ports = ports;
-        // The forward to SSH was chosen against the old list; choosing again
-        // is what keeps a published forward and the one `vm ssh` uses the same.
+        // Choose again so a published SSH forward and the one `vm ssh` uses agree.
         if held.seeded {
             held.ssh_port = held
                 .ports
@@ -490,13 +464,11 @@ fn apply(directory: &Directory, held: &mut Instance, changes: &Changes) -> Resul
     if let Some(shares) = changes.shares.clone() {
         held.shares = shares;
         distinguish(&mut held.shares);
-        // Shares are mounted from the seed on every boot, so a new list is
-        // acted on without the guest having to think itself new.
+        // Shares are mounted from the seed on every boot.
         rewrite = true;
     }
     if let Some(user) = changes.user.clone() {
-        // An account is made once, and only for a machine cloud-init has not
-        // met. The one it already has is left where it is.
+        // cloud-init creates accounts only on a new instance id.
         renew |= user != held.user;
         held.user = user;
     }
@@ -506,7 +478,7 @@ fn apply(directory: &Directory, held: &mut Instance, changes: &Changes) -> Resul
                 name: held.name.clone(),
             });
         }
-        // cloud-init applies chpasswd once per instance id, so the guest must think itself new.
+        // cloud-init applies chpasswd only on a new instance id.
         renew = true;
         held.password = Some(password.clone());
         directory.restrict()?;
@@ -528,8 +500,7 @@ fn apply(directory: &Directory, held: &mut Instance, changes: &Changes) -> Resul
     if (rewrite || renew) && held.seeded {
         if renew {
             held.generation = held.generation.saturating_add(1);
-            // A machine cloud-init thinks is new gets fresh host keys, so the
-            // remembered one would look like an impostor.
+            // A new instance id regenerates host keys.
             let _ = std::fs::remove_file(directory.known_hosts());
         }
         let public = keys::read_public(&directory.key())?;
@@ -538,8 +509,7 @@ fn apply(directory: &Directory, held: &mut Instance, changes: &Changes) -> Resul
     directory.write(held)
 }
 
-/// Replaces this process with `ssh`, so that the terminal, the signals and the
-/// exit status are the guest's rather than filtered through ours.
+/// Replaces this process with `ssh`.
 pub fn connect(name: &str, command: &[String]) -> Result<std::convert::Infallible> {
     let instances = Instances::discover()?;
     let directory = instances.open(name)?;
@@ -570,7 +540,7 @@ pub fn copy(from: &str, to: &str) -> Result<std::convert::Infallible> {
 
 fn exec(program: &str, arguments: &[String]) -> Error {
     use std::os::unix::process::CommandExt as _;
-    // This returns only on failure; on success the process is gone.
+    // Returns only on failure.
     let source = std::process::Command::new(program).args(arguments).exec();
     if source.kind() == std::io::ErrorKind::NotFound {
         Error::MissingTool {
@@ -586,10 +556,7 @@ fn exec(program: &str, arguments: &[String]) -> Error {
     }
 }
 
-/// A free port on the loopback address, found by asking the kernel for one.
-/// There is a moment between letting it go and the hypervisor taking it; if
-/// something else wins that race the hypervisor says so and the run is
-/// reported as failed rather than as started.
+/// A free loopback port, chosen by the kernel.
 fn free_port() -> Result<u16> {
     std::net::TcpListener::bind(("127.0.0.1", 0))
         .and_then(|listener| listener.local_addr())
@@ -604,8 +571,7 @@ fn port_is_free(port: u16) -> bool {
     std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
-/// A hypervisor that refuses its arguments says why on its own output and
-/// then exits, so its log is the diagnosis and repeating it is the whole job.
+/// Adds the hypervisor's log to the error it exited with.
 fn refusal(directory: &Directory, error: Error) -> Error {
     let complaint = std::fs::read_to_string(directory.log())
         .unwrap_or_default()
@@ -629,8 +595,7 @@ fn prepare_runtime(monitor: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Waits for the machine to answer, and asks it whether it is accelerated
-/// while it has its attention.
+/// Waits for the monitor, then asks whether the machine is accelerated.
 fn await_monitor(monitor: &Path, handle: &process::Handle) -> Result<Option<bool>> {
     let deadline = Instant::now() + MONITOR_WAIT;
     loop {
@@ -655,9 +620,7 @@ fn await_monitor(monitor: &Path, handle: &process::Handle) -> Result<Option<bool
     }
 }
 
-/// Whether the machine got KVM. It falls back to emulation rather than
-/// failing, and the difference is the difference between seconds and minutes,
-/// so it is worth saying which happened.
+/// Whether the machine got KVM rather than emulation.
 fn acceleration(client: &mut qmp::Connection) -> Option<bool> {
     let reply = client.execute("query-kvm", None).ok()?;
     match reply.get("enabled") {
@@ -697,34 +660,24 @@ pub fn list(all: bool) -> Result<reports::Machines> {
     Ok(reports::Machines { rows, all })
 }
 
-/// How often a followed listing is taken again. A machine's memory and disk
-/// move slowly enough that a second is already generous.
+/// How often a followed listing refreshes.
 const REFRESH: Duration = Duration::from_secs(1);
 
-/// Lists instances over and over until the reader has had enough.
-///
-/// On a terminal each pass clears the screen, so what is there stays in one
-/// place and can be read as a display. Redirected, and in the document
-/// formats, one listing simply follows another, because a reader that is
-/// piping this somewhere wants all of them rather than the latest.
+/// Lists instances repeatedly, clearing the screen between listings on a terminal.
 pub fn watch(all: bool, format: crate::output::Format, style: Style) -> Result<()> {
     use std::io::{IsTerminal as _, Write as _};
     let clearing = format.is_text() && std::io::stdout().is_terminal();
     loop {
         let report = list(all)?;
         if clearing {
-            // Home, then clear: clearing first leaves the cursor wherever the
-            // last listing left it.
+            // Home before clearing, so the cursor starts at the top.
             let _ = write!(std::io::stdout(), "\u{1b}[H\u{1b}[2J");
         }
         if format == crate::output::Format::Yaml {
-            // Without it, one listing's items run on from the last one's and
-            // the stream reads as a single ever-growing list. JSON needs no
-            // equivalent: its values are self-delimiting.
+            // Separates YAML documents.
             let _ = writeln!(std::io::stdout(), "---");
         }
-        // A sink that has gone is the end of the stream rather than a failure
-        // to report: `vm ps --follow | head` ends this way by design.
+        // A closed output, as with `| head`, ends the stream.
         if crate::output::emit(&report, format, style).is_err() {
             return Ok(());
         }
@@ -732,11 +685,7 @@ pub fn watch(all: bool, format: crate::output::Format, style: Style) -> Result<(
     }
 }
 
-/// Refuses a machine that cannot answer.
-///
-/// The forward to a paused guest is still bound, so connecting to one succeeds
-/// and then waits for a guest that will never reply. Saying so costs a round
-/// trip on a local socket, which is worth it not to hang.
+/// Refuses a paused machine, which would otherwise accept a connection and hang.
 fn answering(held: &Instance) -> Result<()> {
     if held.is_running() && doing(held) == "paused" {
         return Err(Error::InstancePaused {
@@ -746,25 +695,17 @@ fn answering(held: &Instance) -> Result<()> {
     Ok(())
 }
 
-/// How long to wait for a machine to say what it is doing. A listing should
-/// not stall on one wedged machine, and the record already says it is running.
+/// How long a listing waits for a machine's status.
 const STATUS_WAIT: Duration = Duration::from_secs(2);
 
-/// What a running machine says it is doing.
-///
-/// Only the machine knows whether it is paused, and a machine that cannot
-/// answer is reported as what looking for its process already established.
+/// What a running machine reports it is doing.
 fn doing(held: &Instance) -> String {
     qmp::connect_with_timeout(&held.monitor, STATUS_WAIT)
         .and_then(|mut client| client.status())
         .unwrap_or_else(|_| "running".to_owned())
 }
 
-/// Stops the guest's processors without the guest knowing.
-///
-/// The machine, its memory and everything it holds open stay where they are;
-/// nothing of it is written anywhere, so this outlives neither a host reboot
-/// nor `vm kill`.
+/// Stops the guest's processors.
 pub fn pause(name: &str) -> Result<reports::Switched> {
     switch(name, true)
 }
@@ -827,8 +768,7 @@ pub fn stop(name: &str, timeout: Duration, force: bool, text: bool) -> Result<re
             let _ = client.quit();
         }
     } else if let Ok(mut client) = qmp::connect(&held.monitor) {
-        // A paused guest cannot act on the power button, and waiting for it to
-        // would only end in the same kill by a longer road.
+        // A paused guest cannot act on the power button.
         let _ = client.resume();
         client.powerdown()?;
     } else {
@@ -845,8 +785,7 @@ pub fn stop(name: &str, timeout: Duration, force: bool, text: bool) -> Result<re
     }
 
     if !wait_for_exit(&handle, timeout) {
-        // The guest ignored the power button, which is what a machine early in
-        // its boot does: the handler is not loaded yet.
+        // A guest early in its boot ignores the power button.
         if outcome == reports::StopOutcome::PoweredDown {
             outcome = reports::StopOutcome::Unresponsive;
         }
@@ -881,24 +820,18 @@ fn wait_for_exit(handle: &process::Handle, timeout: Duration) -> bool {
     !handle.is_running()
 }
 
-/// How consistent a cloned disk is, which depends on what could be done
-/// about the guest at the time.
+/// How consistent a cloned disk is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Consistency {
-    /// The machine was not running. Nothing was in flight.
+    /// The machine was not running.
     Stopped,
     /// The guest was paused first, so no write was half-done.
     Paused,
-    /// Taken from under a running guest. Whatever was in its page cache and
-    /// not yet on disk is simply absent.
+    /// Taken from a running guest, so unflushed writes are missing.
     Running,
 }
 
-/// Clones a machine's disk into the store as a new image.
-///
-/// A running guest is paused for the duration unless the user insists
-/// otherwise, because a disk taken from under one is crash-consistent at best
-/// and there is no guest agent here to freeze its filesystems properly.
+/// Clones a machine's disk into the store, pausing a running guest unless forced.
 pub fn clone(name: &str, target: &str, force: bool, text: bool) -> Result<reports::Cloned> {
     let reference: vm_core::Reference = target.parse()?;
     let instances = Instances::discover()?;
@@ -914,19 +847,14 @@ pub fn clone(name: &str, target: &str, force: bool, text: bool) -> Result<report
         (true, true) => Consistency::Running,
     };
 
-    // A clone reads the whole backing chain and then reads the result back to
-    // hash it, either of which on a large image is long enough that a silent
-    // tool looks like a wedged one. Both passes are named, because a bar that
-    // reaches the end and starts again otherwise reads as a stall.
+    // Both passes are named so a restarting bar does not read as a stall.
     let mut bar = progress::Bar::new("", text);
     let cloned = if consistency == Consistency::Paused {
         let mut client = qmp::connect(&held.monitor)?;
-        // A machine the user paused is left paused; only one paused here is
-        // let go again.
+        // A machine the user paused stays paused.
         let was_running = client.status()? == "running";
         client.pause()?;
-        // The guest stays paused until this returns, so resuming has to happen
-        // on the way out whether the clone worked or not.
+        // Resume whether or not the clone succeeds.
         let outcome = vm_core::clone::image(
             &store,
             &local,
@@ -991,17 +919,7 @@ pub fn remove(name: &str, force: bool) -> Result<reports::Removed> {
     })
 }
 
-/// Removes an image from the store.
-///
-/// What is removed is the name. A reference from the fetched catalogue survives
-/// and simply shows as unheld again; one made here by `vm clone` has nowhere
-/// to be fetched from, so its entry goes with it rather than naming an image
-/// nothing could ever produce.
-///
-/// The bytes go with the last name for them. Images are addressed by digest, so
-/// two clones of an unchanged disk are one file under two names, and removing
-/// the file out from under the other one would strand an image that cannot be
-/// fetched back.
+/// Removes an image name from the store, and its file with the last name for it.
 pub fn remove_image(
     catalogue: &Catalogue,
     store: &Store,
@@ -1010,12 +928,10 @@ pub fn remove_image(
 ) -> Result<reports::Untagged> {
     let parsed: vm_core::Reference = reference.parse()?;
     let (entry, artifact) = catalogue.resolve(&parsed, host_architecture())?;
-    // An entry with nowhere to fetch from was written here, so it is ours to
-    // take away; one the catalogue provides would come back on the next update.
+    // A clone's entry was written here, so it is removed with the image.
     let local = artifact.url.is_none();
     if !store.contains(&artifact.digest) && !local {
-        // There is nothing to remove and the name will still be there
-        // afterwards, so this would do nothing at all.
+        // Nothing to remove, and the name would remain.
         return Err(Error::UnheldImage {
             reference: reference.to_owned(),
         });
@@ -1052,12 +968,7 @@ pub fn remove_image(
     })
 }
 
-/// Other names for the same bytes that could not get them back.
-///
-/// Only an image made here is at risk: one the catalogue provides is listed as
-/// unfetched and pulled again, which is the point of removing it. The machines
-/// built on an image are a separate question, answered by `holders`, and one
-/// the user can overrule; this one they cannot, because nothing could undo it.
+/// Other names for the same file that could not be fetched again.
 fn stranded(
     catalogue: &Catalogue,
     entry: &vm_core::catalogue::Entry,
@@ -1099,8 +1010,7 @@ pub fn logs(name: &str, lines: Option<usize>) -> Result<reports::Console> {
     let console = directory.console();
     let text = match std::fs::read(&console) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        // A machine that has never started has no console, which is not a
-        // failure to report; there is simply nothing to show.
+        // A machine that has never started has no console.
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(source) => {
             return Err(Error::State {
@@ -1123,11 +1033,7 @@ fn tail(text: &str, lines: Option<usize>) -> Vec<String> {
     all[from..].iter().map(|line| (*line).to_owned()).collect()
 }
 
-/// Writes the console out as it is written, until the machine stops.
-///
-/// The whole file comes first, so following a machine that has already booted
-/// shows what it said on the way. Text only: a document cannot be emitted a
-/// line at a time and still be a document.
+/// Writes the console as it grows, starting with what is already there, until the machine stops.
 pub fn follow(name: &str, from: Option<usize>) -> Result<()> {
     use std::io::{Read as _, Write as _};
     let instances = Instances::discover()?;
@@ -1136,8 +1042,6 @@ pub fn follow(name: &str, from: Option<usize>) -> Result<()> {
     let mut out = std::io::stdout().lock();
     let mut file = match std::fs::File::open(&console) {
         Ok(file) => file,
-        // Nothing has been written yet, and waiting for a file that may never
-        // appear is worse than saying so.
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
             return Ok(());
         }
@@ -1149,9 +1053,7 @@ pub fn follow(name: &str, from: Option<usize>) -> Result<()> {
             });
         }
     };
-    // The whole file first, so following a machine that has already booted
-    // shows what it said on the way. Reading it leaves the handle where the
-    // next write will land, so nothing between the two is missed.
+    // Reading to the end leaves the handle where the next write lands.
     let mut buffer = Vec::new();
     if file.read_to_end(&mut buffer).is_err() {
         return Ok(());
@@ -1201,8 +1103,7 @@ pub fn parse_memory(text: &str) -> std::result::Result<u64, String> {
     Ok(total)
 }
 
-/// Turns `/host/path:/guest/path` into a share, with a tag taken from the
-/// host directory's own name so that the guest's fstab reads as something.
+/// Parses `/host/path:/guest/path`, tagging the share with the host directory's name.
 pub fn parse_share(text: &str) -> std::result::Result<Share, String> {
     let (source, target) = text
         .rsplit_once(':')
@@ -1229,8 +1130,7 @@ pub fn parse_share(text: &str) -> std::result::Result<Share, String> {
     })
 }
 
-/// A tag the guest will accept: at most 36 bytes by virtiofs convention, and
-/// only the characters the seed's own rules allow.
+/// A virtiofs tag of at most 36 bytes, in characters the seed allows.
 fn tag_for(source: &Path) -> String {
     let stem: String = source
         .file_name()
@@ -1273,8 +1173,6 @@ pub fn parse_port(text: &str) -> std::result::Result<Port, String> {
     })
 }
 
-/// The seed's own rules apply to the user name, so they are checked here
-/// rather than at the point where the machine is about to boot.
 pub fn parse_firmware(text: &str) -> std::result::Result<Firmware, String> {
     text.parse().map_err(|error: Error| error.to_string())
 }
@@ -1406,12 +1304,10 @@ mod tests {
         };
         apply(&directory, &mut held, &changes).unwrap();
         assert_eq!((held.memory, held.cpus), (4096, 8));
-        // And it survives, because the next start reads the record.
+        // The change is persisted.
         assert_eq!(directory.read().unwrap().memory, 4096);
     }
 
-    /// A published forward to the guest's SSH port is the one `vm ssh` uses,
-    /// so replacing the forwards has to be able to change it.
     #[test]
     fn publishing_the_guests_ssh_port_takes_over_the_one_it_had() {
         let scratch = Scratch::new("ssh");
@@ -1427,8 +1323,6 @@ mod tests {
         assert_eq!(held.ssh_port, Some(2022));
     }
 
-    /// Clearing the forwards leaves the machine reachable: `vm start` picks a
-    /// port for it, as it does for a machine that published nothing.
     #[test]
     fn clearing_the_forwards_leaves_nothing_forwarded() {
         let scratch = Scratch::new("noports");
@@ -1461,8 +1355,6 @@ mod tests {
         assert_ne!(held.shares[0].tag, held.shares[1].tag);
     }
 
-    /// Shares are mounted from the seed on every boot, so the guest acts on a
-    /// new list without being told it is a machine it has never seen.
     #[test]
     fn changing_the_shares_does_not_make_the_guest_a_new_machine() {
         let scratch = Scratch::new("samehost");
@@ -1484,8 +1376,6 @@ mod tests {
         );
     }
 
-    /// An account is created once, and only for a machine cloud-init has not
-    /// met, so a new one means a new instance id and fresh host keys with it.
     #[test]
     fn changing_the_account_makes_the_guest_a_new_machine() {
         let scratch = Scratch::new("newuser");
@@ -1654,7 +1544,6 @@ mod tests {
         assert_eq!(stored.generation, 0);
     }
 
-    /// Checked against what the machine will be once the change is made, not against either half alone.
     #[test]
     fn a_disk_controller_the_resulting_chipset_lacks_is_refused_and_nothing_changes() {
         let scratch = Scratch::new("chipsetmismatch");
@@ -1698,8 +1587,6 @@ mod tests {
         assert!(directory.known_hosts().exists());
     }
 
-    /// An image that takes no seed has nothing to rewrite, and asking for a
-    /// share on one must not try.
     #[test]
     fn a_machine_that_takes_no_seed_is_changed_without_one() {
         let scratch = Scratch::new("unseeded");
@@ -1724,8 +1611,6 @@ mod tests {
         assert_eq!(tail(text, Some(0)).len(), 0);
     }
 
-    /// A machine that has never started has no console, which is nothing to
-    /// show rather than something to complain about.
     #[test]
     fn a_console_that_was_never_written_is_empty() {
         let seed = seed::Seed {
@@ -1755,8 +1640,6 @@ mod tests {
         assert!(parse_memory("2T").is_err());
     }
 
-    /// A machine too small to boot is a slow way to find out that a number was
-    /// meant to be gibibytes.
     #[test]
     fn memory_below_what_will_boot_is_refused() {
         assert!(parse_memory("2").is_err());
@@ -1802,8 +1685,6 @@ mod tests {
         assert!(parse_share("/nonexistent/directory:/mnt").is_err());
     }
 
-    /// A path is easier to get wrong than to get right, and a share that
-    /// silently does not appear in the guest is a bad way to learn that.
     #[test]
     fn a_share_of_something_that_is_not_a_directory_is_refused() {
         let mut path = std::env::temp_dir();
@@ -1824,8 +1705,6 @@ mod tests {
         }
     }
 
-    /// Two directories can have the same name, and two shares cannot have the
-    /// same tag: the guest would mount one of them twice.
     #[test]
     fn tags_that_would_collide_are_made_distinct() {
         let mut shares = vec![share("work"), share("work"), share("src"), share("work")];

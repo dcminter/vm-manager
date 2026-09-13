@@ -1,4 +1,4 @@
-/// A rendered document. Ordered so that output is stable between runs.
+/// A document, with maps kept in insertion order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Null,
@@ -45,8 +45,7 @@ fn number(held: f64) -> String {
     held.to_string()
 }
 
-/// One compact line, which is what a protocol wants: no indentation, and a
-/// terminating newline so the reader at the far end knows the message ended.
+/// Compact JSON with a trailing newline.
 pub fn to_json_line(value: &Value) -> String {
     let mut text = String::new();
     write_json_line(value, &mut text);
@@ -243,8 +242,7 @@ fn yaml_scalar(value: &Value) -> String {
     }
 }
 
-/// Plain YAML scalars are only safe when they cannot be read as something
-/// else, so anything ambiguous is emitted double-quoted.
+/// Whether a YAML scalar must be quoted to avoid being read as another type.
 fn needs_quoting(text: &str) -> bool {
     const RESERVED: [char; 14] = [
         '-', '?', ':', ',', '[', ']', '{', '}', '#', '&', '*', '!', '%', '@',
@@ -276,8 +274,7 @@ fn needs_quoting(text: &str) -> bool {
     text.parse::<f64>().is_ok()
 }
 
-/// Why a document could not be read. The position is a byte offset, which is
-/// enough to find the fault in a protocol message.
+/// A parse failure at a byte offset.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invalid {
     pub at: usize,
@@ -290,14 +287,10 @@ impl std::fmt::Display for Invalid {
     }
 }
 
-/// Nesting beyond this is refused rather than recursed into. Nothing this
-/// parser reads is deeply nested, and the alternative to a limit is a stack
-/// overflow on a hostile document.
+/// The deepest nesting parsed, to bound recursion.
 const MAX_DEPTH: usize = 64;
 
-/// Reads a JSON document. Trailing whitespace is allowed; trailing anything
-/// else is not, so a truncated or doubled message is a fault rather than a
-/// half-read value.
+/// Reads one JSON document, allowing only trailing whitespace.
 pub fn from_json(text: &str) -> Result<Value, Invalid> {
     let bytes = text.as_bytes();
     let mut at = 0;
@@ -426,8 +419,7 @@ fn parse_string(bytes: &[u8], at: &mut usize) -> Result<String, Invalid> {
                 });
             }
             _ => {
-                // Multi-byte sequences are copied through as they stand; the
-                // input is already known to be valid UTF-8.
+                // The input is valid UTF-8, so multi-byte sequences are copied as is.
                 let start = *at - 1;
                 let mut end = *at;
                 while end < bytes.len() && bytes[end] & 0xC0 == 0x80 {
@@ -475,8 +467,7 @@ fn escape(bytes: &[u8], at: &mut usize) -> Result<char, Invalid> {
     })
 }
 
-/// A code point above the basic plane arrives as a surrogate pair, so the
-/// second half is read here rather than left to become a replacement character.
+/// Reads a `\u` escape, combining surrogate pairs.
 fn unicode_escape(bytes: &[u8], at: &mut usize) -> Result<char, Invalid> {
     let first = hex4(bytes, at)?;
     if (0xD800..0xDC00).contains(&first) {
@@ -527,8 +518,7 @@ fn hex4(bytes: &[u8], at: &mut usize) -> Result<u32, Invalid> {
     Ok(value)
 }
 
-/// Whole non-negative numbers keep their exact value; everything else becomes
-/// a float, which is what JSON itself promises and no less.
+/// Non-negative integers stay exact; other numbers become floats.
 fn parse_number(bytes: &[u8], at: &mut usize) -> Result<Value, Invalid> {
     let start = *at;
     while let Some(byte) = bytes.get(*at) {
@@ -572,8 +562,7 @@ fn skip_space(bytes: &[u8], at: &mut usize) {
     }
 }
 
-/// Looks a field up in a map, for reading a message without matching on the
-/// whole of it.
+/// Field lookup.
 impl Value {
     pub fn get(&self, key: &str) -> Option<&Self> {
         match self {

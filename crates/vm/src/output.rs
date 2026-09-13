@@ -17,8 +17,7 @@ impl Format {
     }
 }
 
-/// Anything a command can return. The text rendering and the document are
-/// separate so that no command writes directly to the terminal.
+/// Anything a command returns, rendered as text or as a document.
 pub trait Report {
     fn to_value(&self) -> Value;
     fn render_text(&self, style: Style) -> Vec<String>;
@@ -38,8 +37,7 @@ pub fn emit(report: &dyn Report, format: Format, style: Style) -> io::Result<()>
     stdout.flush()
 }
 
-/// Errors are reported in the requested format too, so a script that asked for
-/// JSON is never handed a bare sentence.
+/// Writes an error in the requested format.
 pub fn emit_error(error: &vm_core::Error, format: Format) {
     let mut stderr = io::stderr();
     let _ = match format {

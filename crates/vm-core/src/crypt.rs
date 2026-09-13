@@ -10,7 +10,7 @@ const ROUNDS_MAX: u32 = 999_999_999;
 const SALT_MAX: usize = 16;
 const ALPHABET: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-/// The order in which the final digest's bytes are packed, as the specification lays it out.
+/// The byte order of the final digest's encoding, per the specification.
 const TRIPLES: [(usize, usize, usize); 21] = [
     (0, 21, 42),
     (22, 43, 1),
@@ -107,7 +107,7 @@ fn stretch(block: &[u8; 64], length: usize) -> Vec<u8> {
     block.iter().copied().cycle().take(length).collect()
 }
 
-/// The algorithm as specified by Ulrich Drepper, with `rounds` absent meaning the default.
+/// SHA-512 crypt as specified by Ulrich Drepper; `None` rounds means the default.
 fn sha512_crypt(password: &[u8], salt: &[u8], rounds: Option<u32>) -> String {
     let salt = &salt[..salt.len().min(SALT_MAX)];
     let count = rounds.map_or(ROUNDS_DEFAULT, |held| held.clamp(ROUNDS_MIN, ROUNDS_MAX));
@@ -226,7 +226,7 @@ mod tests {
         );
     }
 
-    /// Checked against `openssl passwd -6`, which is how the guest's own tools would hash it.
+    /// Expected values come from `openssl passwd -6`.
     #[test]
     fn a_hash_agrees_with_the_system_tool_where_it_is_installed() {
         let Ok(output) = std::process::Command::new("openssl")

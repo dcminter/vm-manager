@@ -209,7 +209,7 @@ pub fn uefi_code(arch: &str) -> Option<PathBuf> {
     installed(arch).map(|(uefi, _)| uefi.code)
 }
 
-/// The firmware for a machine, copying the variable store template into `store` on first use.
+/// The firmware for a machine, creating its variable store from the template if needed.
 pub fn prepare_uefi(arch: &str, store: &Path) -> Result<Uefi> {
     prepare_uefi_from(arch, store, installed(arch))
 }
