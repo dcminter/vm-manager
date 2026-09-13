@@ -48,7 +48,7 @@ cargo run -p vm -- images
 | `vm console <name>` | Attach to a machine's serial console; Ctrl-] detaches |
 | `vm screen <name>` | Open a VNC viewer on a machine's screen |
 | `vm screenshot <name> [file]` | Save a machine's screen as a PNG |
-| `vm clone <name> <image>` | Save a machine's disk as a new image |
+| `vm clone <name> <image>` | Save a machine's disk as a new image; `--description` describes it |
 | `vm rm <name>` | Delete a machine and its disk |
 | `vm rmi <image>` | Delete an image from the local store |
 

@@ -842,8 +842,18 @@ pub enum Consistency {
 }
 
 /// Clones a machine's disk into the store, pausing a running guest unless forced.
-pub fn clone(name: &str, target: &str, force: bool, text: bool) -> Result<reports::Cloned> {
+pub fn clone(
+    name: &str,
+    target: &str,
+    description: Option<&str>,
+    force: bool,
+    text: bool,
+) -> Result<reports::Cloned> {
     let reference: vm_core::Reference = target.parse()?;
+    let target = vm_core::clone::Target {
+        reference: &reference,
+        description,
+    };
     let instances = Instances::discover()?;
     let directory = instances.open(name)?;
     let held = directory.read()?;
@@ -870,7 +880,7 @@ pub fn clone(name: &str, target: &str, force: bool, text: bool) -> Result<report
             &local,
             &held,
             &directory.overlay(),
-            &reference,
+            target,
             true,
             Some(&mut |stage, percent| {
                 bar.naming(&format!("  {:<10}", vm_core::clone::Stage::label(stage)));
@@ -888,7 +898,7 @@ pub fn clone(name: &str, target: &str, force: bool, text: bool) -> Result<report
             &local,
             &held,
             &directory.overlay(),
-            &reference,
+            target,
             running,
             Some(&mut |stage, percent| {
                 bar.naming(&format!("  {:<10}", vm_core::clone::Stage::label(stage)));
@@ -1181,6 +1191,17 @@ pub fn parse_port(text: &str) -> std::result::Result<Port, String> {
             .parse()
             .map_err(|_| format!("'{guest}' is not a port number"))?,
     })
+}
+
+/// A description on one line of text.
+pub fn parse_description(text: &str) -> std::result::Result<String, String> {
+    if text.trim().is_empty() {
+        Err("a description needs some text".to_owned())
+    } else if text.chars().any(char::is_control) {
+        Err("a description is one line, without control characters".to_owned())
+    } else {
+        Ok(text.to_owned())
+    }
 }
 
 pub fn parse_firmware(text: &str) -> std::result::Result<Firmware, String> {
@@ -1736,6 +1757,13 @@ mod tests {
 
     #[test]
     fn a_user_name_the_guest_would_refuse_is_refused_here() {
+        assert_eq!(
+            parse_description("Trixie with \"tools\""),
+            Ok("Trixie with \"tools\"".to_owned())
+        );
+        assert!(parse_description("  ").is_err());
+        assert!(parse_description("two\nlines").is_err());
+        assert!(parse_description("tab\there").is_err());
         assert_eq!(parse_user("vm"), Ok("vm".to_owned()));
         assert!(parse_user("Capitals").is_err());
         assert!(parse_user("has space").is_err());

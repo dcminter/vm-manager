@@ -238,6 +238,9 @@ enum Command {
         /// Clone without pausing a running guest
         #[arg(long, short)]
         force: bool,
+        /// Description for the new image, instead of naming the source instance
+        #[arg(long, value_parser = machines::parse_description)]
+        description: Option<String>,
     },
     /// Show an instance's console
     Logs {
@@ -350,6 +353,50 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Outcome> {
     catalogue_command(cli, style).map(Outcome::Reported)
 }
 
+/// The changes a `vm start` asks for.
+fn start_changes(command: &Command) -> vm_core::Result<machines::Changes> {
+    let Command::Start {
+        memory,
+        cpus,
+        publish,
+        no_publish,
+        volume,
+        no_volume,
+        user,
+        disk_size,
+        firmware,
+        cpu,
+        machine,
+        disk,
+        password,
+        no_password,
+        add_ssh_config,
+        no_ssh_config,
+        ..
+    } = command
+    else {
+        return Ok(machines::Changes::default());
+    };
+    Ok(machines::Changes {
+        machine: *machine,
+        disk: *disk,
+        password: if *no_password {
+            Some("*".to_owned())
+        } else {
+            asked_password(*password)?
+        },
+        memory: *memory,
+        cpus: *cpus,
+        ports: replacement(publish, *no_publish),
+        shares: replacement(volume, *no_volume),
+        user: user.clone(),
+        disk_size: disk_size.clone(),
+        firmware: *firmware,
+        cpu: cpu.clone(),
+        ssh_config: toggle(*add_ssh_config, *no_ssh_config),
+    })
+}
+
 /// Runs a command that needs no catalogue or store; `None` if this is not one.
 fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> {
     let report: Box<dyn Report> = match &cli.command {
@@ -360,44 +407,8 @@ fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> 
             }
             Box::new(machines::list(*all)?)
         }
-        Command::Start {
-            name,
-            memory,
-            cpus,
-            publish,
-            no_publish,
-            volume,
-            no_volume,
-            user,
-            disk_size,
-            firmware,
-            cpu,
-            machine,
-            disk,
-            password,
-            no_password,
-            add_ssh_config,
-            no_ssh_config,
-        } => {
-            let changes = machines::Changes {
-                machine: *machine,
-                disk: *disk,
-                password: if *no_password {
-                    Some("*".to_owned())
-                } else {
-                    asked_password(*password)?
-                },
-                memory: *memory,
-                cpus: *cpus,
-                ports: replacement(publish, *no_publish),
-                shares: replacement(volume, *no_volume),
-                user: user.clone(),
-                disk_size: disk_size.clone(),
-                firmware: *firmware,
-                cpu: cpu.clone(),
-                ssh_config: toggle(*add_ssh_config, *no_ssh_config),
-            };
-            Box::new(machines::start(name, &changes)?)
+        Command::Start { name, .. } => {
+            Box::new(machines::start(name, &start_changes(&cli.command)?)?)
         }
         Command::Logs {
             name,
@@ -447,9 +458,18 @@ fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> 
             cli.format.is_text(),
         )?),
         Command::Rm { name, force } => Box::new(machines::remove(name, *force)?),
-        Command::Clone { name, image, force } => {
-            Box::new(machines::clone(name, image, *force, cli.format.is_text())?)
-        }
+        Command::Clone {
+            name,
+            image,
+            force,
+            description,
+        } => Box::new(machines::clone(
+            name,
+            image,
+            description.as_deref(),
+            *force,
+            cli.format.is_text(),
+        )?),
         _ => return Ok(None),
     };
     Ok(Some(Outcome::Reported(report)))
@@ -862,6 +882,22 @@ mod tests {
             origin_layers(Origin::All, fetched.clone(), None),
             vec![fetched]
         );
+    }
+
+    #[test]
+    fn a_clone_description_is_optional() {
+        use clap::Parser as _;
+        let description = |arguments: &[&str]| match Cli::try_parse_from(arguments).unwrap().command
+        {
+            Command::Clone { description, .. } => description,
+            _ => panic!("not a clone"),
+        };
+        assert_eq!(description(&["vm", "clone", "a", "b:c"]), None);
+        assert_eq!(
+            description(&["vm", "clone", "a", "b:c", "--description", "With tools"]),
+            Some("With tools".to_owned())
+        );
+        assert!(Cli::try_parse_from(["vm", "clone", "a", "b:c", "--description", ""]).is_err());
     }
 
     #[test]

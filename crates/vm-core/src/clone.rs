@@ -11,6 +11,14 @@ use std::process::Command;
 /// How far along a conversion is, in whole percent.
 pub type Converting<'a> = &'a mut dyn FnMut(u8);
 
+/// What a clone is to be called.
+#[derive(Debug, Clone, Copy)]
+pub struct Target<'a> {
+    pub reference: &'a Reference,
+    /// Replaces the description naming the source machine.
+    pub description: Option<&'a str>,
+}
+
 /// A clone's pass: flattening, then hashing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
@@ -146,11 +154,11 @@ pub fn image(
     local: &Path,
     instance: &Instance,
     overlay: &Path,
-    target: &Reference,
+    target: Target<'_>,
     in_use: bool,
     mut report: Option<Reporter<'_>>,
 ) -> Result<Cloned> {
-    let (name, tag) = (target.repository(), target.tag());
+    let (name, tag) = (target.reference.repository(), target.reference.tag());
     let staged = store.staging(&format!("{name}-{tag}"))?;
     let _ = fs::remove_file(&staged);
     let mut say = |stage, percent| {
@@ -169,7 +177,15 @@ pub fn image(
     })?;
     let path = store.path_for(&digest);
     let size = fs::metadata(&path).map_or(0, |data| data.len());
-    let entry = write_entry(local, instance, name, tag, &digest, size)?;
+    let entry = write_entry(
+        local,
+        instance,
+        name,
+        tag,
+        &digest,
+        size,
+        target.description,
+    )?;
     Ok(Cloned {
         name: name.to_owned(),
         tag: tag.to_owned(),
@@ -189,6 +205,7 @@ fn write_entry(
     tag: &str,
     digest: &Digest,
     size: u64,
+    description: Option<&str>,
 ) -> Result<PathBuf> {
     let directory = local.join(name);
     fs::create_dir_all(&directory).map_err(|source| Error::Store {
@@ -201,10 +218,12 @@ fn write_entry(
     } else {
         "none"
     };
+    let description =
+        description.map_or_else(|| format!("Cloned from '{}'", instance.name), str::to_owned);
     let mut body = format!(
         "name = \"{name}\"\n\
          tag = \"{tag}\"\n\
-         description = \"Cloned from '{}'\"\n\
+         description = {}\n\
          login = \"{login}\"\n\
          \n\
          [[image]]\n\
@@ -212,7 +231,8 @@ fn write_entry(
          format = \"qcow2\"\n\
          digest = \"{digest}\"\n\
          size = {size}\n",
-        instance.name, instance.arch
+        toml_string(&description),
+        instance.arch
     );
     // The disk was made to boot on this machine, so a clone asks for the same one.
     if !instance.firmware.is_default() {
@@ -243,6 +263,26 @@ fn write_entry(
         source,
     })?;
     Ok(path)
+}
+
+/// A TOML basic string holding `text`.
+fn toml_string(text: &str) -> String {
+    let mut quoted = String::from("\"");
+    for character in text.chars() {
+        match character {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            control if control.is_control() => {
+                let _ = std::fmt::Write::write_fmt(
+                    &mut quoted,
+                    format_args!("\\u{:04X}", u32::from(control)),
+                );
+            }
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 #[cfg(test)]
@@ -421,6 +461,7 @@ mod tests {
             "latest",
             &digest,
             4096,
+            None,
         )
         .unwrap();
         let catalogue = entry_is_readable(&scratch.0);
@@ -433,6 +474,34 @@ mod tests {
     }
 
     #[test]
+    fn a_given_description_replaces_the_default() {
+        let scratch = Scratch::new("description");
+        let digest = Digest::new(ALGORITHM, &"d".repeat(64));
+        let text = "Trixie with \"tools\" at C:\\dev,\ttabbed and multi\nline";
+        write_entry(
+            &scratch.0,
+            &instance("demo"),
+            "mine",
+            "latest",
+            &digest,
+            1,
+            Some(text),
+        )
+        .unwrap();
+        let catalogue = entry_is_readable(&scratch.0);
+        let reference: Reference = "mine:latest".parse().unwrap();
+        let (entry, _) = catalogue.resolve(&reference, "amd64").unwrap();
+        assert_eq!(entry.description, text);
+    }
+
+    #[test]
+    fn a_toml_string_escapes_what_would_end_or_break_it() {
+        assert_eq!(toml_string("plain"), r#""plain""#);
+        assert_eq!(toml_string(r#"a "b" \c"#), r#""a \"b\" \\c""#);
+        assert_eq!(toml_string("one\ntwo"), r#""one\u000Atwo""#);
+    }
+
+    #[test]
     fn a_clone_asks_for_the_machine_its_disk_was_made_on() {
         let scratch = Scratch::new("machine");
         let digest = Digest::new(ALGORITHM, &"c".repeat(64));
@@ -441,7 +510,7 @@ mod tests {
         held.cpu = "Penryn,vendor=GenuineIntel,+avx".to_owned();
         held.machine = crate::machine::Chipset::Pc;
         held.disk = crate::machine::Disk::Ide;
-        write_entry(&scratch.0, &held, "mine", "latest", &digest, 1).unwrap();
+        write_entry(&scratch.0, &held, "mine", "latest", &digest, 1, None).unwrap();
         let catalogue = entry_is_readable(&scratch.0);
         let reference: Reference = "mine:latest".parse().unwrap();
         let (_, artifact) = catalogue.resolve(&reference, "amd64").unwrap();
@@ -455,8 +524,16 @@ mod tests {
     fn a_clone_of_a_default_machine_states_no_machine() {
         let scratch = Scratch::new("defaultmachine");
         let digest = Digest::new(ALGORITHM, &"d".repeat(64));
-        let path =
-            write_entry(&scratch.0, &instance("demo"), "mine", "latest", &digest, 1).unwrap();
+        let path = write_entry(
+            &scratch.0,
+            &instance("demo"),
+            "mine",
+            "latest",
+            &digest,
+            1,
+            None,
+        )
+        .unwrap();
         let text = fs::read_to_string(path).unwrap();
         assert!(!text.contains("firmware"), "{text}");
         assert!(!text.contains("cpu"), "{text}");
@@ -468,7 +545,16 @@ mod tests {
     fn a_cloned_entry_has_no_address_to_fetch_from() {
         let scratch = Scratch::new("nourl");
         let digest = Digest::new(ALGORITHM, &"b".repeat(64));
-        write_entry(&scratch.0, &instance("demo"), "mine", "latest", &digest, 1).unwrap();
+        write_entry(
+            &scratch.0,
+            &instance("demo"),
+            "mine",
+            "latest",
+            &digest,
+            1,
+            None,
+        )
+        .unwrap();
         let catalogue = entry_is_readable(&scratch.0);
         let reference: Reference = "mine:latest".parse().unwrap();
         let (_, artifact) = catalogue.resolve(&reference, "amd64").unwrap();
@@ -481,7 +567,7 @@ mod tests {
         let mut held = instance("demo");
         held.seeded = false;
         let digest = Digest::new(ALGORITHM, &"c".repeat(64));
-        write_entry(&scratch.0, &held, "mine", "latest", &digest, 1).unwrap();
+        write_entry(&scratch.0, &held, "mine", "latest", &digest, 1, None).unwrap();
         let catalogue = entry_is_readable(&scratch.0);
         let reference: Reference = "mine:latest".parse().unwrap();
         let (entry, _) = catalogue.resolve(&reference, "amd64").unwrap();
@@ -494,8 +580,8 @@ mod tests {
         let held = instance("demo");
         let first = Digest::new(ALGORITHM, &"d".repeat(64));
         let second = Digest::new(ALGORITHM, &"e".repeat(64));
-        write_entry(&scratch.0, &held, "mine", "latest", &first, 1).unwrap();
-        let path = write_entry(&scratch.0, &held, "mine", "latest", &second, 2).unwrap();
+        write_entry(&scratch.0, &held, "mine", "latest", &first, 1, None).unwrap();
+        let path = write_entry(&scratch.0, &held, "mine", "latest", &second, 2, None).unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap().matches("digest").count(),
             1
@@ -511,8 +597,8 @@ mod tests {
         let scratch = Scratch::new("tags");
         let held = instance("demo");
         let digest = Digest::new(ALGORITHM, &"f".repeat(64));
-        write_entry(&scratch.0, &held, "mine", "one", &digest, 1).unwrap();
-        write_entry(&scratch.0, &held, "mine", "two", &digest, 1).unwrap();
+        write_entry(&scratch.0, &held, "mine", "one", &digest, 1, None).unwrap();
+        write_entry(&scratch.0, &held, "mine", "two", &digest, 1, None).unwrap();
         assert_eq!(entry_is_readable(&scratch.0).entries().len(), 2);
     }
 
