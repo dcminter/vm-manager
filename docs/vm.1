@@ -265,6 +265,11 @@ Save the machine's screen as a PNG, to
 or
 .IR NAME.png .
 .TP
+.B gui
+Open the window,
+.BR vmg (1),
+which is installed by the vm\-manager\-gui package.
+.TP
 .BI logs " NAME"
 Show the machine's console output from every boot.
 .B \-\-follow
@@ -485,6 +490,7 @@ installer also placed the removable-media loader, such as
 .SH EXIT STATUS
 0 on success, 1 on failure.
 .SH SEE ALSO
+.BR vmg (1),
 .BR vm\-config (5),
 .BR ssh (1),
 .BR ssh_config (5),

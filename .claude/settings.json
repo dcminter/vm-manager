@@ -44,6 +44,12 @@
             "command": "./.claude/hooks/doc-review",
             "timeout": 30,
             "statusMessage": "documentation review"
+          },
+          {
+            "type": "command",
+            "command": "./.claude/hooks/parity",
+            "timeout": 30,
+            "statusMessage": "CLI and GUI parity"
           }
         ]
       }

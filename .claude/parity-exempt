@@ -1,0 +1,4 @@
+# Features the user has exempted from CLI and GUI parity, one per line.
+--format json and yaml: output formats have no place in a window
+vm gui: the command that opens the GUI
+vmg --no-indicator: a window option

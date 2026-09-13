@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="com.paperstack.VmManager" path="/com/paperstack/VmManager/">
+    <key name="window-width" type="i">
+      <default>1200</default>
+      <range min="600" max="10000"/>
+      <summary>Window width</summary>
+    </key>
+    <key name="window-height" type="i">
+      <default>760</default>
+      <range min="400" max="10000"/>
+      <summary>Window height</summary>
+    </key>
+    <key name="sidebar-width" type="i">
+      <default>280</default>
+      <range min="180" max="900"/>
+      <summary>Width of the sidebar</summary>
+    </key>
+    <key name="sidebar-visible" type="b">
+      <default>true</default>
+      <summary>Show the sidebar</summary>
+    </key>
+    <key name="show-stopped-machines" type="b">
+      <default>true</default>
+      <summary>Include stopped machines in the machines table</summary>
+    </key>
+    <key name="show-remote-images" type="b">
+      <default>true</default>
+      <summary>Include images not held locally in the images table</summary>
+    </key>
+    <key name="column-widths" type="a{sa{si}}">
+      <default>{}</default>
+      <summary>Widths the user dragged table columns to, by table and column</summary>
+    </key>
+  </schema>
+</schemalist>

@@ -1,5 +1,8 @@
+use crate::style::Style;
 use crate::units::human;
 use std::io::{IsTerminal, Write};
+use vm_core::import;
+use vm_core::machines::Event;
 use vm_core::store::Progress;
 
 /// A single rewritten line on a terminal, a quiet counter anywhere else.
@@ -95,6 +98,67 @@ fn describe(progress: Progress) -> String {
             )
         },
     )
+}
+
+/// Draws what an operation reports: a bar for its passes, a line for what it starts.
+pub fn observer(text: bool, style: Style) -> impl FnMut(Event) {
+    let mut bar = Bar::new("", text);
+    move |event| match event {
+        Event::Fetching(url) => {
+            bar.clear();
+            if text {
+                eprintln!("Fetching {}", style.name(&url));
+            }
+        }
+        Event::Received(progress) => {
+            bar.naming("  ");
+            bar.update(progress);
+        }
+        Event::Converting(percent) => {
+            bar.naming("  converting");
+            bar.portion(percent);
+        }
+        Event::Cloning(stage, percent) => {
+            bar.naming(&pass(stage.label()));
+            bar.portion(percent);
+        }
+        Event::Shutdown { name, seconds } => {
+            bar.clear();
+            if text {
+                eprintln!("Waiting for {name} to shut down, up to {seconds}s");
+            }
+        }
+        Event::Exporting(progress) => {
+            bar.naming("  exporting ");
+            bar.update(progress);
+        }
+        Event::Importing {
+            from_url,
+            event: import::Event::Receiving(progress),
+        } => {
+            bar.naming(&pass(if from_url { "fetching" } else { "reading" }));
+            bar.update(progress);
+        }
+        Event::Importing {
+            event: import::Event::Converting(percent),
+            ..
+        } => {
+            bar.naming(&pass("converting"));
+            bar.portion(percent);
+        }
+        Event::Importing {
+            event: import::Event::Hashing(percent),
+            ..
+        } => {
+            bar.naming(&pass("verifying"));
+            bar.portion(percent);
+        }
+    }
+}
+
+/// A pass label padded so the figures beside it stay put.
+fn pass(name: &str) -> String {
+    format!("  {name:<10}")
 }
 
 #[cfg(test)]

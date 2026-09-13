@@ -1,13 +1,10 @@
 mod completion;
 mod configuration;
 mod console;
-mod exports;
-mod imports;
 mod machines;
 mod output;
 mod progress;
 mod reports;
-mod screen;
 mod style;
 mod table;
 mod terminal;
@@ -20,7 +17,9 @@ use reports::Origin;
 use std::process::ExitCode;
 use style::Style;
 use vm_core::catalogue::{Catalogue, Source};
-use vm_core::store::{Pulled, Store};
+use vm_core::machines::{Changes, Request};
+use vm_core::settings;
+use vm_core::store::Store;
 use vm_core::{Reference, host_architecture, paths};
 
 #[derive(Debug, Parser)]
@@ -91,37 +90,37 @@ enum Command {
         #[arg(long)]
         name: Option<String>,
         /// Memory, in mebibytes unless suffixed with M or G
-        #[arg(long, short, default_value = "2G", value_parser = machines::parse_memory)]
+        #[arg(long, short, default_value = "2G", value_parser = settings::parse_memory)]
         memory: u64,
         /// Processors
         #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(1..=255))]
         cpus: u32,
         /// Forward a host port to a guest port, as host:guest
-        #[arg(long, short, value_parser = machines::parse_port)]
+        #[arg(long, short, value_parser = settings::parse_port)]
         publish: Vec<vm_core::instance::Port>,
         /// Account to create in the guest; defaults to the config file's setting, or vm
-        #[arg(long, value_parser = machines::parse_user)]
+        #[arg(long, value_parser = settings::parse_user)]
         user: Option<String>,
         /// Share a host directory with the guest, as host:guest
-        #[arg(long, short = 'v', value_parser = machines::parse_share)]
+        #[arg(long, short = 'v', value_parser = settings::parse_share)]
         volume: Vec<vm_core::instance::Share>,
         /// Grow the disk to this size, such as 40G
         #[arg(long)]
         disk_size: Option<String>,
         /// When to fetch the image
         #[arg(long, value_enum)]
-        pull: Option<machines::Pull>,
+        pull: Option<Pull>,
         /// Firmware, bios or uefi, instead of what the image asks for
-        #[arg(long, value_parser = machines::parse_firmware, add = ArgValueCandidates::new(completion::firmware))]
+        #[arg(long, value_parser = settings::parse_firmware, add = ArgValueCandidates::new(completion::firmware))]
         firmware: Option<vm_core::machine::Firmware>,
         /// QEMU CPU model instead of what the image asks for, such as Penryn,+avx
-        #[arg(long, value_parser = machines::parse_cpu)]
+        #[arg(long, value_parser = settings::parse_cpu)]
         cpu: Option<String>,
         /// Machine type, q35 or pc, instead of what the image asks for
-        #[arg(long, value_parser = machines::parse_machine, add = ArgValueCandidates::new(completion::chipset))]
+        #[arg(long, value_parser = settings::parse_machine, add = ArgValueCandidates::new(completion::chipset))]
         machine: Option<vm_core::machine::Chipset>,
         /// Disk controller, virtio, ide (pc only) or sata (q35 only), instead of what the image asks for
-        #[arg(long, value_parser = machines::parse_disk, add = ArgValueCandidates::new(completion::disk))]
+        #[arg(long, value_parser = settings::parse_disk, add = ArgValueCandidates::new(completion::disk))]
         disk: Option<vm_core::machine::Disk>,
         /// Ask for a password the account can log in with at the console
         #[arg(long)]
@@ -139,40 +138,40 @@ enum Command {
         #[arg(add = ArgValueCandidates::new(completion::stopped_instance))]
         name: String,
         /// Memory, in mebibytes unless suffixed with M or G
-        #[arg(long, short, value_parser = machines::parse_memory)]
+        #[arg(long, short, value_parser = settings::parse_memory)]
         memory: Option<u64>,
         /// Processors
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=255))]
         cpus: Option<u32>,
         /// Forward a host port to a guest port, as host:guest, replacing existing forwards
-        #[arg(long, short, value_parser = machines::parse_port, conflicts_with = "no_publish")]
+        #[arg(long, short, value_parser = settings::parse_port, conflicts_with = "no_publish")]
         publish: Vec<vm_core::instance::Port>,
         /// Forward nothing
         #[arg(long)]
         no_publish: bool,
         /// Share a host directory with the guest, as host:guest, replacing existing shares
-        #[arg(long, short = 'v', value_parser = machines::parse_share, conflicts_with = "no_volume")]
+        #[arg(long, short = 'v', value_parser = settings::parse_share, conflicts_with = "no_volume")]
         volume: Vec<vm_core::instance::Share>,
         /// Share nothing
         #[arg(long)]
         no_volume: bool,
         /// Account to use in the guest; the one it has is left in place
-        #[arg(long, value_parser = machines::parse_user)]
+        #[arg(long, value_parser = settings::parse_user)]
         user: Option<String>,
         /// Grow the disk to this size, such as 40G
         #[arg(long)]
         disk_size: Option<String>,
         /// Firmware, bios or uefi; a disk prepared for only the other will not boot
-        #[arg(long, value_parser = machines::parse_firmware, add = ArgValueCandidates::new(completion::firmware))]
+        #[arg(long, value_parser = settings::parse_firmware, add = ArgValueCandidates::new(completion::firmware))]
         firmware: Option<vm_core::machine::Firmware>,
         /// QEMU CPU model, such as Penryn,+avx
-        #[arg(long, value_parser = machines::parse_cpu)]
+        #[arg(long, value_parser = settings::parse_cpu)]
         cpu: Option<String>,
         /// Machine type, q35 or pc
-        #[arg(long, value_parser = machines::parse_machine, add = ArgValueCandidates::new(completion::chipset))]
+        #[arg(long, value_parser = settings::parse_machine, add = ArgValueCandidates::new(completion::chipset))]
         machine: Option<vm_core::machine::Chipset>,
         /// Disk controller, virtio, ide (pc only) or sata (q35 only); a guest without its driver will not boot
-        #[arg(long, value_parser = machines::parse_disk, add = ArgValueCandidates::new(completion::disk))]
+        #[arg(long, value_parser = settings::parse_disk, add = ArgValueCandidates::new(completion::disk))]
         disk: Option<vm_core::machine::Disk>,
         /// Ask for a new console password for the account
         #[arg(long, conflicts_with = "no_password")]
@@ -255,7 +254,7 @@ enum Command {
         #[arg(long, short)]
         force: bool,
         /// Description for the new image, instead of naming the source instance
-        #[arg(long, value_parser = machines::parse_description)]
+        #[arg(long, value_parser = settings::parse_description)]
         description: Option<String>,
     },
     /// Show an instance's console
@@ -294,33 +293,33 @@ enum Command {
     /// Bring an image file or download into the store
     Import {
         /// Image file, or http or https URL, compressed or not
-        #[arg(value_parser = imports::parse_source, value_hint = clap::ValueHint::AnyPath)]
+        #[arg(value_parser = settings::parse_source, value_hint = clap::ValueHint::AnyPath)]
         source: vm_core::import::Source,
         /// Name for the image, as repository:tag
         image: String,
         /// Description for the image, instead of naming the source
-        #[arg(long, value_parser = machines::parse_description)]
+        #[arg(long, value_parser = settings::parse_description)]
         description: Option<String>,
         /// How the guest is reached: cloud-init, or none for the console only
-        #[arg(long, default_value = "none", value_parser = imports::parse_login, add = ArgValueCandidates::new(completion::login))]
+        #[arg(long, default_value = "none", value_parser = settings::parse_login, add = ArgValueCandidates::new(completion::login))]
         login: vm_core::catalogue::Login,
         /// Architecture of the image, instead of this host's
-        #[arg(long, value_parser = imports::parse_arch, add = ArgValueCandidates::new(completion::known_architecture))]
+        #[arg(long, value_parser = settings::parse_arch, add = ArgValueCandidates::new(completion::known_architecture))]
         arch: Option<String>,
         /// Firmware the image needs, bios or uefi
-        #[arg(long, value_parser = machines::parse_firmware, add = ArgValueCandidates::new(completion::firmware))]
+        #[arg(long, value_parser = settings::parse_firmware, add = ArgValueCandidates::new(completion::firmware))]
         firmware: Option<vm_core::machine::Firmware>,
         /// QEMU CPU model the image needs, such as Penryn,+avx
-        #[arg(long, value_parser = machines::parse_cpu)]
+        #[arg(long, value_parser = settings::parse_cpu)]
         cpu: Option<String>,
         /// Machine type the image needs, q35 or pc
-        #[arg(long, value_parser = machines::parse_machine, add = ArgValueCandidates::new(completion::chipset))]
+        #[arg(long, value_parser = settings::parse_machine, add = ArgValueCandidates::new(completion::chipset))]
         machine: Option<vm_core::machine::Chipset>,
         /// Disk controller the image needs, virtio, ide (pc only) or sata (q35 only)
-        #[arg(long, value_parser = machines::parse_disk, add = ArgValueCandidates::new(completion::disk))]
+        #[arg(long, value_parser = settings::parse_disk, add = ArgValueCandidates::new(completion::disk))]
         disk: Option<vm_core::machine::Disk>,
         /// Digest the source must match as published, such as sha256:...
-        #[arg(long, value_parser = imports::parse_digest)]
+        #[arg(long, value_parser = settings::parse_digest)]
         digest: Option<vm_core::reference::Digest>,
         /// Keep no URL, so the image cannot be fetched again
         #[arg(long)]
@@ -341,7 +340,7 @@ enum Command {
         #[arg(long, add = ArgValueCandidates::new(completion::architecture))]
         arch: Option<String>,
         /// Compress the file with xz, or with gzip or zstd if named
-        #[arg(long, value_name = "SCHEME", num_args = 0..=1, default_missing_value = "xz", value_parser = exports::parse_compression, add = ArgValueCandidates::new(completion::compression))]
+        #[arg(long, value_name = "SCHEME", num_args = 0..=1, default_missing_value = "xz", value_parser = settings::parse_compression, add = ArgValueCandidates::new(completion::compression))]
         compress: Option<vm_core::compression::Compression>,
         /// Replace the file if it exists
         #[arg(long, short)]
@@ -365,7 +364,7 @@ enum Command {
     Prune {
         /// Prune only machines or only images
         #[arg(value_enum)]
-        target: Option<machines::PruneTarget>,
+        target: Option<PruneTarget>,
         /// Also remove every stopped machine and every pulled image no machine uses
         #[arg(long, short)]
         all: bool,
@@ -373,6 +372,8 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Open the graphical front end, vmg
+    Gui,
     /// Delete an instance and its disk
     Rm {
         /// Instance name
@@ -406,6 +407,43 @@ fn main() -> ExitCode {
         Err(error) => {
             output::emit_error(&error, cli.format);
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// When `vm run` fetches the image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum Pull {
+    /// Fetch the image even if it is already held.
+    Always,
+    /// Fetch it only if it is not held (default).
+    Missing,
+    /// Never fetch; a missing image is an error.
+    Never,
+}
+
+impl Pull {
+    const fn plain(self) -> vm_core::machines::Pull {
+        match self {
+            Self::Always => vm_core::machines::Pull::Always,
+            Self::Missing => vm_core::machines::Pull::Missing,
+            Self::Never => vm_core::machines::Pull::Never,
+        }
+    }
+}
+
+/// What `vm prune` removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum PruneTarget {
+    Machines,
+    Images,
+}
+
+impl PruneTarget {
+    const fn plain(self) -> vm_core::machines::PruneTarget {
+        match self {
+            Self::Machines => vm_core::machines::PruneTarget::Machines,
+            Self::Images => vm_core::machines::PruneTarget::Images,
         }
     }
 }
@@ -447,7 +485,7 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Outcome> {
 }
 
 /// What a `vm run` asks for.
-fn run_request(command: &Command) -> vm_core::Result<machines::Request> {
+fn run_request(command: &Command) -> vm_core::Result<Request> {
     let Command::Run {
         reference,
         name,
@@ -469,7 +507,7 @@ fn run_request(command: &Command) -> vm_core::Result<machines::Request> {
     else {
         unreachable!("not a run");
     };
-    Ok(machines::Request {
+    Ok(Request {
         reference: reference.clone(),
         name: name.clone(),
         memory: *memory,
@@ -478,7 +516,7 @@ fn run_request(command: &Command) -> vm_core::Result<machines::Request> {
         user: user.clone(),
         shares: volume.clone(),
         disk_size: disk_size.clone(),
-        pull: *pull,
+        pull: pull.map(Pull::plain),
         firmware: *firmware,
         cpu: cpu.clone(),
         machine: *machine,
@@ -489,7 +527,7 @@ fn run_request(command: &Command) -> vm_core::Result<machines::Request> {
 }
 
 /// The changes a `vm start` asks for.
-fn start_changes(command: &Command) -> vm_core::Result<machines::Changes> {
+fn start_changes(command: &Command) -> vm_core::Result<Changes> {
     let Command::Start {
         memory,
         cpus,
@@ -511,9 +549,9 @@ fn start_changes(command: &Command) -> vm_core::Result<machines::Changes> {
         ..
     } = command
     else {
-        return Ok(machines::Changes::default());
+        return Ok(Changes::default());
     };
-    Ok(machines::Changes {
+    Ok(Changes {
         machine: *machine,
         disk: *disk,
         password: if *no_password {
@@ -542,11 +580,12 @@ fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> 
                 machines::watch(*all, cli.format, style)?;
                 return Ok(Some(Outcome::Written));
             }
-            Box::new(machines::list(*all)?)
+            Box::new(vm_core::machines::list(*all)?)
         }
-        Command::Start { name, .. } => {
-            Box::new(machines::start(name, &start_changes(&cli.command)?)?)
-        }
+        Command::Start { name, .. } => Box::new(vm_core::machines::start(
+            name,
+            &start_changes(&cli.command)?,
+        )?),
         Command::Logs {
             name,
             follow,
@@ -559,7 +598,11 @@ fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> 
                 machines::follow(name, *lines)?;
                 return Ok(Some(Outcome::Written));
             }
-            Box::new(machines::logs(name, *lines)?)
+            Box::new(vm_core::machines::logs(name, *lines)?)
+        }
+        Command::Gui => {
+            // Either this replaces the process or it reports why it could not.
+            return Err(machines::gui());
         }
         Command::Console { name } => {
             if !cli.format.is_text() {
@@ -568,11 +611,13 @@ fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> 
             console::attach(name)?;
             return Ok(Some(Outcome::Written));
         }
-        Command::Screen { name } => match screen::show(name, cli.format.is_text())? {
+        Command::Screen { name } => match vm_core::screen::show(name, cli.format.is_text())? {
             Some(report) => Box::new(report),
             None => return Ok(Some(Outcome::Written)),
         },
-        Command::Screenshot { name, file } => Box::new(screen::capture(name, file.as_deref())?),
+        Command::Screenshot { name, file } => {
+            Box::new(vm_core::screen::capture(name, file.as_deref())?)
+        }
         Command::Ssh { name, command } => {
             // Either this replaces the process or it reports why it could not.
             return machines::connect(name, command).map(|held| match held {});
@@ -580,32 +625,32 @@ fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> 
         Command::Cp { from, to } => {
             return machines::copy(from, to).map(|held| match held {});
         }
-        Command::Stop { name, timeout } => Box::new(machines::stop(
+        Command::Stop { name, timeout } => Box::new(vm_core::machines::stop(
             name,
             std::time::Duration::from_secs(*timeout),
             false,
-            cli.format.is_text(),
+            &mut progress::observer(cli.format.is_text(), style),
         )?),
-        Command::Pause { name } => Box::new(machines::pause(name)?),
-        Command::Resume { name } => Box::new(machines::resume(name)?),
-        Command::Kill { name } => Box::new(machines::stop(
+        Command::Pause { name } => Box::new(vm_core::machines::pause(name)?),
+        Command::Resume { name } => Box::new(vm_core::machines::resume(name)?),
+        Command::Kill { name } => Box::new(vm_core::machines::stop(
             name,
             std::time::Duration::from_secs(10),
             true,
-            cli.format.is_text(),
+            &mut progress::observer(cli.format.is_text(), style),
         )?),
-        Command::Rm { name, force } => Box::new(machines::remove(name, *force)?),
+        Command::Rm { name, force } => Box::new(vm_core::machines::remove(name, *force)?),
         Command::Clone {
             name,
             image,
             force,
             description,
-        } => Box::new(machines::clone(
+        } => Box::new(vm_core::machines::clone(
             name,
             image,
             description.as_deref(),
             *force,
-            cli.format.is_text(),
+            &mut progress::observer(cli.format.is_text(), style),
         )?),
         _ => return Ok(None),
     };
@@ -625,62 +670,72 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
         } => (Origin::of(*local, *remote), catalogue.as_deref()),
         _ => (Origin::All, None),
     };
-    let catalogue = Catalogue::load_layered(&select_sources(sources, origin, named)?)?;
+    let catalogue =
+        Catalogue::load_layered(&vm_core::images::select_sources(sources, origin, named)?)?;
     let store = Store::discover()?;
     match &cli.command {
         Command::Images {
             all_architectures, ..
-        } => Ok(Box::new(images(
+        } => Ok(Box::new(vm_core::images::list(
             &catalogue,
             &store,
             *all_architectures,
             origin,
         ))),
-        Command::Inspect { reference, arch } => Ok(Box::new(inspect(
+        Command::Inspect { reference, arch } => Ok(Box::new(vm_core::images::inspect(
             &catalogue,
             &store,
             reference,
             arch.as_deref().unwrap_or(host_architecture()),
         )?)),
-        Command::Pull { reference } => Ok(Box::new(pull(
-            &catalogue, &store, style, cli.format, reference,
+        Command::Pull { reference } => Ok(Box::new(vm_core::images::pull(
+            &catalogue,
+            &store,
+            reference,
+            &mut progress::observer(cli.format.is_text(), style),
         )?)),
-        Command::Update { catalogue } => Ok(Box::new(update(&config, catalogue.as_deref())?)),
-        Command::Import { .. } => Ok(Box::new(import(cli, &catalogue, &store)?)),
+        Command::Update { catalogue } => Ok(Box::new(vm_core::images::update(
+            &config,
+            catalogue.as_deref(),
+        )?)),
+        Command::Import { .. } => Ok(Box::new(import(cli, &catalogue, &store, style)?)),
         Command::Export {
             reference,
             file,
             arch,
             compress,
             force,
-        } => Ok(Box::new(exports::run(
+        } => Ok(Box::new(vm_core::images::export(
             &catalogue,
             &store,
-            &exports::Request {
+            &vm_core::images::ExportRequest {
                 reference,
                 file,
                 arch: arch.as_deref().unwrap_or(host_architecture()),
                 compression: compress.unwrap_or_default(),
                 force: *force,
             },
-            cli.format.is_text(),
+            &mut progress::observer(cli.format.is_text(), style),
         )?)),
-        Command::Rmi { reference, force } => Ok(Box::new(machines::remove_image(
+        Command::Rmi { reference, force } => Ok(Box::new(vm_core::machines::remove_image(
             &catalogue, &store, reference, *force,
         )?)),
         Command::Prune {
             target,
             all,
             dry_run,
-        } => Ok(Box::new(machines::prune(
-            &catalogue, &store, *target, *all, *dry_run,
+        } => Ok(Box::new(vm_core::machines::prune(
+            &catalogue,
+            &store,
+            target.map(PruneTarget::plain),
+            *all,
+            *dry_run,
         )?)),
-        Command::Run { .. } => Ok(Box::new(machines::run(
+        Command::Run { .. } => Ok(Box::new(vm_core::machines::run(
             &catalogue,
             &store,
             &run_request(&cli.command)?,
-            style,
-            cli.format.is_text(),
+            &mut progress::observer(cli.format.is_text(), style),
         )?)),
         Command::Ps { .. }
         | Command::Start { .. }
@@ -693,6 +748,7 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
         | Command::Clone { .. }
         | Command::Logs { .. }
         | Command::Console { .. }
+        | Command::Gui
         | Command::Screen { .. }
         | Command::Screenshot { .. }
         | Command::Config { .. }
@@ -700,7 +756,12 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
     }
 }
 
-fn import(cli: &Cli, catalogue: &Catalogue, store: &Store) -> vm_core::Result<reports::Imported> {
+fn import(
+    cli: &Cli,
+    catalogue: &Catalogue,
+    store: &Store,
+    style: Style,
+) -> vm_core::Result<reports::Imported> {
     let Command::Import {
         source,
         image,
@@ -726,7 +787,7 @@ fn import(cli: &Cli, catalogue: &Catalogue, store: &Store) -> vm_core::Result<re
     };
     vm_core::machine::check_disk(hardware.machine, hardware.disk)?;
     let reference: Reference = image.parse()?;
-    imports::run(
+    vm_core::images::import(
         catalogue,
         store,
         &vm_core::import::Request {
@@ -740,7 +801,7 @@ fn import(cli: &Cli, catalogue: &Catalogue, store: &Store) -> vm_core::Result<re
             fetchable: !forget_url,
             force: *force,
         },
-        cli.format.is_text(),
+        &mut progress::observer(cli.format.is_text(), style),
     )
 }
 
@@ -756,146 +817,6 @@ const fn toggle(on: bool, off: bool) -> Option<bool> {
 /// Every catalogue the config names, lowest precedence first.
 fn catalogue_sources() -> vm_core::Result<Vec<Source>> {
     Ok(paths::catalogue_sources(&vm_core::config::Config::load()?))
-}
-
-/// The catalogues of one kind, or the one named.
-fn select_sources(
-    sources: Vec<Source>,
-    origin: Origin,
-    named: Option<&str>,
-) -> vm_core::Result<Vec<Source>> {
-    if let Some(name) = named
-        && !sources.iter().any(|source| source.name == name)
-    {
-        return Err(vm_core::Error::UnknownCatalogue {
-            name: name.to_owned(),
-            available: sources.into_iter().map(|source| source.name).collect(),
-        });
-    }
-    Ok(sources
-        .into_iter()
-        .filter(|source| origin.admits(source.kind))
-        .filter(|source| named.is_none_or(|name| source.name == name))
-        .collect())
-}
-
-/// Refreshes every remote catalogue, or the one named.
-fn update(
-    config: &vm_core::config::Config,
-    named: Option<&str>,
-) -> vm_core::Result<reports::Update> {
-    let remotes = config.remotes();
-    if let Some(name) = named
-        && !remotes.iter().any(|remote| remote.name == name)
-    {
-        return Err(vm_core::Error::UnknownCatalogue {
-            name: name.to_owned(),
-            available: remotes.into_iter().map(|remote| remote.name).collect(),
-        });
-    }
-    let agent = vm_core::store::http_agent();
-    let catalogues = remotes
-        .iter()
-        .filter(|remote| named.is_none_or(|name| remote.name == name))
-        .map(|remote| {
-            let destination = paths::remote_catalogue_directory(&remote.name)
-                .ok_or(vm_core::Error::NoImageStore)?;
-            let outcome = vm_core::update::run(remote, &destination, &agent)
-                .map(|updated| (updated.files, updated.entries))
-                .map_err(|error| error.to_string());
-            Ok(reports::Updated {
-                name: remote.name.clone(),
-                url: remote.url.clone(),
-                path: destination.display().to_string(),
-                outcome,
-            })
-        })
-        .collect::<vm_core::Result<Vec<_>>>()?;
-    Ok(reports::Update { catalogues })
-}
-
-fn images(
-    catalogue: &Catalogue,
-    store: &Store,
-    all_architectures: bool,
-    origin: Origin,
-) -> reports::Images {
-    let host = host_architecture();
-    let rows = catalogue
-        .entries()
-        .into_iter()
-        .flat_map(|entry| {
-            entry
-                .artifacts
-                .iter()
-                .filter(|artifact| all_architectures || artifact.arch == host)
-                .map(|artifact| reports::ImageRow {
-                    name: entry.name.clone(),
-                    tag: entry.tag.clone(),
-                    arch: artifact.arch.clone(),
-                    description: entry.description.clone(),
-                    held: store.contains(&artifact.digest),
-                    size: artifact.size.or_else(|| held_size(store, artifact)),
-                    catalogue: entry.catalogue.clone(),
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    reports::Images { rows, origin }
-}
-
-/// The size of a held image, for an entry that does not state one.
-fn held_size(store: &Store, artifact: &vm_core::catalogue::Artifact) -> Option<u64> {
-    std::fs::metadata(store.path_for(&artifact.digest))
-        .ok()
-        .map(|data| data.len())
-}
-
-fn inspect(
-    catalogue: &Catalogue,
-    store: &Store,
-    reference: &str,
-    arch: &str,
-) -> vm_core::Result<reports::Inspect> {
-    let reference: Reference = reference.parse()?;
-    let (entry, artifact) = catalogue.resolve(&reference, arch)?;
-    let mut report = reports::Inspect::new(entry, artifact, store.contains(&artifact.digest));
-    if report.held {
-        report.path = Some(store.path_for(&artifact.digest).display().to_string());
-    }
-    report.used_by = machines::holders(&artifact.digest.to_string()).unwrap_or_default();
-    Ok(report)
-}
-
-fn pull(
-    catalogue: &Catalogue,
-    store: &Store,
-    style: Style,
-    format: Format,
-    reference: &str,
-) -> vm_core::Result<reports::Pull> {
-    let reference: Reference = reference.parse()?;
-    let (entry, artifact) = catalogue.resolve(&reference, host_architecture())?;
-    if format.is_text() && !store.contains(&artifact.digest) {
-        if let Some(url) = &artifact.url {
-            eprintln!("Fetching {}", style.name(url));
-        }
-    }
-    let outcome = machines::fetch(store, artifact, format.is_text())?;
-    store.record(entry, artifact)?;
-    let path = store.path_for(&artifact.digest);
-    Ok(reports::Pull {
-        name: entry.name.clone(),
-        tag: entry.tag.clone(),
-        arch: artifact.arch.clone(),
-        digest: artifact.digest.to_string(),
-        path: path.display().to_string(),
-        size: std::fs::metadata(&path).map_or(0, |data| data.len()),
-        status: match outcome {
-            Pulled::Fetched => reports::PullStatus::Fetched,
-            Pulled::AlreadyPresent => reports::PullStatus::AlreadyPresent,
-        },
-    })
 }
 
 #[cfg(test)]
@@ -1075,45 +996,6 @@ mod tests {
         assert!(Cli::try_parse_from(["vm", "images", "--local", "--remote"]).is_err());
     }
 
-    fn sources() -> Vec<Source> {
-        [
-            ("project", vm_core::catalogue::Kind::Remote),
-            ("internal", vm_core::catalogue::Kind::Remote),
-            ("team", vm_core::catalogue::Kind::Local),
-            ("store", vm_core::catalogue::Kind::Local),
-        ]
-        .into_iter()
-        .map(|(name, kind)| Source {
-            name: name.to_owned(),
-            kind,
-            directory: std::path::PathBuf::from("/c").join(name),
-        })
-        .collect()
-    }
-
-    fn selected(origin: Origin, named: Option<&str>) -> Vec<String> {
-        select_sources(sources(), origin, named)
-            .unwrap()
-            .into_iter()
-            .map(|source| source.name)
-            .collect()
-    }
-
-    #[test]
-    fn catalogues_are_selected_by_kind_or_name_keeping_their_order() {
-        assert_eq!(
-            selected(Origin::All, None),
-            ["project", "internal", "team", "store"]
-        );
-        assert_eq!(selected(Origin::Remote, None), ["project", "internal"]);
-        assert_eq!(selected(Origin::Local, None), ["team", "store"]);
-        assert_eq!(selected(Origin::All, Some("team")), ["team"]);
-        assert!(selected(Origin::Remote, Some("team")).is_empty());
-        let error = select_sources(sources(), Origin::All, Some("nope")).unwrap_err();
-        assert_eq!(error.kind(), "unknown-catalogue");
-        assert!(error.to_string().contains("internal"), "{error}");
-    }
-
     #[test]
     fn images_and_update_take_a_catalogue_name() {
         use clap::Parser as _;
@@ -1135,15 +1017,6 @@ mod tests {
             Command::Update { catalogue } => assert_eq!(catalogue.as_deref(), Some("internal")),
             _ => panic!("not an update"),
         }
-    }
-
-    #[test]
-    fn updating_an_unknown_catalogue_names_the_remotes() {
-        let Err(error) = update(&vm_core::config::Config::default(), Some("nope")) else {
-            panic!("an unknown catalogue was updated");
-        };
-        assert_eq!(error.kind(), "unknown-catalogue");
-        assert!(error.to_string().contains("project"), "{error}");
     }
 
     #[test]
@@ -1174,11 +1047,11 @@ mod tests {
         assert_eq!(parsed(&["vm", "prune"]), (None, false, false));
         assert_eq!(
             parsed(&["vm", "prune", "machines", "--all"]),
-            (Some(machines::PruneTarget::Machines), true, false)
+            (Some(PruneTarget::Machines), true, false)
         );
         assert_eq!(
             parsed(&["vm", "prune", "images", "--dry-run"]),
-            (Some(machines::PruneTarget::Images), false, true)
+            (Some(PruneTarget::Images), false, true)
         );
         assert!(Cli::try_parse_from(["vm", "prune", "everything"]).is_err());
     }

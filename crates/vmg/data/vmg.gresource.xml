@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/com/paperstack/VmManager">
+    <file preprocess="xml-stripblanks">ui/window.ui</file>
+    <file compressed="true">style.css</file>
+    <file preprocess="xml-stripblanks" alias="icons/scalable/apps/com.paperstack.VmManager.svg">icons/hicolor/scalable/apps/com.paperstack.VmManager.svg</file>
+    <file preprocess="xml-stripblanks" alias="icons/symbolic/apps/com.paperstack.VmManager-symbolic.svg">icons/hicolor/symbolic/apps/com.paperstack.VmManager-symbolic.svg</file>
+  </gresource>
+</gresources>

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=VM Manager
+GenericName=Virtual Machine Manager
+Comment=Create and manage QEMU virtual machines
+Exec=vmg
+Icon=com.paperstack.VmManager
+Terminal=false
+Type=Application
+Categories=GTK;System;Emulator;
+Keywords=qemu;kvm;virtual;machine;vm;
+StartupNotify=true
+StartupWMClass=com.paperstack.VmManager

@@ -1,0 +1,79 @@
+.TH VMG 1 "2026" "vm-manager-gui" "User Commands"
+.SH NAME
+vmg \- window for the vm virtual machine manager
+.SH SYNOPSIS
+.B vmg
+[\fB\-\-no\-indicator\fR]
+.SH DESCRIPTION
+.B vmg
+shows the machines and images that
+.BR vm (1)
+manages, and does what its commands do.
+.B vm gui
+opens it too.
+.PP
+The sidebar lists this host, its machines and the images it holds. Selecting
+one opens a tab. The host tab lists the machines and every image the
+catalogues name in tables, with toggles that narrow them to running machines, held images or the
+host's architecture, and a menu that acts on the checked rows. A machine's tab
+shows its state, access, hardware, ports and volumes, and the actions its state
+allows. An image's tab shows what
+.B vm inspect
+reports. Right-clicking a table row offers the same actions.
+.PP
+Consoles, shells, logs and file copies open as terminal tabs. A console tab is
+attached to the machine's serial console; a shell tab runs
+.BR ssh ;
+a log tab follows the console log, whole or by its last lines.
+.PP
+The listing refreshes every two seconds and after every action. Progress is
+shown at the foot of the window; outcomes and errors appear as toasts.
+.SH OPTIONS
+.TP
+.B \-\-no\-indicator
+Do not publish a panel indicator. Closing the window then quits.
+.TP
+.BR \-h ", " \-\-help
+Print help.
+.TP
+.BR \-V ", " \-\-version
+Print the version.
+.SH ACTIONS
+Each action corresponds to a
+.B vm
+command.
+.TP
+Run…, Import…, Update Catalogues, Prune…, Configuration
+.BR run ", " import ", " update ", " prune " and " config .
+Prune lists what a dry run finds before removing it.
+.TP
+Start, Settings…, Eject CD-ROM
+.BR start ,
+with its options in the settings dialog and
+.BR \-\-eject .
+.TP
+Pause, Resume, Stop, Kill, Remove…
+.BR pause ", " resume ", " stop ", " kill " and " rm .
+.TP
+Console, Shell, Logs, Copy Files…, Screen, Screenshot…, Clone…
+.BR console ", " ssh ", " logs ", " cp ", " screen ", " screenshot " and " clone .
+.TP
+Pull, Export…, Remove…
+.BR pull ", " export " and " rmi .
+.SH THE INDICATOR
+The indicator is a
+.IR StatusNotifierItem ,
+which KDE, Xfce, Cinnamon and MATE show. GNOME needs the
+.B gnome\-shell\-extension\-appindicator
+package. While an indicator is shown, closing the window hides it; the
+indicator lists the machines and reopens the window.
+.SH SETTINGS
+The window's size, the sidebar's width and visibility, the table filters and
+column widths are kept in GSettings under
+.BR com.paperstack.VmManager .
+.SH FILES
+The same as
+.BR vm (1).
+.SH SEE ALSO
+.BR vm (1),
+.BR vm\-config (5)

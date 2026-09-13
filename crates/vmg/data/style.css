@@ -1,0 +1,33 @@
+/* Adwaita named colours, so the window follows the user's theme. */
+
+.tone-good {
+  color: @success_color;
+}
+
+.tone-warn {
+  color: @warning_color;
+}
+
+.tone-bad {
+  color: @error_color;
+}
+
+.tone-neutral {
+  opacity: 0.7;
+}
+
+.tone-machines {
+  color: #3584e4;
+}
+
+.tone-images {
+  color: #9141ac;
+}
+
+.table-cell {
+  padding: 2px 6px;
+}
+
+.terminal-tab {
+  padding: 4px;
+}

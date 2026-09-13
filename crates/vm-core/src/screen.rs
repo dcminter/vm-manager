@@ -1,11 +1,11 @@
 //! A machine's screen: shown in a VNC viewer, or saved as a picture.
 
+use crate::error::{Error, Result};
+use crate::instance::{Directory, Instance, Instances};
+use crate::qmp;
 use crate::reports;
+use crate::value::Value;
 use std::path::{Path, PathBuf};
-use vm_core::error::{Error, Result};
-use vm_core::instance::{Directory, Instance, Instances};
-use vm_core::qmp;
-use vm_core::value::Value;
 
 /// The VNC viewer, which connects to a Unix socket directly.
 const VIEWER: &str = "xtigervncviewer";

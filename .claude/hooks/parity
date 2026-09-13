@@ -1,0 +1,25 @@
+#!/bin/bash
+# Claude Code Stop hook asking once per change set for the CLI and the GUI to offer the same features.
+set -uo pipefail
+cd "$(dirname "$0")/../.." || exit 0
+
+paths=(crates/vm/src crates/vmg/src)
+fingerprint="$( { git diff HEAD -- "${paths[@]}"; git ls-files --others --exclude-standard -- "${paths[@]}" | xargs -r cat; } | sha256sum | cut -d' ' -f1)"
+clean="$(printf '' | sha256sum | cut -d' ' -f1)"
+record="$(git rev-parse --git-dir)/parity-review"
+
+if [ "$fingerprint" = "$clean" ] || [ "$fingerprint" = "$(cat "$record" 2>/dev/null)" ]; then
+  exit 0
+fi
+echo "$fingerprint" >"$record"
+if jq -e '.stop_hook_active' >/dev/null 2>&1; then
+  exit 0
+fi
+
+cat >&2 <<'MESSAGE'
+Before finishing, check that the CLI (crates/vm) and the GUI (crates/vmg) still offer the same
+features: every command, flag and setting added or changed on one side has its counterpart on the
+other, and design/gui.md "Feature map" lists both. Add what is missing, unless the user has exempted
+it; exemptions are listed one per line in .claude/parity-exempt, and only the user adds to that file.
+MESSAGE
+exit 2

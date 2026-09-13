@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds a binary .deb: scripts/package <trixie|noble> <version> [output directory]
+# Builds the vm-manager and vm-manager-gui .debs: scripts/package <trixie|noble> <version> [output directory]
 
 set -euo pipefail
 
@@ -16,13 +16,15 @@ trixie)
     suffix="deb13"
     depends="qemu-system-x86, qemu-utils, openssh-client, virtiofsd"
     recommends="ovmf, xz-utils, zstd"
-    suggests="tigervnc-viewer"
+    suggests="tigervnc-viewer, vm-manager-gui"
+    gui_depends="libgtk-4-1, libadwaita-1-0, libvte-2.91-gtk4-0, libglib2.0-0t64"
     ;;
 noble)
     suffix="ubuntu24.04"
     depends="qemu-system-x86, qemu-utils, openssh-client, virtiofsd"
     recommends="ovmf, xz-utils, zstd"
-    suggests="tigervnc-viewer"
+    suggests="tigervnc-viewer, vm-manager-gui"
+    gui_depends="libgtk-4-1, libadwaita-1-0, libvte-2.91-gtk4-0, libglib2.0-0t64"
     ;;
 *)
     echo "package: unknown distribution '$distribution'; expected trixie or noble" >&2
@@ -44,9 +46,10 @@ verify_dependencies() {
     fi
     local missing=()
     local name
-    for name in ${depends//,/ } ${recommends//,/ } ${suggests//,/ }; do
+    for name in ${depends//,/ } ${recommends//,/ } ${suggests//,/ } ${gui_depends//,/ }; do
         name="${name//[[:space:]]/}"
         [ -n "$name" ] || continue
+        [ "$name" = vm-manager-gui ] && continue
         if [ -z "$(apt-cache policy "$name" 2>/dev/null)" ]; then
             missing+=("$name")
         fi
@@ -108,7 +111,7 @@ Architecture: $architecture
 Depends: $depends
 Recommends: $recommends
 Suggests: $suggests
-Conflicts: mgetty-voice, vmg
+Conflicts: mgetty-voice
 Maintainer: Dave Minter <dave@paperstack.com>
 Homepage: https://github.com/dcminter/vm-manager
 Installed-Size: $installed_size
@@ -118,19 +121,79 @@ Description: Run QEMU virtual machines with a Docker-like command set
  own disk over a shared stored image, its own generated key, and a cloud-init
  seed that makes it reachable over SSH without a password.
  .
- The binaries are installed as /usr/bin/vm and conflict with the unrelated
- mgetty-voice and vmg packages, which claim the same paths.
+ The binary is installed as /usr/bin/vm and conflicts with the unrelated
+ mgetty-voice package, which claims the same path.
 CONTROL
 
 install -d "$outdir"
 dpkg-deb --root-owner-group --build "$staging" "$outdir/$package.deb" >/dev/null
 echo "Wrote $outdir/$package.deb"
 
-# lintian is optional; its absence is reported, not fatal.
-if command -v lintian >/dev/null 2>&1; then
-    lintian --suppress-tags \
-        changelog-file-missing-in-native-package,no-manual-page,maintainer-script-lacks-debhelper-token \
-        "$outdir/$package.deb" || echo "package: lintian had complaints, listed above" >&2
-else
-    echo "package: lintian is not here, so the package goes unchecked" >&2
-fi
+check_package() {
+    # lintian is optional; its absence is reported, not fatal.
+    if command -v lintian >/dev/null 2>&1; then
+        lintian --suppress-tags \
+            changelog-file-missing-in-native-package,no-manual-page,maintainer-script-lacks-debhelper-token \
+            "$1" || echo "package: lintian had complaints, listed above" >&2
+    else
+        echo "package: lintian is not here, so the package goes unchecked" >&2
+    fi
+}
+check_package "$outdir/$package.deb"
+
+gui_package="vm-manager-gui_${full_version}_${architecture}"
+gui_staging="target/package/${gui_package}"
+echo "Building $gui_package"
+rm -rf "$gui_staging"
+install -d "$gui_staging/DEBIAN"
+install -d "$gui_staging/usr/bin"
+install -d "$gui_staging/usr/share/applications"
+install -d "$gui_staging/usr/share/metainfo"
+install -d "$gui_staging/usr/share/glib-2.0/schemas"
+install -d "$gui_staging/usr/share/icons/hicolor/scalable/apps"
+install -d "$gui_staging/usr/share/icons/hicolor/symbolic/apps"
+install -d "$gui_staging/usr/share/man/man1"
+install -d "$gui_staging/usr/share/doc/vm-manager-gui"
+
+gui_data="crates/vmg/data"
+install -m 0755 target/release/vmg "$gui_staging/usr/bin/vmg"
+install -m 0644 "$gui_data/com.paperstack.VmManager.desktop" "$gui_staging/usr/share/applications/"
+install -m 0644 "$gui_data/com.paperstack.VmManager.metainfo.xml" "$gui_staging/usr/share/metainfo/"
+install -m 0644 "$gui_data/com.paperstack.VmManager.gschema.xml" "$gui_staging/usr/share/glib-2.0/schemas/"
+install -m 0644 "$gui_data/icons/hicolor/scalable/apps/com.paperstack.VmManager.svg" "$gui_staging/usr/share/icons/hicolor/scalable/apps/"
+install -m 0644 "$gui_data/icons/hicolor/symbolic/apps/com.paperstack.VmManager-symbolic.svg" "$gui_staging/usr/share/icons/hicolor/symbolic/apps/"
+gzip -9nc docs/vmg.1 >"$gui_staging/usr/share/man/man1/vmg.1.gz"
+install -m 0644 LICENSE "$gui_staging/usr/share/doc/vm-manager-gui/copyright"
+cp "$staging/usr/share/doc/vm-manager/changelog.Debian.gz" "$gui_staging/usr/share/doc/vm-manager-gui/"
+
+find "$gui_staging/usr" -type d -exec chmod 0755 {} +
+find "$gui_staging/usr" -type f -exec chmod 0644 {} +
+chmod 0755 "$gui_staging/usr/bin/vmg"
+
+gui_installed_size="$(du -ks "$gui_staging/usr" | cut -f1)"
+
+# dpkg triggers compile the schema and refresh the icon cache, so no maintainer scripts are needed.
+cat >"$gui_staging/DEBIAN/control" <<CONTROL
+Package: vm-manager-gui
+Version: $full_version
+Section: admin
+Priority: optional
+Architecture: $architecture
+Depends: vm-manager (= $full_version), $gui_depends
+Suggests: tigervnc-viewer
+Conflicts: vmg
+Maintainer: Dave Minter <dave@paperstack.com>
+Homepage: https://github.com/dcminter/vm-manager
+Installed-Size: $gui_installed_size
+Description: Window for the vm virtual machine manager
+ A GTK window over the same machines and images as the vm command: a
+ sidebar of machines and images, pages of their details and actions, and
+ terminal tabs for consoles, shells and logs.
+ .
+ The binary is installed as /usr/bin/vmg and conflicts with the unrelated
+ vmg package, which claims the same path.
+CONTROL
+
+dpkg-deb --root-owner-group --build "$gui_staging" "$outdir/$gui_package.deb" >/dev/null
+echo "Wrote $outdir/$gui_package.deb"
+check_package "$outdir/$gui_package.deb"

@@ -10,6 +10,10 @@ vm ssh demo
 vm stop demo
 ```
 
+`vmg` does the same in a window:
+
+![The vmg window](docs/vmg.png)
+
 ## Building and running
 
 Build prerequisites (Debian 13):
@@ -40,6 +44,7 @@ cargo run -p vm -- images
 | `vm config` | Show the config file, or change a setting or catalogue |
 | `vm run <image>` | Create and start a machine |
 | `vm start <name>` | Start a stopped machine, optionally changing its settings; `--eject` removes its CD-ROM |
+| `vm gui` | Open the window, `vmg` |
 | `vm ssh <name>` | Open a shell on a machine, or run a command in it |
 | `vm cp <from> <to>` | Copy files, naming one side as `name:path` |
 | `vm ps` | List machines; `--all` includes stopped ones, `--follow` refreshes |
@@ -166,6 +171,25 @@ sudo sysctl --system
 ```
 
 Only echo requests pass, so `traceroute` and `mtr` see nothing past the host.
+
+## The window
+
+`vmg`, or `vm gui`, opens a window over the same machines and images. The
+sidebar lists this host, its machines and the images it holds; the host tab
+tables every image the catalogues name. Selecting one opens a tab of its
+details and the actions its state allows.
+Consoles, shells, logs and file copies open as terminal tabs. Every `vm`
+command has a counterpart there; `man vmg` lists them.
+
+Building it needs the GTK, libadwaita and VTE development packages:
+
+```bash
+sudo apt install pkg-config libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev
+```
+
+The `vm-manager-gui` package installs it alongside `vm-manager`. It publishes a
+panel indicator where the desktop shows one; GNOME needs
+`gnome-shell-extension-appindicator`.
 
 ## Shell completion
 

@@ -445,13 +445,13 @@ mod tests {
         assert_eq!(values(&chipset()), ["q35", "pc"]);
         assert_eq!(values(&disk()), ["virtio", "ide", "sata"]);
         for value in values(&firmware()) {
-            crate::machines::parse_firmware(&value).unwrap();
+            vm_core::settings::parse_firmware(&value).unwrap();
         }
         for value in values(&chipset()) {
-            crate::machines::parse_machine(&value).unwrap();
+            vm_core::settings::parse_machine(&value).unwrap();
         }
         for value in values(&disk()) {
-            crate::machines::parse_disk(&value).unwrap();
+            vm_core::settings::parse_disk(&value).unwrap();
         }
     }
 

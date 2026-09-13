@@ -1,55 +1,14 @@
+//! Text and document renderings of what the operations report.
+
+use crate::output::Report;
 use crate::style::Style;
 use crate::table;
 use crate::units::{human, human_pair};
-use vm_core::catalogue::{Artifact, Entry, Kind};
-use vm_core::instance::{self, Instance, Port};
+use vm_core::instance::{self, Port};
 use vm_core::machine::{Chipset, Disk, Firmware};
-use vm_core::process;
 use vm_core::value::Value;
 
-use crate::output::Report;
-
-/// One architecture's build of one catalogue entry, as `vm images` lists it.
-pub struct ImageRow {
-    pub name: String,
-    pub tag: String,
-    pub arch: String,
-    pub description: String,
-    pub held: bool,
-    /// Size on disk as the catalogue records it, if it does.
-    pub size: Option<u64>,
-    pub catalogue: String,
-}
-
-/// Which kinds of catalogue an image listing reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Origin {
-    All,
-    Local,
-    Remote,
-}
-
-impl Origin {
-    pub const fn admits(self, kind: Kind) -> bool {
-        matches!(
-            (self, kind),
-            (Self::All, _) | (Self::Local, Kind::Local) | (Self::Remote, Kind::Remote)
-        )
-    }
-
-    pub const fn of(local: bool, remote: bool) -> Self {
-        match (local, remote) {
-            (true, _) => Self::Local,
-            (false, true) => Self::Remote,
-            (false, false) => Self::All,
-        }
-    }
-}
-
-pub struct Images {
-    pub rows: Vec<ImageRow>,
-    pub origin: Origin,
-}
+pub use vm_core::reports::*;
 
 impl Report for Images {
     fn to_value(&self) -> Value {
@@ -109,72 +68,14 @@ impl Report for Images {
     }
 }
 
-pub struct Inspect {
-    pub name: String,
-    pub tag: String,
-    pub aliases: Vec<String>,
-    pub description: String,
-    pub arch: String,
-    pub format: String,
-    /// How the published file is wrapped, or "none".
-    pub compression: String,
-    /// The published format, where a pull converts it.
-    pub source_format: Option<String>,
-    pub media: vm_core::catalogue::Media,
-    pub url: Option<String>,
-    pub digest: String,
-    pub seedable: bool,
-    pub held: bool,
-    pub size: Option<u64>,
-    pub firmware: Firmware,
-    pub cpu: String,
-    pub machine: Chipset,
-    pub disk: Disk,
-    /// Every architecture the entry has a build for.
-    pub architectures: Vec<String>,
-    pub catalogue: String,
-    pub kind: Kind,
-    /// Lower catalogues whose entry this one hides.
-    pub shadows: Vec<String>,
-    /// The catalogue file describing the image.
-    pub entry: String,
-    /// Where the image is in the store, when held.
-    pub path: Option<String>,
-    /// Machines that need the image.
-    pub used_by: Vec<String>,
+/// Phrases an inspection needs.
+trait InspectText {
+    fn formatting(&self) -> String;
+    fn architecture(&self) -> String;
+    fn access(&self) -> &'static str;
 }
 
-impl Inspect {
-    pub fn new(entry: &Entry, artifact: &Artifact, held: bool) -> Self {
-        Self {
-            name: entry.name.clone(),
-            tag: entry.tag.clone(),
-            aliases: entry.aliases.clone(),
-            description: entry.description.clone(),
-            arch: artifact.arch.clone(),
-            format: artifact.format.clone(),
-            compression: artifact.compression.name().to_owned(),
-            source_format: artifact.source_format.clone(),
-            media: artifact.media,
-            url: artifact.url.clone(),
-            digest: artifact.digest.to_string(),
-            seedable: entry.login.is_seedable(),
-            held,
-            size: artifact.size,
-            firmware: artifact.firmware,
-            cpu: artifact.cpu().to_owned(),
-            machine: artifact.machine,
-            disk: artifact.disk,
-            architectures: entry.architectures(),
-            catalogue: entry.catalogue.clone(),
-            kind: entry.kind,
-            shadows: entry.shadows.clone(),
-            entry: entry.path.display().to_string(),
-            path: None,
-            used_by: Vec::new(),
-        }
-    }
-
+impl InspectText for Inspect {
     /// The image format, with its compression where it has one.
     fn formatting(&self) -> String {
         use std::fmt::Write as _;
@@ -206,7 +107,7 @@ impl Inspect {
         }
     }
 
-    const fn access(&self) -> &'static str {
+    fn access(&self) -> &'static str {
         if self.seedable {
             "cloud-init; volumes and generated keys are available"
         } else {
@@ -311,31 +212,6 @@ impl Report for Inspect {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PullStatus {
-    Fetched,
-    AlreadyPresent,
-}
-
-impl PullStatus {
-    const fn slug(self) -> &'static str {
-        match self {
-            Self::Fetched => "fetched",
-            Self::AlreadyPresent => "already-present",
-        }
-    }
-}
-
-pub struct Pull {
-    pub name: String,
-    pub tag: String,
-    pub arch: String,
-    pub digest: String,
-    pub path: String,
-    pub size: u64,
-    pub status: PullStatus,
-}
-
 impl Report for Pull {
     fn to_value(&self) -> Value {
         Value::map([
@@ -356,19 +232,6 @@ impl Report for Pull {
             PullStatus::AlreadyPresent => format!("{reference} is already present"),
         }]
     }
-}
-
-/// One remote catalogue's update.
-pub struct Updated {
-    pub name: String,
-    pub url: String,
-    pub path: String,
-    /// The files and entries installed, or why nothing was.
-    pub outcome: std::result::Result<(usize, usize), String>,
-}
-
-pub struct Update {
-    pub catalogues: Vec<Updated>,
 }
 
 impl Report for Update {
@@ -413,54 +276,6 @@ impl Report for Update {
     fn succeeded(&self) -> bool {
         self.catalogues.iter().all(|held| held.outcome.is_ok())
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunStatus {
-    Created,
-    Restarted,
-    AlreadyRunning,
-}
-
-impl RunStatus {
-    const fn slug(self) -> &'static str {
-        match self {
-            Self::Created => "created",
-            Self::Restarted => "restarted",
-            Self::AlreadyRunning => "already-running",
-        }
-    }
-}
-
-/// What `vm run` or `vm start` left running.
-pub struct Run {
-    pub name: String,
-    pub image: String,
-    pub arch: String,
-    pub memory: u64,
-    pub cpus: u32,
-    pub ports: Vec<Port>,
-    pub ssh_port: Option<u16>,
-    pub user: String,
-    pub seeded: bool,
-    pub pid: u32,
-    /// Whether the machine got KVM; absent when the monitor would not say.
-    pub accelerated: Option<bool>,
-    pub console: String,
-    pub screen: String,
-    pub status: RunStatus,
-    pub firmware: Firmware,
-    pub cpu: String,
-    pub machine: Chipset,
-    pub disk: Disk,
-    /// Set when this start moved the machine to other firmware.
-    pub firmware_changed: bool,
-    /// Whether plain `ssh` reaches the machine by name.
-    pub ssh_config: bool,
-    /// The user's SSH config, when the `Include` line was added to it.
-    pub ssh_config_changed: Option<String>,
-    /// The image in the CD-ROM drive.
-    pub cdrom: Option<String>,
 }
 
 fn ports_value(ports: &[Port]) -> Value {
@@ -594,14 +409,6 @@ impl Report for Run {
     }
 }
 
-/// Where a machine's screen can be reached.
-pub struct Screen {
-    pub name: String,
-    pub socket: String,
-    /// This host's name, for the command that forwards the socket from elsewhere.
-    pub host: String,
-}
-
 impl Report for Screen {
     fn to_value(&self) -> Value {
         Value::map([
@@ -622,15 +429,6 @@ impl Report for Screen {
             style.dim("  then connect a VNC viewer to localhost:5900."),
         ]
     }
-}
-
-/// A saved picture of a machine's screen.
-pub struct Screenshot {
-    pub name: String,
-    pub path: String,
-    pub size: u64,
-    pub width: u32,
-    pub height: u32,
 }
 
 impl Report for Screenshot {
@@ -656,7 +454,6 @@ impl Report for Screenshot {
     }
 }
 
-/// The machine settings that differ from the defaults, or nothing when none do.
 fn machine_text(firmware: Firmware, machine: Chipset, disk: Disk, cpu: &str) -> Option<String> {
     let mut parts = Vec::new();
     if !machine.is_default() {
@@ -674,87 +471,13 @@ fn machine_text(firmware: Firmware, machine: Chipset, disk: Disk, cpu: &str) -> 
     (!parts.is_empty()).then(|| parts.join(", "))
 }
 
-/// What a machine is doing.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum State {
-    Stopped,
-    /// The record could not be read, so nothing else is known.
-    Damaged,
-    /// The monitor's run state, passed through unmapped.
-    Live(String),
+/// Phrases a machine listing needs.
+trait MachineRowText {
+    fn sizes(used: Option<u64>, total: Option<u64>) -> String;
+    fn status(&self) -> &str;
 }
 
-impl State {
-    pub fn slug(&self) -> &str {
-        match self {
-            Self::Stopped => "stopped",
-            Self::Damaged => "damaged",
-            Self::Live(held) => held,
-        }
-    }
-}
-
-/// Bytes to mebibytes, rounding down.
-const fn mebibytes(bytes: u64) -> u64 {
-    bytes >> 20
-}
-
-pub struct MachineRow {
-    pub name: String,
-    pub image: String,
-    pub state: State,
-    pub created: u64,
-    pub ports: Vec<Port>,
-    pub pid: Option<u32>,
-    pub ssh_port: Option<u16>,
-    pub user: String,
-    /// In mebibytes.
-    pub memory: Option<u64>,
-    /// Memory the hypervisor holds now; absent when not running.
-    pub memory_used: Option<u64>,
-    pub disk: Option<u64>,
-    pub disk_used: Option<u64>,
-}
-
-impl MachineRow {
-    pub fn of(instance: &Instance, state: State, disk: vm_core::disk::Usage) -> Self {
-        Self {
-            name: instance.name.clone(),
-            image: instance.image.clone(),
-            state,
-            created: instance.created,
-            ports: instance.ports.clone(),
-            pid: instance.pid,
-            ssh_port: instance.ssh_port,
-            user: instance.user.clone(),
-            memory: Some(instance.memory),
-            memory_used: instance
-                .is_running()
-                .then(|| instance.pid.and_then(process::resident).map(mebibytes))
-                .flatten(),
-            disk: disk.capacity.map(mebibytes),
-            disk_used: disk.allocated.map(mebibytes),
-        }
-    }
-
-    /// An instance whose record cannot be read, listed so it can be removed.
-    pub fn damaged(name: &str) -> Self {
-        Self {
-            name: name.to_owned(),
-            image: String::new(),
-            state: State::Damaged,
-            created: 0,
-            ports: Vec::new(),
-            pid: None,
-            ssh_port: None,
-            user: String::new(),
-            memory: None,
-            memory_used: None,
-            disk: None,
-            disk_used: None,
-        }
-    }
-
+impl MachineRowText for MachineRow {
     /// One figure, or one against the other where both are known.
     fn sizes(used: Option<u64>, total: Option<u64>) -> String {
         match (used, total) {
@@ -770,12 +493,6 @@ impl MachineRow {
     }
 }
 
-pub struct Machines {
-    pub rows: Vec<MachineRow>,
-    pub all: bool,
-}
-
-/// How long ago, in the largest whole unit.
 fn age(created: u64) -> String {
     if created == 0 {
         return String::new();
@@ -856,38 +573,6 @@ impl Report for Machines {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StopOutcome {
-    /// The guest took the power button and shut itself down.
-    PoweredDown,
-    /// It was taken down without being asked, as `vm kill` does.
-    Killed,
-    /// The guest ignored the power button.
-    Unresponsive,
-    /// There was no monitor to ask through, so it was signalled instead.
-    Unreachable,
-    AlreadyStopped,
-}
-
-impl StopOutcome {
-    const fn slug(self) -> &'static str {
-        match self {
-            Self::PoweredDown => "powered-down",
-            Self::Killed => "killed",
-            Self::Unresponsive => "unresponsive",
-            Self::Unreachable => "unreachable",
-            Self::AlreadyStopped => "already-stopped",
-        }
-    }
-}
-
-pub struct Stopped {
-    pub name: String,
-    pub outcome: StopOutcome,
-    /// How long the guest was given, for the message when it took none of it.
-    pub waited: u64,
-}
-
 impl Report for Stopped {
     fn to_value(&self) -> Value {
         Value::map([
@@ -915,26 +600,6 @@ impl Report for Stopped {
     }
 }
 
-pub struct Cloned {
-    pub source: String,
-    pub name: String,
-    pub tag: String,
-    pub arch: String,
-    pub digest: String,
-    pub size: u64,
-    pub consistency: crate::machines::Consistency,
-}
-
-impl Cloned {
-    const fn consistency(&self) -> &'static str {
-        match self.consistency {
-            crate::machines::Consistency::Stopped => "stopped",
-            crate::machines::Consistency::Paused => "paused",
-            crate::machines::Consistency::Running => "running",
-        }
-    }
-}
-
 impl Report for Cloned {
     fn to_value(&self) -> Value {
         Value::map([
@@ -944,7 +609,7 @@ impl Report for Cloned {
             ("arch", Value::string(self.arch.clone())),
             ("digest", Value::string(self.digest.clone())),
             ("size", Value::Integer(self.size)),
-            ("consistency", Value::string(self.consistency())),
+            ("consistency", Value::string(self.consistency.slug())),
         ])
     }
 
@@ -955,7 +620,7 @@ impl Report for Cloned {
             style.name(&format!("{}:{}", self.name, self.tag)),
             human(self.size)
         )];
-        if self.consistency == crate::machines::Consistency::Running {
+        if self.consistency == Consistency::Running {
             lines.push(style.dim(
                 "  Taken from a running guest: anything it had not yet written is not in \
                  the image.",
@@ -965,25 +630,18 @@ impl Report for Cloned {
     }
 }
 
-/// What `vm import` brought in.
-pub struct Imported {
-    pub source: String,
-    pub outcome: vm_core::import::Imported,
-    /// Catalogues whose entry of the same name this one hides.
-    pub hides: Vec<String>,
-}
-
-impl Imported {
-    /// The format before and after, when they differ.
-    fn formatting(&self) -> String {
-        let artifact = &self.outcome.artifact;
-        if artifact.media.is_cdrom() {
-            format!("{}, kept as a CD-ROM image", self.outcome.format)
-        } else if self.outcome.format == artifact.format {
-            artifact.format.clone()
-        } else {
-            format!("{}, converted to {}", self.outcome.format, artifact.format)
-        }
+/// The format before and after an import, when they differ.
+fn imported_formatting(report: &Imported) -> String {
+    let artifact = &report.outcome.artifact;
+    if artifact.media.is_cdrom() {
+        format!("{}, kept as a CD-ROM image", report.outcome.format)
+    } else if report.outcome.format == artifact.format {
+        artifact.format.clone()
+    } else {
+        format!(
+            "{}, converted to {}",
+            report.outcome.format, artifact.format
+        )
     }
 }
 
@@ -1023,7 +681,7 @@ impl Report for Imported {
                 human(artifact.size.unwrap_or_default())
             ),
             format!("  from     {}", self.source),
-            format!("  format   {}", self.formatting()),
+            format!("  format   {}", imported_formatting(self)),
         ];
         match &artifact.url {
             Some(_) => lines.push("  fetch    again from its source when not held".to_owned()),
@@ -1042,23 +700,6 @@ impl Report for Imported {
         }
         lines
     }
-}
-
-/// What `vm export` wrote.
-pub struct Exported {
-    pub name: String,
-    pub tag: String,
-    pub arch: String,
-    pub format: String,
-    pub compression: vm_core::compression::Compression,
-    pub cdrom: bool,
-    pub digest: String,
-    pub path: String,
-    pub size: u64,
-    /// The suffix added to the name given, if one was.
-    pub suffixed: Option<String>,
-    /// Whether the copy was checked against the image's digest.
-    pub verified: bool,
 }
 
 impl Report for Exported {
@@ -1107,21 +748,6 @@ impl Report for Exported {
         }
         lines
     }
-}
-
-/// What `vm rmi` took away.
-pub struct Untagged {
-    pub name: String,
-    pub tag: String,
-    pub arch: String,
-    pub digest: String,
-    pub size: u64,
-    /// Whether the catalogue entry was removed too.
-    pub forgotten: bool,
-    /// Machines left without a backing image by `--force`.
-    pub broke: Vec<String>,
-    /// Other names keeping the file.
-    pub kept_by: Vec<String>,
 }
 
 impl Report for Untagged {
@@ -1175,12 +801,6 @@ impl Report for Untagged {
     }
 }
 
-/// The guest's console.
-pub struct Console {
-    pub name: String,
-    pub lines: Vec<String>,
-}
-
 impl Report for Console {
     fn to_value(&self) -> Value {
         Value::map([
@@ -1196,14 +816,6 @@ impl Report for Console {
     fn render_text(&self, _: Style) -> Vec<String> {
         self.lines.clone()
     }
-}
-
-/// What `vm pause` and `vm resume` did, or found already done.
-pub struct Switched {
-    pub name: String,
-    /// What the machine is doing now.
-    pub state: String,
-    pub changed: bool,
 }
 
 impl Report for Switched {
@@ -1232,17 +844,6 @@ impl Report for Switched {
             ));
         }
         lines
-    }
-}
-
-pub struct Pruned {
-    pub items: Vec<vm_core::prune::Item>,
-    pub dry_run: bool,
-}
-
-impl Pruned {
-    fn total(&self) -> u64 {
-        self.items.iter().map(|item| item.size).sum()
     }
 }
 
@@ -1304,10 +905,6 @@ impl Report for Pruned {
     }
 }
 
-pub struct Removed {
-    pub name: String,
-}
-
 impl Report for Removed {
     fn to_value(&self) -> Value {
         Value::map([("name", Value::string(self.name.clone()))])
@@ -1323,6 +920,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use vm_core::catalogue::{Artifact, Kind};
     use vm_core::value::{to_json, to_yaml};
 
     fn images() -> Images {

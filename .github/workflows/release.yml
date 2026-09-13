@@ -19,7 +19,8 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            build-essential ca-certificates curl git openssh-client qemu-utils
+            build-essential ca-certificates curl git openssh-client qemu-utils \
+            pkg-config libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev
       - uses: actions/checkout@v4
       - name: Install the toolchain
         # Neither distribution ships Rust for the 2024 edition.
@@ -52,7 +53,8 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            build-essential ca-certificates curl git dpkg-dev lintian
+            build-essential ca-certificates curl git dpkg-dev lintian \
+            pkg-config libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev
       - uses: actions/checkout@v4
       - name: Install the toolchain
         run: |
@@ -70,7 +72,10 @@ jobs:
           apt-get install -y ./packages/*.deb
           vm --version
           vm images
+          vmg --version
+          gsettings list-schemas | grep -qx com.paperstack.VmManager
           man -w vm
+          man -w vmg
           man -w 5 vm-config
       - uses: actions/upload-artifact@v4
         with:

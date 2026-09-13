@@ -1,0 +1,29 @@
+[package]
+name = "vmg"
+description = "GTK front end for the vm virtual machine manager"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+vm-core = { path = "../vm-core" }
+clap.workspace = true
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
+vte = { package = "vte4", version = "0.10", features = ["v0_76"] }
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+async-channel = "2.5"
+
+[features]
+# Widget tests need a display, so they are off by default.
+live-gtk = []
+
+[build-dependencies]
+glib-build-tools = "0.22"
+
+[lints]
+workspace = true
