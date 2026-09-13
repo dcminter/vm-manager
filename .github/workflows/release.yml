@@ -20,6 +20,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential ca-certificates curl git openssh-client qemu-utils \
+            procps xz-utils zstd \
             pkg-config libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev
       - uses: actions/checkout@v4
       - name: Install the toolchain

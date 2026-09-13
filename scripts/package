@@ -14,14 +14,14 @@ cd "$here"
 case "$distribution" in
 trixie)
     suffix="deb13"
-    depends="qemu-system-x86, qemu-utils, openssh-client, virtiofsd"
+    depends="qemu-system-x86, qemu-utils, openssh-client, virtiofsd, procps"
     recommends="ovmf, xz-utils, zstd"
     suggests="tigervnc-viewer, vm-manager-gui"
     gui_depends="libgtk-4-1, libadwaita-1-0, libvte-2.91-gtk4-0, libglib2.0-0t64"
     ;;
 noble)
     suffix="ubuntu24.04"
-    depends="qemu-system-x86, qemu-utils, openssh-client, virtiofsd"
+    depends="qemu-system-x86, qemu-utils, openssh-client, virtiofsd, procps"
     recommends="ovmf, xz-utils, zstd"
     suggests="tigervnc-viewer, vm-manager-gui"
     gui_depends="libgtk-4-1, libadwaita-1-0, libvte-2.91-gtk4-0, libglib2.0-0t64"

@@ -75,7 +75,7 @@ pub fn signal(handle: &Handle, signal: Signal) -> Result<()> {
             if source.kind() == std::io::ErrorKind::NotFound {
                 Error::MissingTool {
                     binary: "kill",
-                    package: "util-linux",
+                    package: "procps",
                     operation: "signalling a virtual machine",
                 }
             } else {
