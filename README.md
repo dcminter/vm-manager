@@ -31,7 +31,7 @@ cargo run -p vm -- images
 
 | Command | Purpose |
 |---|---|
-| `vm images` | List the images in the local catalogue |
+| `vm images` | List the images in the local catalogue; `--local` or `--remote` narrows it |
 | `vm inspect <image>` | Show where an image comes from and how its guest is reached |
 | `vm pull <image>` | Fetch an image into the local store |
 | `vm update` | Refresh the local catalogue from its remote source |

@@ -13,6 +13,7 @@ mod units;
 use clap::{Parser, Subcommand};
 use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
 use output::{Format, Report};
+use reports::Origin;
 use std::process::ExitCode;
 use style::Style;
 use vm_core::catalogue::Catalogue;
@@ -47,6 +48,12 @@ enum Command {
         /// Show every architecture rather than this host's
         #[arg(long)]
         all_architectures: bool,
+        /// Show only images made on this host, such as clones
+        #[arg(long, conflicts_with = "remote")]
+        local: bool,
+        /// Show only images from the fetched catalogue
+        #[arg(long)]
+        remote: bool,
     },
     /// Show what an image reference resolves to
     Inspect {
@@ -450,12 +457,25 @@ fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> 
 
 /// The rest, which need both.
 fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
-    let catalogue = Catalogue::load_layered(&catalogue_layers())?;
+    let origin = match &cli.command {
+        Command::Images { local, remote, .. } => Origin::of(*local, *remote),
+        _ => Origin::All,
+    };
+    let catalogue = Catalogue::load_layered(&origin_layers(
+        origin,
+        paths::catalogue_directory(),
+        paths::local_catalogue_directory(),
+    ))?;
     let store = Store::discover()?;
     match &cli.command {
-        Command::Images { all_architectures } => {
-            Ok(Box::new(images(&catalogue, &store, *all_architectures)))
-        }
+        Command::Images {
+            all_architectures, ..
+        } => Ok(Box::new(images(
+            &catalogue,
+            &store,
+            *all_architectures,
+            origin,
+        ))),
         Command::Inspect { reference } => Ok(Box::new(inspect(&catalogue, &store, reference)?)),
         Command::Pull { reference } => Ok(Box::new(pull(
             &catalogue, &store, style, cli.format, reference,
@@ -532,9 +552,24 @@ const fn toggle(on: bool, off: bool) -> Option<bool> {
 
 /// The fetched catalogue, with local clones layered over it.
 fn catalogue_layers() -> Vec<std::path::PathBuf> {
-    let mut layers = vec![paths::catalogue_directory()];
-    layers.extend(paths::local_catalogue_directory());
-    layers
+    origin_layers(
+        Origin::All,
+        paths::catalogue_directory(),
+        paths::local_catalogue_directory(),
+    )
+}
+
+/// The catalogue directories holding images of an origin, in layering order.
+fn origin_layers(
+    origin: Origin,
+    fetched: std::path::PathBuf,
+    local: Option<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+    match origin {
+        Origin::All => std::iter::once(fetched).chain(local).collect(),
+        Origin::Local => local.into_iter().collect(),
+        Origin::Remote => vec![fetched],
+    }
 }
 
 fn update() -> vm_core::Result<reports::Update> {
@@ -551,7 +586,12 @@ fn update() -> vm_core::Result<reports::Update> {
     })
 }
 
-fn images(catalogue: &Catalogue, store: &Store, all_architectures: bool) -> reports::Images {
+fn images(
+    catalogue: &Catalogue,
+    store: &Store,
+    all_architectures: bool,
+    origin: Origin,
+) -> reports::Images {
     let host = host_architecture();
     let rows = catalogue
         .entries()
@@ -572,7 +612,7 @@ fn images(catalogue: &Catalogue, store: &Store, all_architectures: bool) -> repo
                 .collect::<Vec<_>>()
         })
         .collect();
-    reports::Images { rows }
+    reports::Images { rows, origin }
 }
 
 /// The size of a held image, for an entry that does not state one.
@@ -794,6 +834,34 @@ mod tests {
             Some("dave".to_owned())
         );
         assert!(Cli::try_parse_from(["vm", "run", "x", "--user", "Bad Name"]).is_err());
+    }
+
+    #[test]
+    fn images_can_be_limited_to_one_origin() {
+        use clap::Parser as _;
+        let origin = |arguments: &[&str]| match Cli::try_parse_from(arguments).unwrap().command {
+            Command::Images { local, remote, .. } => Origin::of(local, remote),
+            _ => panic!("not images"),
+        };
+        assert_eq!(origin(&["vm", "images"]), Origin::All);
+        assert_eq!(origin(&["vm", "images", "--local"]), Origin::Local);
+        assert_eq!(origin(&["vm", "images", "--remote"]), Origin::Remote);
+        assert!(Cli::try_parse_from(["vm", "images", "--local", "--remote"]).is_err());
+    }
+
+    #[test]
+    fn each_origin_reads_only_its_own_catalogue() {
+        let fetched = std::path::PathBuf::from("/data/vm/catalogue");
+        let local = std::path::PathBuf::from("/data/vm/local");
+        let layers = |origin| origin_layers(origin, fetched.clone(), Some(local.clone()));
+        assert_eq!(layers(Origin::All), vec![fetched.clone(), local.clone()]);
+        assert_eq!(layers(Origin::Local), vec![local.clone()]);
+        assert_eq!(layers(Origin::Remote), vec![fetched.clone()]);
+        assert!(origin_layers(Origin::Local, fetched.clone(), None).is_empty());
+        assert_eq!(
+            origin_layers(Origin::All, fetched.clone(), None),
+            vec![fetched]
+        );
     }
 
     #[test]

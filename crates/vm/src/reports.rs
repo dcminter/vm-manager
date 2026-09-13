@@ -20,8 +20,29 @@ pub struct ImageRow {
     pub size: Option<u64>,
 }
 
+/// Which catalogue an image listing reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    All,
+    /// Images made on this host.
+    Local,
+    /// Images from the fetched catalogue.
+    Remote,
+}
+
+impl Origin {
+    pub const fn of(local: bool, remote: bool) -> Self {
+        match (local, remote) {
+            (true, _) => Self::Local,
+            (false, true) => Self::Remote,
+            (false, false) => Self::All,
+        }
+    }
+}
+
 pub struct Images {
     pub rows: Vec<ImageRow>,
+    pub origin: Origin,
 }
 
 impl Report for Images {
@@ -40,7 +61,10 @@ impl Report for Images {
 
     fn render_text(&self, style: Style) -> Vec<String> {
         if self.rows.is_empty() {
-            return vec![style.dim("No images in the catalogue. Try 'vm update'.")];
+            return vec![style.dim(match self.origin {
+                Origin::Local => "No local images. Make one with 'vm clone'.",
+                Origin::All | Origin::Remote => "No images in the catalogue. Try 'vm update'.",
+            })];
         }
         let cells: Vec<Vec<String>> = self
             .rows
@@ -963,6 +987,7 @@ mod tests {
                 held: true,
                 size: Some(512 * 1024 * 1024),
             }],
+            origin: Origin::All,
         }
     }
 
@@ -1208,15 +1233,38 @@ mod tests {
 
     #[test]
     fn an_empty_listing_is_an_empty_array_not_a_message() {
-        let text = to_json(&Images { rows: Vec::new() }.to_value());
+        let text = to_json(
+            &Images {
+                rows: Vec::new(),
+                origin: Origin::Local,
+            }
+            .to_value(),
+        );
         assert_eq!(text, "[]\n");
     }
 
     #[test]
     fn an_empty_listing_says_so_to_a_human() {
-        let lines = Images { rows: Vec::new() }.render_text(Style::plain());
+        let lines = Images {
+            rows: Vec::new(),
+            origin: Origin::All,
+        }
+        .render_text(Style::plain());
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("No images"), "{lines:?}");
+    }
+
+    #[test]
+    fn an_empty_local_listing_points_at_clone() {
+        let empty = |origin| {
+            Images {
+                rows: Vec::new(),
+                origin,
+            }
+            .render_text(Style::plain())
+        };
+        assert!(empty(Origin::Local)[0].contains("vm clone"));
+        assert!(empty(Origin::Remote)[0].contains("vm update"));
     }
 
     #[test]
