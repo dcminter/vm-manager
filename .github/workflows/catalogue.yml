@@ -1,0 +1,63 @@
+name: Catalogue
+
+# Runs only on catalogue tags.
+on:
+  push:
+    tags:
+      - "catalogue-*"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - name: Install the build environment
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential ca-certificates curl git
+      - uses: actions/checkout@v4
+      - name: Check the tag
+        run: |
+          echo "$GITHUB_REF_NAME" | grep -qxE 'catalogue-[0-9]+\.[0-9]+\.[0-9]+'
+      - name: Install the toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+      - name: Check the catalogue parses
+        run: |
+          cargo build --locked -p vm
+          export XDG_CONFIG_HOME="$RUNNER_TEMP/config" XDG_DATA_HOME="$RUNNER_TEMP/data" XDG_STATE_HOME="$RUNNER_TEMP/state"
+          target/debug/vm config add local tagged "$PWD/catalogue"
+          target/debug/vm images
+
+  deploy:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build the site
+        # Every deploy replaces the site, so each catalogue tag is archived again.
+        run: |
+          cp -r site _site
+          git tag -l 'catalogue-*' \
+            | grep -xE 'catalogue-[0-9]+\.[0-9]+\.[0-9]+' \
+            | while read -r tag; do
+                git archive --format=tar.gz --prefix="$tag/" -o "_site/$tag.tar.gz" "$tag" catalogue
+              done
+          ls -l _site
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - uses: actions/deploy-pages@v4

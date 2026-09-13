@@ -255,6 +255,9 @@ Ubuntu 24.04 packages to the release.
 
 `scripts/package <trixie|noble> <version>` builds a package locally.
 
+A `catalogue-<major>.<minor>.<patch>` tag publishes the catalogue at
+`https://vm-manager.com/catalogue-<major>.<minor>.<patch>.tar.gz`.
+
 ## Licence
 
 MIT.
