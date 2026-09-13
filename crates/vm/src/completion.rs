@@ -191,6 +191,13 @@ pub fn firmware() -> Vec<CompletionCandidate> {
         .collect()
 }
 
+pub fn compression() -> Vec<CompletionCandidate> {
+    vm_core::compression::Compression::SCHEMES
+        .into_iter()
+        .map(|held| CompletionCandidate::new(held.name()))
+        .collect()
+}
+
 pub fn login() -> Vec<CompletionCandidate> {
     vm_core::catalogue::Login::ALL
         .into_iter()

@@ -1044,6 +1044,71 @@ impl Report for Imported {
     }
 }
 
+/// What `vm export` wrote.
+pub struct Exported {
+    pub name: String,
+    pub tag: String,
+    pub arch: String,
+    pub format: String,
+    pub compression: vm_core::compression::Compression,
+    pub cdrom: bool,
+    pub digest: String,
+    pub path: String,
+    pub size: u64,
+    /// The suffix added to the name given, if one was.
+    pub suffixed: Option<String>,
+    /// Whether the copy was checked against the image's digest.
+    pub verified: bool,
+}
+
+impl Report for Exported {
+    fn to_value(&self) -> Value {
+        Value::map([
+            ("name", Value::string(self.name.clone())),
+            ("tag", Value::string(self.tag.clone())),
+            ("arch", Value::string(self.arch.clone())),
+            ("format", Value::string(self.format.clone())),
+            ("compression", Value::string(self.compression.name())),
+            (
+                "media",
+                Value::string(if self.cdrom { "cdrom" } else { "disk" }),
+            ),
+            ("digest", Value::string(self.digest.clone())),
+            ("path", Value::string(self.path.clone())),
+            ("size", Value::Integer(self.size)),
+            ("suffixed", Value::Bool(self.suffixed.is_some())),
+            ("verified", Value::Bool(self.verified)),
+        ])
+    }
+
+    fn render_text(&self, style: Style) -> Vec<String> {
+        let mut lines = vec![
+            format!(
+                "Exported {} ({}, {})",
+                style.name(&format!("{}:{}", self.name, self.tag)),
+                self.arch,
+                human(self.size)
+            ),
+            format!("  to       {}", self.path),
+            format!(
+                "  format   {}{}{}",
+                self.format,
+                if self.cdrom { ", a CD-ROM image" } else { "" },
+                match self.compression {
+                    vm_core::compression::Compression::None => String::new(),
+                    scheme => format!(", compressed with {}", scheme.name()),
+                }
+            ),
+        ];
+        if let Some(suffix) = &self.suffixed {
+            lines.push(style.dim(&format!(
+                "  The name given lacked a suffix for it, so .{suffix} was added."
+            )));
+        }
+        lines
+    }
+}
+
 /// What `vm rmi` took away.
 pub struct Untagged {
     pub name: String,
@@ -1921,6 +1986,55 @@ mod tests {
             r#""url": "https://example.invalid/x""#,
             r#""replaced": true"#,
             r#""entry": "/local/mine/1.toml""#,
+        ] {
+            assert!(document.contains(field), "{field}: {document}");
+        }
+    }
+
+    fn exported() -> Exported {
+        Exported {
+            name: "debian".to_owned(),
+            tag: "trixie".to_owned(),
+            arch: "amd64".to_owned(),
+            format: "qcow2".to_owned(),
+            compression: vm_core::compression::Compression::None,
+            cdrom: false,
+            digest: "sha512:abc".to_owned(),
+            path: "/out/disk.qcow2".to_owned(),
+            size: 2 * 1024 * 1024,
+            suffixed: None,
+            verified: true,
+        }
+    }
+
+    #[test]
+    fn an_export_says_where_it_went_and_any_suffix_it_added() {
+        let mut report = exported();
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(
+            text.starts_with("Exported debian:trixie (amd64, 2.0 MiB)"),
+            "{text}"
+        );
+        assert!(text.contains("to       /out/disk.qcow2"), "{text}");
+        assert!(text.contains("format   qcow2"), "{text}");
+        assert!(!text.contains("suffix"), "{text}");
+        report.suffixed = Some("iso.gz".to_owned());
+        report.cdrom = true;
+        report.format = "iso".to_owned();
+        report.compression = vm_core::compression::Compression::Gzip;
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(text.contains(".iso.gz was added"), "{text}");
+        assert!(
+            text.contains("format   iso, a CD-ROM image, compressed with gzip"),
+            "{text}"
+        );
+        assert!(to_json(&report.to_value()).contains(r#""compression": "gzip""#));
+        let document = to_json(&report.to_value());
+        for field in [
+            r#""suffixed": true"#,
+            r#""verified": true"#,
+            r#""media": "cdrom""#,
+            r#""path": "/out/disk.qcow2""#,
         ] {
             assert!(document.contains(field), "{field}: {document}");
         }

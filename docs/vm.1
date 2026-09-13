@@ -99,6 +99,41 @@ Replace an image of the same name in the
 catalogue.
 .RE
 .TP
+.BI export " IMAGE FILE"
+Copy a held image to
+.IR FILE ,
+in the format it is stored in, checking it against its digest where that
+covers the stored file. A
+.I FILE
+without an image suffix gains one, such as
+.B .qcow2
+or
+.BR .iso ;
+a directory gains a file named
+.I repository-tag
+with that suffix; a suffix for another format is refused.
+.RS
+.TP
+.BR \-\-compress " [" \fISCHEME\fR ]
+Compress the file with
+.BR xz (1),
+or with
+.B gzip
+or
+.B zstd
+if named, adding
+.BR .xz ,
+.B .gz
+or
+.BR .zst .
+.TP
+.BI \-\-arch " ARCH"
+Export another architecture's build.
+.TP
+.BR \-f ", " \-\-force
+Replace an existing file.
+.RE
+.TP
 .B config
 Show the config file's path and every setting and catalogue, marking defaults.
 With no file, say where one would be created; none is created until a change is

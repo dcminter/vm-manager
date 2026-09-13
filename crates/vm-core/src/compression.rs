@@ -19,6 +19,9 @@ pub enum Compression {
 }
 
 impl Compression {
+    /// Every scheme that compresses.
+    pub const SCHEMES: [Self; 3] = [Self::Xz, Self::Gzip, Self::Zstd];
+
     pub const fn is_none(self) -> bool {
         matches!(self, Self::None)
     }
@@ -43,6 +46,16 @@ impl Compression {
         }
     }
 
+    /// The suffix of a file compressed this way.
+    pub const fn suffix(self) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Xz => Some("xz"),
+            Self::Gzip => Some("gz"),
+            Self::Zstd => Some("zst"),
+        }
+    }
+
     /// A decompressor from standard input to standard output.
     pub fn command(self) -> Option<std::process::Command> {
         let (binary, _) = self.tool()?;
@@ -51,13 +64,34 @@ impl Compression {
         Some(command)
     }
 
+    /// A compressor from standard input to standard output, using every processor it can.
+    pub fn compressor(self) -> Option<std::process::Command> {
+        let (binary, _) = self.tool()?;
+        let mut command = std::process::Command::new(binary);
+        match self {
+            Self::Xz => command.args(["-T0", "-c"]),
+            Self::Zstd => command.args(["-T0", "-q", "-c"]),
+            Self::Gzip | Self::None => command.arg("-c"),
+        };
+        Some(command)
+    }
+
     /// An error naming the package to install.
     pub fn missing(self, source: &std::io::Error) -> Error {
+        self.unavailable(source, "expanding a compressed image")
+    }
+
+    /// An error naming the package to install, for compressing.
+    pub fn missing_compressor(self, source: &std::io::Error) -> Error {
+        self.unavailable(source, "compressing an image")
+    }
+
+    fn unavailable(self, source: &std::io::Error, operation: &'static str) -> Error {
         match (self.tool(), source.kind()) {
             (Some((binary, package)), std::io::ErrorKind::NotFound) => Error::MissingTool {
                 binary,
                 package,
-                operation: "expanding a compressed image",
+                operation,
             },
             _ => Error::Launch {
                 program: self.name().to_owned(),
@@ -148,6 +182,50 @@ mod tests {
     fn another_failure_is_reported_as_itself() {
         let denied = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
         assert_eq!(Compression::Gzip.missing(&denied).kind(), "launch-failed");
+    }
+
+    #[test]
+    fn what_each_compressor_makes_its_decompressor_expands() {
+        use std::io::Write as _;
+        let plain = b"an image, more or less".repeat(1000);
+        for held in Compression::SCHEMES {
+            let mut child = held
+                .compressor()
+                .unwrap()
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(&plain).unwrap();
+            let packed = child.wait_with_output().unwrap().stdout;
+            assert!(packed.len() < plain.len(), "{held:?}");
+            assert_eq!(crate::conversion::sniff(&packed), held);
+            let mut child = held
+                .command()
+                .unwrap()
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(&packed).unwrap();
+            assert_eq!(child.wait_with_output().unwrap().stdout, plain, "{held:?}");
+        }
+        assert!(Compression::None.compressor().is_none());
+    }
+
+    #[test]
+    fn each_scheme_has_its_suffix() {
+        assert_eq!(Compression::None.suffix(), None);
+        assert_eq!(Compression::Xz.suffix(), Some("xz"));
+        assert_eq!(Compression::Gzip.suffix(), Some("gz"));
+        assert_eq!(Compression::Zstd.suffix(), Some("zst"));
+    }
+
+    #[test]
+    fn a_missing_compressor_says_it_was_wanted_for_compressing() {
+        let absent = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let error = Compression::Zstd.missing_compressor(&absent);
+        assert!(error.to_string().starts_with("compressing"), "{error}");
     }
 
     #[test]

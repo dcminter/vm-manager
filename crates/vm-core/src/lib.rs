@@ -8,6 +8,7 @@ pub mod crypt;
 pub mod digest;
 pub mod disk;
 pub mod error;
+pub mod export;
 pub mod fat;
 pub mod hypervisor;
 pub mod import;

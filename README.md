@@ -35,6 +35,7 @@ cargo run -p vm -- images
 | `vm inspect <image>` | Show an image's details, origin and users; `--arch` picks a build |
 | `vm pull <image>` | Fetch an image into the local store |
 | `vm import <source> <image>` | Bring an image file or URL into the local store |
+| `vm export <image> <file>` | Copy an image from the local store to a file |
 | `vm update [catalogue]` | Refresh the remote catalogues, or one |
 | `vm config` | Show the config file, or change a setting or catalogue |
 | `vm run <image>` | Create and start a machine |
@@ -90,6 +91,20 @@ An imported URL stays fetchable: `vm prune --all` may remove the file, and
 the local copy. `--login cloud-init` marks an image that takes a cloud-init
 seed, `--firmware`, `--machine`, `--disk` and `--cpu` give hardware it needs,
 `--digest` checks the source, and `--force` replaces an image of the same name.
+
+### Exporting
+
+`vm export` copies a pulled or local image to a file, in the format it is
+stored in: qcow2 for imports and clones, ISO for CD-ROM images. A name without
+an image suffix gains one, a directory gains a file named after the image, and
+a suffix for another format is refused. `--compress` compresses the file with
+xz, or with `gzip` or `zstd` if named, adding `.xz`, `.gz` or `.zst`. `--force`
+replaces an existing file.
+
+```bash
+vm export appliance:1.0 ./appliance
+vm export appliance:1.0 ./appliance --compress zstd
+```
 
 ## Machines
 

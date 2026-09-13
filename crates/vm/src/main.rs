@@ -1,6 +1,7 @@
 mod completion;
 mod configuration;
 mod console;
+mod exports;
 mod imports;
 mod machines;
 mod output;
@@ -328,6 +329,24 @@ enum Command {
         #[arg(long, short)]
         force: bool,
     },
+    /// Copy an image from the local store to a file
+    Export {
+        /// Image reference, such as debian:trixie
+        #[arg(add = ArgValueCandidates::new(completion::held_image))]
+        reference: String,
+        /// File to write, or a directory to write it in
+        #[arg(value_hint = clap::ValueHint::AnyPath)]
+        file: std::path::PathBuf,
+        /// Architecture of the build to export, instead of this host's
+        #[arg(long, add = ArgValueCandidates::new(completion::architecture))]
+        arch: Option<String>,
+        /// Compress the file with xz, or with gzip or zstd if named
+        #[arg(long, value_name = "SCHEME", num_args = 0..=1, default_missing_value = "xz", value_parser = exports::parse_compression, add = ArgValueCandidates::new(completion::compression))]
+        compress: Option<vm_core::compression::Compression>,
+        /// Replace the file if it exists
+        #[arg(long, short)]
+        force: bool,
+    },
     /// Delete an image from the local store
     Rmi {
         /// Image reference, such as debian:trixie
@@ -425,6 +444,48 @@ fn run(cli: &Cli, style: Style) -> vm_core::Result<Outcome> {
         return Ok(outcome);
     }
     catalogue_command(cli, style).map(Outcome::Reported)
+}
+
+/// What a `vm run` asks for.
+fn run_request(command: &Command) -> vm_core::Result<machines::Request> {
+    let Command::Run {
+        reference,
+        name,
+        memory,
+        cpus,
+        publish,
+        user,
+        volume,
+        disk_size,
+        pull,
+        firmware,
+        cpu,
+        machine,
+        disk,
+        password,
+        add_ssh_config,
+        no_ssh_config,
+    } = command
+    else {
+        unreachable!("not a run");
+    };
+    Ok(machines::Request {
+        reference: reference.clone(),
+        name: name.clone(),
+        memory: *memory,
+        cpus: *cpus,
+        ports: publish.clone(),
+        user: user.clone(),
+        shares: volume.clone(),
+        disk_size: disk_size.clone(),
+        pull: *pull,
+        firmware: *firmware,
+        cpu: cpu.clone(),
+        machine: *machine,
+        disk: *disk,
+        password: asked_password(*password)?,
+        ssh_config: toggle(*add_ssh_config, *no_ssh_config),
+    })
 }
 
 /// The changes a `vm start` asks for.
@@ -586,6 +647,24 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
         )?)),
         Command::Update { catalogue } => Ok(Box::new(update(&config, catalogue.as_deref())?)),
         Command::Import { .. } => Ok(Box::new(import(cli, &catalogue, &store)?)),
+        Command::Export {
+            reference,
+            file,
+            arch,
+            compress,
+            force,
+        } => Ok(Box::new(exports::run(
+            &catalogue,
+            &store,
+            &exports::Request {
+                reference,
+                file,
+                arch: arch.as_deref().unwrap_or(host_architecture()),
+                compression: compress.unwrap_or_default(),
+                force: *force,
+            },
+            cli.format.is_text(),
+        )?)),
         Command::Rmi { reference, force } => Ok(Box::new(machines::remove_image(
             &catalogue, &store, reference, *force,
         )?)),
@@ -596,43 +675,10 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
         } => Ok(Box::new(machines::prune(
             &catalogue, &store, *target, *all, *dry_run,
         )?)),
-        Command::Run {
-            reference,
-            name,
-            memory,
-            cpus,
-            publish,
-            user,
-            volume,
-            disk_size,
-            pull,
-            firmware,
-            cpu,
-            machine,
-            disk,
-            password,
-            add_ssh_config,
-            no_ssh_config,
-        } => Ok(Box::new(machines::run(
+        Command::Run { .. } => Ok(Box::new(machines::run(
             &catalogue,
             &store,
-            &machines::Request {
-                reference: reference.clone(),
-                name: name.clone(),
-                memory: *memory,
-                cpus: *cpus,
-                ports: publish.clone(),
-                user: user.clone(),
-                shares: volume.clone(),
-                disk_size: disk_size.clone(),
-                pull: *pull,
-                firmware: *firmware,
-                cpu: cpu.clone(),
-                machine: *machine,
-                disk: *disk,
-                password: asked_password(*password)?,
-                ssh_config: toggle(*add_ssh_config, *no_ssh_config),
-            },
+            &run_request(&cli.command)?,
             style,
             cli.format.is_text(),
         )?)),
@@ -1228,6 +1274,63 @@ mod tests {
             arguments.extend(bad);
             assert!(Cli::try_parse_from(arguments).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn an_export_names_an_image_and_a_file() {
+        use clap::Parser as _;
+        let parsed = |arguments: &[&str]| match Cli::try_parse_from(arguments).unwrap().command {
+            Command::Export {
+                reference,
+                file,
+                arch,
+                force,
+                ..
+            } => (reference, file, arch, force),
+            _ => panic!("not an export"),
+        };
+        assert_eq!(
+            parsed(&["vm", "export", "debian:trixie", "disk"]),
+            (
+                "debian:trixie".to_owned(),
+                std::path::PathBuf::from("disk"),
+                None,
+                false
+            )
+        );
+        assert_eq!(
+            parsed(&["vm", "export", "debian", "d.qcow2", "--arch", "arm64", "-f"]).2,
+            Some("arm64".to_owned())
+        );
+        assert!(Cli::try_parse_from(["vm", "export", "debian"]).is_err());
+    }
+
+    #[test]
+    fn an_export_compresses_with_xz_unless_another_scheme_is_named() {
+        use clap::Parser as _;
+        use vm_core::compression::Compression;
+        let compress = |arguments: &[&str]| match Cli::try_parse_from(arguments).unwrap().command {
+            Command::Export { compress, file, .. } => (compress, file),
+            _ => panic!("not an export"),
+        };
+        let disk = std::path::PathBuf::from("disk");
+        assert_eq!(
+            compress(&["vm", "export", "d", "disk"]),
+            (None, disk.clone())
+        );
+        assert_eq!(
+            compress(&["vm", "export", "d", "disk", "--compress"]),
+            (Some(Compression::Xz), disk.clone())
+        );
+        assert_eq!(
+            compress(&["vm", "export", "--compress", "gzip", "d", "disk"]),
+            (Some(Compression::Gzip), disk.clone())
+        );
+        assert_eq!(
+            compress(&["vm", "export", "d", "disk", "--compress=zstd"]),
+            (Some(Compression::Zstd), disk)
+        );
+        assert!(Cli::try_parse_from(["vm", "export", "d", "disk", "--compress", "bzip2"]).is_err());
     }
 
     #[test]

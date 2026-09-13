@@ -162,6 +162,30 @@ pub enum Error {
     Convert {
         reason: String,
     },
+    NotExportable {
+        reference: String,
+    },
+    SuffixMismatch {
+        path: PathBuf,
+        suffix: String,
+        exported: String,
+        expected: String,
+    },
+    Compress {
+        scheme: &'static str,
+        reason: String,
+    },
+    OutputExists {
+        path: PathBuf,
+    },
+    DamagedImage {
+        path: PathBuf,
+        expected: String,
+    },
+    Export {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     UnheldImage {
         reference: String,
     },
@@ -279,7 +303,12 @@ impl Error {
             Self::NoFirmware { .. } => "no-uefi-firmware",
             Self::Clone { .. } => "clone-failed",
             Self::Convert { .. } => "conversion-failed",
-            Self::UnheldImage { .. } => "image-not-held",
+            Self::UnheldImage { .. } | Self::NotExportable { .. } => "image-not-held",
+            Self::SuffixMismatch { .. } => "suffix-mismatch",
+            Self::Compress { .. } => "compression-failed",
+            Self::OutputExists { .. } => "output-exists",
+            Self::DamagedImage { .. } => "image-damaged",
+            Self::Export { .. } => "export-failed",
             Self::ImageInUse { .. } => "image-in-use",
             Self::ChangeWhileRunning { .. } => "change-while-running",
             Self::FollowNeedsText => "follow-needs-text",
@@ -500,6 +529,36 @@ impl fmt::Display for Error {
                 f,
                 "this image was made here by 'vm clone' or 'vm import'; there is nowhere to fetch it from"
             ),
+            Self::NotExportable { reference } => write!(
+                f,
+                "'{reference}' is not in the local store; run 'vm pull {reference}' first"
+            ),
+            Self::SuffixMismatch {
+                path,
+                suffix,
+                exported,
+                expected,
+            } => write!(
+                f,
+                "{} ends in .{suffix}, but the export is {exported}; \
+                 name it with .{expected}, which is added to a name without a suffix",
+                path.display()
+            ),
+            Self::Compress { scheme, reason } => {
+                write!(f, "cannot compress the image with {scheme}: {reason}")
+            }
+            Self::OutputExists { path } => {
+                write!(f, "{} already exists; --force replaces it", path.display())
+            }
+            Self::DamagedImage { path, expected } => write!(
+                f,
+                "the stored image at {} does not match its digest {expected}, \
+                 so nothing was exported",
+                path.display()
+            ),
+            Self::Export { path, source } => {
+                write!(f, "cannot export to {}: {source}", path.display())
+            }
             Self::UnheldImage { reference } => write!(
                 f,
                 "'{reference}' is not in the local store and pulling is disabled; \
@@ -654,6 +713,7 @@ impl std::error::Error for Error {
         match self {
             Self::CatalogueRead { source, .. }
             | Self::Store { source, .. }
+            | Self::Export { source, .. }
             | Self::SeedWrite { source, .. }
             | Self::State { source, .. }
             | Self::Launch { source, .. }
