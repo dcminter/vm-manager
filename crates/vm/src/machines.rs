@@ -3,6 +3,7 @@
 use crate::style::Style;
 use std::time::Duration;
 use vm_core::error::{Error, Result};
+use vm_core::inert::{Colour, Filter};
 use vm_core::machines::{self, Tail};
 
 /// How often a followed listing refreshes.
@@ -84,16 +85,23 @@ fn exec(program: &str, arguments: &[String]) -> Error {
 }
 
 /// Writes the console as it grows, starting with what is already there, until the machine stops.
-pub fn follow(name: &str, from: Option<usize>) -> Result<()> {
+pub fn follow(name: &str, from: Option<usize>, style: Style) -> Result<()> {
     use std::io::Write as _;
     let Some(mut tail) = Tail::open(name)? else {
         return Ok(());
     };
     let mut out = std::io::stdout().lock();
+    let colour = if style.is_coloured() {
+        Colour::Keep
+    } else {
+        Colour::Drop
+    };
+    let mut filter = Filter::new(colour);
     let Ok(buffer) = tail.read() else {
         return Ok(());
     };
-    let text = String::from_utf8_lossy(&buffer);
+    let kept = filter.apply(&buffer);
+    let text = String::from_utf8_lossy(&kept);
     for line in last_lines(&text, from) {
         if writeln!(out, "{line}").is_err() {
             return Ok(());
@@ -113,7 +121,7 @@ pub fn follow(name: &str, from: Option<usize>) -> Result<()> {
             std::thread::sleep(Duration::from_millis(200));
             continue;
         }
-        if out.write_all(&buffer).is_err() || out.flush().is_err() {
+        if out.write_all(&filter.apply(&buffer)).is_err() || out.flush().is_err() {
             return Ok(());
         }
     }

@@ -1191,7 +1191,8 @@ mod tests {
         the_tables_follow_their_filters(&window);
         select_all_ticks_every_visible_row(&window);
         a_terminal_tab_is_released_when_closed(&window);
-        the_sidebar_folds_and_returns(&window);
+        a_replayed_console_draws_no_answers_from_the_terminal();
+        the_sidebar_starts_hidden_and_toggles(&window);
 
         let logged = LOGGED.lock().unwrap().clone();
         assert!(logged.is_empty(), "GTK complained: {logged:?}");
@@ -1289,6 +1290,30 @@ mod tests {
         assert!(tables.machines.checked().is_empty());
     }
 
+    fn a_replayed_console_draws_no_answers_from_the_terminal() {
+        use vte::prelude::*;
+        let terminal = vte::Terminal::new();
+        let holder = gtk::Window::new();
+        holder.set_child(Some(&terminal));
+        holder.present();
+        let answers = Rc::new(RefCell::new(String::new()));
+        let heard = answers.clone();
+        terminal.connect_commit(move |_, text, _| heard.borrow_mut().push_str(text));
+        let wait = || {
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            while std::time::Instant::now() < until {
+                glib::MainContext::default().iteration(false);
+            }
+        };
+        terminals::replay(&terminal, b"localhost:~# \x1b[6n\x1b[32766;32766H\x1b[6n");
+        wait();
+        assert_eq!(answers.borrow().as_str(), "");
+        terminal.feed(b"\x1b[6n");
+        wait();
+        assert!(answers.borrow().ends_with('R'), "{:?}", answers.borrow());
+        holder.close();
+    }
+
     fn a_terminal_tab_is_released_when_closed(window: &VmgWindow) {
         let marker = format!("vmg-test-{}", std::process::id());
         let tab = terminals::spawn(
@@ -1349,13 +1374,15 @@ mod tests {
         assert_eq!(tab_titles(window), ["box"]);
     }
 
-    fn the_sidebar_folds_and_returns(window: &VmgWindow) {
+    fn the_sidebar_starts_hidden_and_toggles(window: &VmgWindow) {
+        assert!(!window.imp().sidebar.get_visible());
+        window.set_sidebar_visible(true);
+        settle();
+        assert!(window.imp().sidebar.get_visible());
+        assert!(window.imp().settings.borrow().sidebar_visible);
         window.set_sidebar_visible(false);
         settle();
         assert!(!window.imp().sidebar.get_visible());
         assert!(!window.imp().settings.borrow().sidebar_visible);
-        window.set_sidebar_visible(true);
-        settle();
-        assert!(window.imp().sidebar.get_visible());
     }
 }

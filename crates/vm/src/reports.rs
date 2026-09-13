@@ -807,15 +807,31 @@ impl Report for Console {
             ("name", Value::string(self.name.clone())),
             (
                 "lines",
-                Value::List(self.lines.iter().map(Value::string).collect()),
+                Value::List(
+                    self.lines
+                        .iter()
+                        .map(|line| Value::string(uncoloured(line)))
+                        .collect(),
+                ),
             ),
         ])
     }
 
-    /// Verbatim.
-    fn render_text(&self, _: Style) -> Vec<String> {
-        self.lines.clone()
+    fn render_text(&self, style: Style) -> Vec<String> {
+        if style.is_coloured() {
+            self.lines.clone()
+        } else {
+            self.lines.iter().map(|line| uncoloured(line)).collect()
+        }
     }
+}
+
+fn uncoloured(line: &str) -> String {
+    String::from_utf8_lossy(&vm_core::inert::inert(
+        line.as_bytes(),
+        vm_core::inert::Colour::Drop,
+    ))
+    .into_owned()
 }
 
 impl Report for Switched {
@@ -1158,7 +1174,19 @@ mod tests {
         );
     }
 
-    /// The guest wrote these lines, so they are passed through as they are.
+    #[test]
+    fn a_console_keeps_its_colour_only_where_styling_is_wanted() {
+        let report = Console {
+            name: "one".to_owned(),
+            lines: vec!["[\u{1b}[0;32m  OK  \u{1b}[0m] Started".to_owned()],
+        };
+        assert_eq!(report.render_text(Style::coloured()), report.lines);
+        assert_eq!(report.render_text(Style::plain()), ["[  OK  ] Started"]);
+        let document = to_json(&report.to_value());
+        assert!(!document.contains(r"\u001b"), "{document}");
+        assert!(document.contains("[  OK  ] Started"), "{document}");
+    }
+
     #[test]
     fn a_console_is_rendered_verbatim() {
         let report = Console {

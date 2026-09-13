@@ -1055,15 +1055,15 @@ pub fn holders(digest: &str) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// The guest's console, as far as it has been written.
+/// The guest's console, as far as it has been written, keeping colour but nothing else that acts on a terminal.
 pub fn logs(name: &str, lines: Option<usize>) -> Result<reports::Console> {
     let instances = Instances::discover()?;
     let directory = instances.open(name)?;
     let console = directory.console();
-    let text = match std::fs::read(&console) {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+    let bytes = match std::fs::read(&console) {
+        Ok(bytes) => bytes,
         // A machine that has never started has no console.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(source) => {
             return Err(Error::State {
                 path: console,
@@ -1074,8 +1074,15 @@ pub fn logs(name: &str, lines: Option<usize>) -> Result<reports::Console> {
     };
     Ok(reports::Console {
         name: name.to_owned(),
-        lines: tail(&text, lines),
+        lines: console_lines(&bytes, lines),
     })
+}
+
+fn console_lines(bytes: &[u8], lines: Option<usize>) -> Vec<String> {
+    tail(
+        &String::from_utf8_lossy(&crate::inert::inert(bytes, crate::inert::Colour::Keep)),
+        lines,
+    )
 }
 
 /// The last few lines, or all of them when no number was asked for.
@@ -1579,6 +1586,16 @@ mod tests {
         assert_eq!(tail(text, Some(9)), ["one", "two", "three"]);
         assert!(tail("", Some(5)).is_empty());
         assert_eq!(tail(text, Some(0)).len(), 0);
+    }
+
+    #[test]
+    fn a_console_keeps_its_colour_and_loses_its_queries() {
+        let log = b"\x1b[0;32mOK\x1b[0m\r\n\x1b[32766;32766H\x1b[6nlocalhost:~# \x1b[6n\x07";
+        assert_eq!(
+            console_lines(log, None),
+            ["\x1b[0;32mOK\x1b[0m", "localhost:~# "]
+        );
+        assert_eq!(console_lines(log, Some(1)), ["localhost:~# "]);
     }
 
     #[test]

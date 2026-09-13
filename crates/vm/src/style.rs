@@ -13,12 +13,16 @@ impl Style {
         }
     }
 
+    pub const fn is_coloured(self) -> bool {
+        self.enabled
+    }
+
     pub const fn plain() -> Self {
         Self { enabled: false }
     }
 
     #[cfg(test)]
-    const fn coloured() -> Self {
+    pub const fn coloured() -> Self {
         Self { enabled: true }
     }
 

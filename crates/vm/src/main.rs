@@ -386,7 +386,9 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    clap_complete::CompleteEnv::with_factory(<Cli as clap::CommandFactory>::command).complete();
+    clap_complete::CompleteEnv::with_factory(<Cli as clap::CommandFactory>::command)
+        .shells(completion::SHELLS)
+        .complete();
     let cli = Cli::parse();
     let style = if cli.format.is_text() {
         Style::for_stdout()
@@ -595,7 +597,7 @@ fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> 
                 if !cli.format.is_text() {
                     return Err(vm_core::Error::FollowNeedsText);
                 }
-                machines::follow(name, *lines)?;
+                machines::follow(name, *lines, style)?;
                 return Ok(Some(Outcome::Written));
             }
             Box::new(vm_core::machines::logs(name, *lines)?)

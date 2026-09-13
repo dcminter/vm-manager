@@ -14,6 +14,7 @@ pub mod fat;
 pub mod hypervisor;
 pub mod images;
 pub mod import;
+pub mod inert;
 pub mod instance;
 pub mod keys;
 pub mod machine;

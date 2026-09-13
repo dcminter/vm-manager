@@ -272,6 +272,8 @@ which is installed by the vm\-manager\-gui package.
 .TP
 .BI logs " NAME"
 Show the machine's console output from every boot.
+Colour is kept when writing to a terminal; the guest's other terminal controls,
+such as cursor queries and screen clears, are left out.
 .B \-\-follow
 streams it until the machine stops;
 .BI \-n ", " \-\-lines " COUNT"

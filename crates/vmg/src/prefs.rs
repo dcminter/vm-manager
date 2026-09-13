@@ -38,7 +38,7 @@ impl Default for Settings {
             window_width: 1200,
             window_height: 760,
             sidebar_width: 280,
-            sidebar_visible: true,
+            sidebar_visible: false,
             show_stopped_machines: true,
             show_remote_images: true,
             column_widths: ColumnWidths::new(),
@@ -226,6 +226,7 @@ mod tests {
     #[test]
     fn an_untouched_store_reads_back_as_the_defaults() {
         assert_eq!(scratch().load(), Settings::default());
+        assert!(!Settings::default().sidebar_visible);
     }
 
     #[test]
@@ -235,7 +236,7 @@ mod tests {
             window_width: 900,
             window_height: 700,
             sidebar_width: 421,
-            sidebar_visible: false,
+            sidebar_visible: true,
             show_stopped_machines: false,
             show_remote_images: false,
             column_widths: ColumnWidths::new(),

@@ -9,6 +9,7 @@ use std::time::Duration;
 use gtk::glib;
 use gtk::prelude::*;
 use vm_core::error::{Error, Result};
+use vm_core::inert::{Colour, Filter, inert};
 use vm_core::instance::Instances;
 use vm_core::machines::Tail;
 use vte::prelude::*;
@@ -110,8 +111,7 @@ pub fn console(name: &str) -> Result<Tab> {
     })?;
     let (root, terminal) = terminal();
     if let Ok(log) = std::fs::read(directory.console()) {
-        let from = log.len().saturating_sub(CONSOLE_HISTORY);
-        terminal.feed(&log[from..]);
+        replay(&terminal, &log);
     }
     let writer = stream.try_clone().map_err(|source| Error::State {
         path: socket.clone(),
@@ -159,6 +159,12 @@ pub fn console(name: &str) -> Result<Tab> {
     })
 }
 
+/// Shows the end of a console log without letting its old queries draw answers from the terminal.
+pub fn replay(terminal: &vte::Terminal, log: &[u8]) {
+    let from = log.len().saturating_sub(CONSOLE_HISTORY);
+    terminal.feed(&inert(&log[from..], Colour::Keep));
+}
+
 /// Shows a machine's console log as it grows.
 pub fn logs(name: &str) -> Tab {
     let (root, terminal) = terminal();
@@ -174,7 +180,7 @@ pub fn logs(name: &str) -> Tab {
     linked.append(&whole);
     bar.append(&linked);
     root.prepend(&bar);
-    let state: Rc<RefCell<Option<Tail>>> = Rc::new(RefCell::new(None));
+    let state: Rc<RefCell<Option<(Tail, Filter)>>> = Rc::new(RefCell::new(None));
     let closed = Rc::new(Cell::new(false));
     let show_whole = Rc::new(Cell::new(false));
     let name = name.to_owned();
@@ -190,13 +196,14 @@ pub fn logs(name: &str) -> Tab {
             state.replace(None);
             match Tail::open(&name) {
                 Ok(Some(mut tail)) => {
-                    let bytes = tail.read().unwrap_or_default();
+                    let mut filter = Filter::new(Colour::Keep);
+                    let bytes = filter.apply(&tail.read().unwrap_or_default());
                     terminal.feed(if show_whole.get() {
                         &bytes
                     } else {
                         last_lines(&bytes, TAIL_LINES)
                     });
-                    state.replace(Some(tail));
+                    state.replace(Some((tail, filter)));
                 }
                 Ok(None) => terminal.feed(b"[no console output yet]\r\n"),
                 Err(error) => terminal.feed(format!("[{error}]\r\n").as_bytes()),
@@ -230,18 +237,19 @@ pub fn logs(name: &str) -> Tab {
                 }
                 let mut held = state.borrow_mut();
                 match held.as_mut() {
-                    Some(tail) => {
+                    Some((tail, filter)) => {
                         if let Ok(bytes) = tail.read()
                             && !bytes.is_empty()
                         {
-                            terminal.feed(&bytes);
+                            terminal.feed(&filter.apply(&bytes));
                         }
                     }
                     None => {
                         if let Ok(Some(mut tail)) = Tail::open(&name) {
+                            let mut filter = Filter::new(Colour::Keep);
                             terminal.reset(true, true);
-                            terminal.feed(&tail.read().unwrap_or_default());
-                            *held = Some(tail);
+                            terminal.feed(&filter.apply(&tail.read().unwrap_or_default()));
+                            *held = Some((tail, filter));
                         }
                     }
                 }

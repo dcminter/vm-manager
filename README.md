@@ -3,7 +3,7 @@
 Create and manage QEMU virtual machines from prebuilt OS images, with a command
 set modelled on Docker and various cloud clients.
 
-A simple `vm` command for the command line:
+The `vm` command:
 
 ![Animated CLI Examples](./docs/cli-animation.gif)
 

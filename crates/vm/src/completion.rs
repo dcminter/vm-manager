@@ -1,7 +1,8 @@
 //! Candidates for tab completion of instance names, image references and machine settings.
 
 use clap_complete::engine::{CompletionCandidate, PathCompleter, ValueCompleter as _};
-use std::ffi::OsStr;
+use clap_complete::env::{EnvCompleter, Shells};
+use std::ffi::{OsStr, OsString};
 use vm_core::catalogue::Catalogue;
 use vm_core::host_architecture;
 use vm_core::instance::Instances;
@@ -258,6 +259,69 @@ fn copy_candidates(
     found
 }
 
+/// The shells `COMPLETE` accepts, with bash's script replaced.
+pub const SHELLS: Shells<'static> = Shells(&[
+    &Bash,
+    &clap_complete::env::Elvish,
+    &clap_complete::env::Fish,
+    &clap_complete::env::Powershell,
+    &clap_complete::env::Zsh,
+]);
+
+/// Bash, whose script rejoins the words bash splits at `:` and `=`.
+#[derive(Debug, Clone, Copy)]
+pub struct Bash;
+
+impl EnvCompleter for Bash {
+    fn name(&self) -> &'static str {
+        "bash"
+    }
+
+    fn is(&self, name: &str) -> bool {
+        name == "bash"
+    }
+
+    fn write_registration(
+        &self,
+        var: &str,
+        name: &str,
+        bin: &str,
+        completer: &str,
+        buf: &mut dyn std::io::Write,
+    ) -> std::io::Result<()> {
+        let script = include_str!("completion.bash")
+            .replace("%NAME%", &name.replace('-', "_"))
+            .replace("%BIN%", bin)
+            .replace("%COMPLETER%", &double_quoted(completer))
+            .replace("%VAR%", var);
+        buf.write_all(script.as_bytes())
+    }
+
+    fn write_complete(
+        &self,
+        cmd: &mut clap::Command,
+        args: Vec<OsString>,
+        current_dir: Option<&std::path::Path>,
+        buf: &mut dyn std::io::Write,
+    ) -> std::io::Result<()> {
+        clap_complete::env::Bash.write_complete(cmd, args, current_dir, buf)
+    }
+}
+
+/// Text escaped for use between double quotes in bash.
+fn double_quoted(text: &str) -> String {
+    text.chars().fold(
+        String::with_capacity(text.len()),
+        |mut quoted, character| {
+            if matches!(character, '\\' | '"' | '$' | '`') {
+                quoted.push('\\');
+            }
+            quoted.push(character);
+            quoted
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -505,6 +569,207 @@ mod tests {
             complete(&["vm", "run", "x", "--disk", ""]),
             ["virtio", "ide", "sata"]
         );
+    }
+
+    /// What bash's completion function passed to `vm`, and what it offered from `vm`'s candidates.
+    struct Offered {
+        index: String,
+        words: Vec<String>,
+        replies: Vec<String>,
+    }
+
+    /// Completes as bash would, given bash's own split of the line up to the cursor.
+    fn bash_completes(
+        label: &str,
+        line: &str,
+        point: usize,
+        split: &[&str],
+        cword: usize,
+        current: &str,
+        candidates: &[&str],
+    ) -> Offered {
+        use std::os::unix::fs::PermissionsExt as _;
+        let scratch = Scratch::new(label);
+        let stub = scratch.0.join("a \"quoted\" $vm");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\n[ -n \"$FAIL\" ] && exit 1\nprintf '%s\n' \"$_CLAP_COMPLETE_INDEX\" \"$@\" >\"$0.words\"\nprintf '%s' \"$CANDIDATES\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut registration = Vec::new();
+        Bash.write_registration(
+            "COMPLETE",
+            "vm",
+            "vm",
+            stub.to_str().unwrap(),
+            &mut registration,
+        )
+        .unwrap();
+        let script = scratch.0.join("registration.bash");
+        std::fs::write(&script, registration).unwrap();
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(
+                r#"source "$1"; COMP_LINE=$2; COMP_POINT=$3; COMP_CWORD=$4; current=$5; shift 5
+                COMP_WORDS=("$@")
+                _clap_complete_vm vm "$current"
+                for reply in "${COMPREPLY[@]}"; do printf '%s\n' "$reply"; done"#,
+            )
+            .arg("bash")
+            .arg(&script)
+            .arg(line)
+            .arg(point.to_string())
+            .arg(cword.to_string())
+            .arg(current)
+            .args(split)
+            .env("CANDIDATES", candidates.join("\u{b}"))
+            .env("FAIL", if candidates.is_empty() { "yes" } else { "" })
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let passed =
+            std::fs::read_to_string(scratch.0.join("a \"quoted\" $vm.words")).unwrap_or_default();
+        let mut passed = passed.lines().map(str::to_owned);
+        let index = passed.next().unwrap_or_default();
+        let words: Vec<String> = passed.skip_while(|word| word == "--").collect();
+        Offered {
+            index,
+            words,
+            replies: String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn bash_passes_a_reference_whole_and_offers_what_follows_the_colon() {
+        let offered = bash_completes(
+            "partial-tag",
+            "vm pull debian:tri",
+            18,
+            &["vm", "pull", "debian", ":", "tri"],
+            4,
+            "tri",
+            &["debian:trixie", "debian:trixie-nocloud"],
+        );
+        assert_eq!(offered.words, ["vm", "pull", "debian:tri"]);
+        assert_eq!(offered.index, "2");
+        assert_eq!(offered.replies, ["trixie", "trixie-nocloud"]);
+    }
+
+    #[test]
+    fn bash_keeps_the_colon_when_the_cursor_follows_it() {
+        let offered = bash_completes(
+            "bare-colon",
+            "vm pull debian:",
+            15,
+            &["vm", "pull", "debian", ":"],
+            3,
+            "",
+            &["debian:trixie", "debian:13"],
+        );
+        assert_eq!(offered.words, ["vm", "pull", "debian:"]);
+        assert_eq!(offered.replies, ["trixie", "13"]);
+    }
+
+    #[test]
+    fn bash_passes_a_flag_and_its_value_as_one_word() {
+        let offered = bash_completes(
+            "equals",
+            "vm run --firmware=u",
+            19,
+            &["vm", "run", "--firmware", "=", "u"],
+            4,
+            "u",
+            &["--firmware=uefi"],
+        );
+        assert_eq!(offered.words, ["vm", "run", "--firmware=u"]);
+        assert_eq!(offered.replies, ["uefi"]);
+    }
+
+    #[test]
+    fn bash_rejoins_earlier_words_and_ignores_what_follows_the_cursor() {
+        let offered = bash_completes(
+            "earlier",
+            "vm run -p 8080:80 debian:bo --name x",
+            27,
+            &[
+                "vm", "run", "-p", "8080", ":", "80", "debian", ":", "bo", "--name", "x",
+            ],
+            8,
+            "bo",
+            &["debian:bookworm"],
+        );
+        assert_eq!(offered.words, ["vm", "run", "-p", "8080:80", "debian:bo"]);
+        assert_eq!(offered.index, "4");
+        assert_eq!(offered.replies, ["bookworm"]);
+    }
+
+    #[test]
+    fn bash_leaves_an_unsplit_word_as_bash_read_it() {
+        let quoted = bash_completes(
+            "quoted",
+            "vm pull \"debian:bo",
+            18,
+            &["vm", "pull", "\"debian:bo"],
+            2,
+            "debian:bo",
+            &["debian:bookworm"],
+        );
+        assert_eq!(quoted.words, ["vm", "pull", "debian:bo"]);
+        assert_eq!(quoted.replies, ["debian:bookworm"]);
+        let plain = bash_completes(
+            "plain",
+            "vm pull deb",
+            11,
+            &["vm", "pull", "deb"],
+            2,
+            "deb",
+            &["debian:trixie"],
+        );
+        assert_eq!(plain.words, ["vm", "pull", "deb"]);
+        assert_eq!(plain.replies, ["debian:trixie"]);
+    }
+
+    #[test]
+    fn bash_offers_nothing_when_vm_fails() {
+        let offered = bash_completes(
+            "failing",
+            "vm pull deb",
+            11,
+            &["vm", "pull", "deb"],
+            2,
+            "deb",
+            &[],
+        );
+        assert!(offered.replies.is_empty());
+    }
+
+    #[test]
+    fn bash_is_the_only_shell_whose_script_is_replaced() {
+        let mut ours = Vec::new();
+        SHELLS
+            .completer("bash")
+            .unwrap()
+            .write_registration("COMPLETE", "vm", "vm", "/usr/bin/vm", &mut ours)
+            .unwrap();
+        let ours = String::from_utf8(ours).unwrap();
+        assert!(ours.contains("COMP_WORDBREAKS"));
+        assert!(ours.contains("COMPLETE=\"bash\""));
+        assert!(ours.contains("-F _clap_complete_vm vm\n"));
+        assert!(!ours.contains('%'));
+        for shell in ["zsh", "fish", "elvish", "powershell"] {
+            assert_ne!(SHELLS.completer(shell).unwrap().name(), "bash");
+        }
+    }
+
+    #[test]
+    fn text_is_escaped_for_double_quotes() {
+        assert_eq!(double_quoted("/usr/bin/vm"), "/usr/bin/vm");
+        assert_eq!(double_quoted(r#"a"b$c`d\e"#), r#"a\"b\$c\`d\\e"#);
     }
 
     /// Each command taking a name or reference has a completer, not the path fallback.
