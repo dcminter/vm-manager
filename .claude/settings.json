@@ -35,9 +35,15 @@
           },
           {
             "type": "command",
-            "command": "test -n \"$(git status --porcelain -- '*.md')\" || exit 0; ./scripts/lint-docs || exit 2",
+            "command": "test -n \"$(git status --porcelain -- '*.md' docs scripts .github crates)\" || exit 0; ./scripts/lint-docs || exit 2",
             "timeout": 120,
             "statusMessage": "documentation lint"
+          },
+          {
+            "type": "command",
+            "command": "./.claude/hooks/doc-review",
+            "timeout": 30,
+            "statusMessage": "documentation review"
           }
         ]
       }

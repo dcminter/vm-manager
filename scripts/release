@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-#
 # Checks, then prompts for a version and description, then tags and pushes.
 
 set -euo pipefail

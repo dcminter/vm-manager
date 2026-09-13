@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-#
 # Builds a binary .deb: scripts/package <trixie|noble> <version> [output directory]
 
 set -euo pipefail
