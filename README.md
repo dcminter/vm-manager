@@ -51,6 +51,7 @@ cargo run -p vm -- images
 | `vm clone <name> <image>` | Save a machine's disk as a new image; `--description` describes it |
 | `vm rm <name>` | Delete a machine and its disk |
 | `vm rmi <image>` | Delete an image from the local store |
+| `vm prune` | Remove machines and images nothing needs; `--all` includes anything unused |
 
 An image is named `repository:tag`, as in `debian:trixie`. The tag defaults to
 `latest`. Appending `@sha512:...` pins the build: a reference whose digest does
@@ -97,6 +98,16 @@ entry.
 Images without cloud-init still run, but take no key and no account.
 
 Machine state lives under `$XDG_STATE_HOME/vm/instances`.
+
+### Pruning
+
+`vm prune` removes what can never be used again: machines whose image is gone
+for good, images no catalogue entry names, and files left by stopped machines
+or unfinished downloads. `--all` also removes every stopped machine and every
+pulled image no machine uses; machines go first, so their images go in the same
+run. `vm prune machines` or `vm prune images` limits it to one kind, and
+`--dry-run` lists without removing. Running and paused machines, images in use,
+and clones are never removed.
 
 ### Ping
 

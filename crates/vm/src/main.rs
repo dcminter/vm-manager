@@ -287,6 +287,18 @@ enum Command {
         #[arg(long, short)]
         force: bool,
     },
+    /// Remove machines and images nothing needs
+    Prune {
+        /// Prune only machines or only images
+        #[arg(value_enum)]
+        target: Option<machines::PruneTarget>,
+        /// Also remove every stopped machine and every pulled image no machine uses
+        #[arg(long, short)]
+        all: bool,
+        /// Show what would be removed, and remove nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Delete an instance and its disk
     Rm {
         /// Instance name
@@ -511,6 +523,13 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
         Command::Update => Ok(Box::new(update()?)),
         Command::Rmi { reference, force } => Ok(Box::new(machines::remove_image(
             &catalogue, &store, reference, *force,
+        )?)),
+        Command::Prune {
+            target,
+            all,
+            dry_run,
+        } => Ok(Box::new(machines::prune(
+            &catalogue, &store, *target, *all, *dry_run,
         )?)),
         Command::Run {
             reference,
@@ -962,6 +981,29 @@ mod tests {
             arch(&["vm", "inspect", "debian", "--arch", "arm64"]),
             Some("arm64".to_owned())
         );
+    }
+
+    #[test]
+    fn prune_takes_an_optional_target() {
+        use clap::Parser as _;
+        let parsed = |arguments: &[&str]| match Cli::try_parse_from(arguments).unwrap().command {
+            Command::Prune {
+                target,
+                all,
+                dry_run,
+            } => (target, all, dry_run),
+            _ => panic!("not a prune"),
+        };
+        assert_eq!(parsed(&["vm", "prune"]), (None, false, false));
+        assert_eq!(
+            parsed(&["vm", "prune", "machines", "--all"]),
+            (Some(machines::PruneTarget::Machines), true, false)
+        );
+        assert_eq!(
+            parsed(&["vm", "prune", "images", "--dry-run"]),
+            (Some(machines::PruneTarget::Images), false, true)
+        );
+        assert!(Cli::try_parse_from(["vm", "prune", "everything"]).is_err());
     }
 
     #[test]

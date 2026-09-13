@@ -156,6 +156,10 @@ impl Instances {
         &self.root
     }
 
+    pub fn runtime(&self) -> &Path {
+        &self.runtime
+    }
+
     /// Claims a name; creating the directory is the lock.
     pub fn create(&self, name: &str) -> Result<Directory> {
         check_name(name)?;
@@ -364,24 +368,34 @@ impl Directory {
         })
     }
 
-    /// Removes every runtime file sharing this instance's socket id.
-    pub fn clear_runtime(&self) {
+    /// Every runtime file sharing this instance's socket id.
+    pub fn runtime_files(&self) -> Vec<PathBuf> {
         let (Some(parent), Some(stem)) = (self.monitor.parent(), self.monitor.file_stem()) else {
-            return;
+            return Vec::new();
         };
         let mut prefix = stem.to_os_string();
         prefix.push(".");
         let Ok(entries) = fs::read_dir(parent) else {
-            return;
+            return Vec::new();
         };
-        for entry in entries.flatten() {
-            if entry
-                .file_name()
-                .as_encoded_bytes()
-                .starts_with(prefix.as_encoded_bytes())
-            {
-                let _ = fs::remove_file(entry.path());
-            }
+        let mut files: Vec<PathBuf> = entries
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .as_encoded_bytes()
+                    .starts_with(prefix.as_encoded_bytes())
+            })
+            .map(|entry| entry.path())
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// Removes every runtime file sharing this instance's socket id.
+    pub fn clear_runtime(&self) {
+        for file in self.runtime_files() {
+            let _ = fs::remove_file(file);
         }
     }
 
@@ -404,7 +418,7 @@ pub fn now() -> u64 {
 }
 
 /// A short identifier derived from the name, keeping socket paths within the kernel limit.
-fn socket_id(name: &str) -> String {
+pub(crate) fn socket_id(name: &str) -> String {
     use sha2::Digest as _;
     hexadecimal(&sha2::Sha256::digest(name.as_bytes()), 8)
 }

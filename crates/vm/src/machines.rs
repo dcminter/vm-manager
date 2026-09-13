@@ -988,6 +988,40 @@ pub fn remove_image(
     })
 }
 
+/// What `vm prune` removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum PruneTarget {
+    Machines,
+    Images,
+}
+
+/// Removes machines, then images, that nothing needs.
+pub fn prune(
+    catalogue: &Catalogue,
+    store: &Store,
+    target: Option<PruneTarget>,
+    all: bool,
+    dry_run: bool,
+) -> Result<reports::Pruned> {
+    let instances = Instances::discover()?;
+    let machines = if target == Some(PruneTarget::Images) {
+        Vec::new()
+    } else {
+        vm_core::prune::machines(&instances, store, catalogue, all)?
+    };
+    let images = if target == Some(PruneTarget::Machines) {
+        Vec::new()
+    } else {
+        let used = vm_core::prune::in_use(&instances, store, &machines)?;
+        vm_core::prune::images(store, catalogue, &used, all, std::time::SystemTime::now())
+    };
+    let items: Vec<_> = machines.into_iter().chain(images).collect();
+    if !dry_run {
+        vm_core::prune::remove(&items)?;
+    }
+    Ok(reports::Pruned { items, dry_run })
+}
+
 /// Other names for the same file that could not be fetched again.
 fn stranded(
     catalogue: &Catalogue,

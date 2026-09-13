@@ -1016,6 +1016,75 @@ impl Report for Switched {
     }
 }
 
+pub struct Pruned {
+    pub items: Vec<vm_core::prune::Item>,
+    pub dry_run: bool,
+}
+
+impl Pruned {
+    fn total(&self) -> u64 {
+        self.items.iter().map(|item| item.size).sum()
+    }
+}
+
+impl Report for Pruned {
+    fn to_value(&self) -> Value {
+        Value::map([
+            ("dry_run", Value::Bool(self.dry_run)),
+            (
+                "items",
+                Value::list(self.items.iter().map(|item| {
+                    Value::map([
+                        ("kind", Value::string(item.kind.name())),
+                        ("name", Value::string(item.name.clone())),
+                        ("reason", Value::string(item.reason.name())),
+                        ("size", Value::Integer(item.size)),
+                    ])
+                })),
+            ),
+            ("size", Value::Integer(self.total())),
+        ])
+    }
+
+    fn render_text(&self, style: Style) -> Vec<String> {
+        if self.items.is_empty() {
+            return vec![style.dim("Nothing to prune.")];
+        }
+        let cells: Vec<Vec<String>> = self
+            .items
+            .iter()
+            .map(|item| {
+                vec![
+                    item.kind.name().to_owned(),
+                    style.name(&item.name),
+                    item.reason.describe().to_owned(),
+                    human(item.size),
+                ]
+            })
+            .collect();
+        let mut lines = table::render(&["KIND", "NAME", "REASON", "SIZE"], &cells);
+        if let Some(first) = lines.first_mut() {
+            *first = style.heading(first);
+        }
+        let count = self.items.len();
+        let noun = if count == 1 { "item" } else { "items" };
+        let verb = if self.dry_run {
+            "Would remove"
+        } else {
+            "Removed"
+        };
+        lines.push(format!(
+            "{verb} {count} {noun}, {}",
+            if self.dry_run {
+                format!("freeing {}", human(self.total()))
+            } else {
+                format!("freed {}", human(self.total()))
+            }
+        ));
+        lines
+    }
+}
+
 pub struct Removed {
     pub name: String,
 }
@@ -1312,6 +1381,66 @@ mod tests {
         .render_text(Style::plain());
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("No images"), "{lines:?}");
+    }
+
+    fn pruned(dry_run: bool) -> Pruned {
+        Pruned {
+            items: vec![
+                vm_core::prune::Item {
+                    kind: vm_core::prune::Kind::Machine,
+                    name: "old".to_owned(),
+                    reason: vm_core::prune::Reason::Stopped,
+                    size: 1024 * 1024,
+                    paths: vec!["/state/old".into()],
+                },
+                vm_core::prune::Item {
+                    kind: vm_core::prune::Kind::Image,
+                    name: "debian:trixie".to_owned(),
+                    reason: vm_core::prune::Reason::Unused,
+                    size: 3 * 1024 * 1024,
+                    paths: vec!["/store/blob".into()],
+                },
+            ],
+            dry_run,
+        }
+    }
+
+    #[test]
+    fn a_prune_lists_each_item_and_the_total() {
+        let lines = pruned(false).render_text(Style::plain());
+        assert!(lines[0].starts_with("KIND"), "{lines:?}");
+        assert!(
+            lines[1].contains("old") && lines[1].contains("stopped"),
+            "{lines:?}"
+        );
+        assert!(lines[2].contains("no machine uses it"), "{lines:?}");
+        assert_eq!(lines[3], "Removed 2 items, freed 4.0 MiB");
+        let lines = pruned(true).render_text(Style::plain());
+        assert_eq!(lines[3], "Would remove 2 items, freeing 4.0 MiB");
+    }
+
+    #[test]
+    fn a_prune_document_carries_kinds_reasons_and_sizes_but_not_paths() {
+        let text = to_json(&pruned(true).to_value());
+        for expected in [
+            r#""dry_run": true"#,
+            r#""kind": "machine""#,
+            r#""reason": "unused""#,
+            r#""size": 4194304"#,
+        ] {
+            assert!(text.contains(expected), "{expected} in {text}");
+        }
+        assert!(!text.contains("/store/blob"), "{text}");
+    }
+
+    #[test]
+    fn an_empty_prune_says_so() {
+        let empty = Pruned {
+            items: Vec::new(),
+            dry_run: false,
+        };
+        assert_eq!(empty.render_text(Style::plain()), ["Nothing to prune."]);
+        assert!(to_json(&empty.to_value()).contains(r#""items": []"#));
     }
 
     #[test]

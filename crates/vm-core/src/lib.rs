@@ -14,6 +14,7 @@ pub mod keys;
 pub mod machine;
 pub mod paths;
 pub mod process;
+pub mod prune;
 pub mod qmp;
 pub mod reference;
 pub mod seed;

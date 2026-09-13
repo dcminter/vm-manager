@@ -166,6 +166,27 @@ sets the image's description, which otherwise names the source machine.
 Delete a machine and its disk.
 .B \-\-force
 removes a running one.
+.TP
+.BI prune " " [\fBmachines\fR|\fBimages\fR]
+Remove machines and images nothing needs: machines first, then images, or only
+the one named.
+.B \-\-dry\-run
+lists what would be removed. Running and paused machines, images a machine
+uses, and images made by
+.B vm clone
+are never removed.
+.RS
+.TP
+Removed by default
+Machines whose image is not held and cannot be fetched; sockets left by
+machines that are not running; image files no catalogue entry names; records of
+pulled images whose file is gone; and partial files from pulls or clones
+untouched for an hour.
+.TP
+.BR \-a ", " \-\-all
+Also every stopped machine, including those whose record cannot be read, and
+every pulled image no machine uses.
+.RE
 .SH OPTIONS FOR RUN
 .TP
 .BI \-\-name " NAME"

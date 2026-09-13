@@ -35,6 +35,26 @@ fn header(overlay: &Path) -> Option<Vec<u8>> {
     Some(bytes.to_vec())
 }
 
+/// The backing file a qcow2 disk names, if it names one.
+pub fn backing_file(overlay: &Path) -> Option<std::path::PathBuf> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    use std::os::unix::ffi::OsStringExt as _;
+    let header = header(overlay)?;
+    if header.get(..4) != Some(b"QFI\xfb".as_slice()) {
+        return None;
+    }
+    let offset = u64::from_be_bytes(header.get(8..16)?.try_into().ok()?);
+    let length = u32::from_be_bytes(header.get(16..20)?.try_into().ok()?);
+    if offset == 0 || length == 0 || length > 1023 {
+        return None;
+    }
+    let mut file = std::fs::File::open(overlay).ok()?;
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut name = vec![0_u8; usize::try_from(length).ok()?];
+    file.read_exact(&mut name).ok()?;
+    Some(std::ffi::OsString::from_vec(name).into())
+}
+
 /// The virtual size from a qcow2 header, or `None` without qcow2 magic.
 fn capacity(header: &[u8]) -> Option<u64> {
     if header.len() < 32 || header.get(..4) != Some(b"QFI\xfb".as_slice()) {
@@ -134,5 +154,56 @@ mod tests {
             usage.allocated.is_some_and(|held| held < 1024 * 1024),
             "{usage:?}"
         );
+    }
+
+    #[test]
+    fn the_backing_file_is_read_from_where_the_header_points() {
+        let scratch = Scratch::new("backing");
+        let path = scratch.0.join("synthetic.qcow2");
+        let name = b"/store/blobs/sha512/abc";
+        let mut bytes = qcow2(4096);
+        bytes[8..16].copy_from_slice(&64_u64.to_be_bytes());
+        bytes[16..20].copy_from_slice(&u32::try_from(name.len()).unwrap().to_be_bytes());
+        bytes.resize(64, 0);
+        bytes.extend_from_slice(name);
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            backing_file(&path),
+            Some(PathBuf::from("/store/blobs/sha512/abc"))
+        );
+    }
+
+    #[test]
+    fn a_disk_without_a_backing_file_names_none() {
+        let scratch = Scratch::new("nobacking");
+        let path = scratch.0.join("plain.qcow2");
+        std::fs::write(&path, qcow2(4096)).unwrap();
+        assert_eq!(backing_file(&path), None);
+        std::fs::write(&path, b"not a disk at all, but long enough").unwrap();
+        assert_eq!(backing_file(&path), None);
+        assert_eq!(backing_file(&scratch.0.join("absent")), None);
+    }
+
+    #[test]
+    fn a_real_overlay_names_its_backing_file() {
+        let scratch = Scratch::new("realbacking");
+        let base = scratch.0.join("base.qcow2");
+        let overlay = scratch.0.join("overlay.qcow2");
+        let made = std::process::Command::new("qemu-img")
+            .args(["create", "-q", "-f", "qcow2"])
+            .arg(&base)
+            .arg("16M")
+            .status();
+        if !made.is_ok_and(|status| status.success()) {
+            return;
+        }
+        let made = std::process::Command::new("qemu-img")
+            .args(["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b"])
+            .arg(&base)
+            .arg(&overlay)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        assert_eq!(backing_file(&overlay), Some(base));
     }
 }
