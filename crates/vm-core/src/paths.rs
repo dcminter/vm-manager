@@ -1,9 +1,14 @@
+use crate::catalogue::{Kind, Source};
+use crate::config::{CLONES_CATALOGUE, Config, PROJECT_CATALOGUE_URL};
 use std::env;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-/// Overrides the catalogue location.
+/// Replaces every remote catalogue with one directory.
 pub const CATALOGUE_ENV: &str = "VM_CATALOGUE";
+
+/// The name of the catalogue [`CATALOGUE_ENV`] supplies.
+pub const OVERRIDE_CATALOGUE: &str = "override";
 
 const PACKAGED_CATALOGUE: &str = "/usr/share/vm/catalogue";
 
@@ -114,23 +119,80 @@ pub fn ssh_config() -> Option<PathBuf> {
     ssh_config_in(&SystemEnvironment)
 }
 
-/// The catalogue: the override, the fetched copy, the packaged copy, then a checkout's.
-pub fn catalogue_directory() -> PathBuf {
-    catalogue_directory_in(&SystemEnvironment, &|path| path.is_dir())
+/// Where `vm update` keeps a remote catalogue.
+pub fn remote_catalogue_directory_in(
+    environment: &impl Environment,
+    name: &str,
+) -> Option<PathBuf> {
+    data_directory_in(environment).map(|path| path.join("catalogues").join(name))
 }
 
-fn catalogue_directory_in(
+pub fn remote_catalogue_directory(name: &str) -> Option<PathBuf> {
+    remote_catalogue_directory_in(&SystemEnvironment, name)
+}
+
+/// Every catalogue, lowest precedence first: remotes, configured locals, then clones.
+pub fn catalogue_sources(config: &Config) -> Vec<Source> {
+    catalogue_sources_in(&SystemEnvironment, config, &|path| path.is_dir())
+}
+
+fn catalogue_sources_in(
     environment: &impl Environment,
+    config: &Config,
     exists: &dyn Fn(&Path) -> bool,
-) -> PathBuf {
-    if let Some(path) = environment.var(CATALOGUE_ENV) {
-        return PathBuf::from(path);
-    }
-    if let Some(fetched) = data_directory_in(environment).map(|path| path.join("catalogue"))
-        && exists(&fetched)
-    {
-        return fetched;
-    }
+) -> Vec<Source> {
+    let mut sources = environment.var(CATALOGUE_ENV).map_or_else(
+        || remote_sources(environment, config, exists),
+        |path| {
+            vec![Source {
+                name: OVERRIDE_CATALOGUE.to_owned(),
+                kind: Kind::Remote,
+                directory: PathBuf::from(path),
+            }]
+        },
+    );
+    sources.extend(config.locals.iter().map(|local| Source {
+        name: local.name.clone(),
+        kind: Kind::Local,
+        directory: local.path.clone(),
+    }));
+    sources.extend(
+        local_catalogue_directory_in(environment).map(|directory| Source {
+            name: CLONES_CATALOGUE.to_owned(),
+            kind: Kind::Local,
+            directory,
+        }),
+    );
+    sources
+}
+
+/// The configured remotes, each where `vm update` keeps it.
+fn remote_sources(
+    environment: &impl Environment,
+    config: &Config,
+    exists: &dyn Fn(&Path) -> bool,
+) -> Vec<Source> {
+    config
+        .remotes()
+        .into_iter()
+        .map(|remote| {
+            let fetched = remote_catalogue_directory_in(environment, &remote.name);
+            let directory = match fetched {
+                Some(fetched) if exists(&fetched) => fetched,
+                _ if remote.url == PROJECT_CATALOGUE_URL => bundled_catalogue(exists),
+                fetched => fetched.unwrap_or_default(),
+            };
+            Source {
+                name: remote.name,
+                kind: Kind::Remote,
+                directory,
+            }
+        })
+        .collect()
+}
+
+/// The project catalogue shipped in the package, or beside a development build.
+fn bundled_catalogue(exists: &dyn Fn(&Path) -> bool) -> PathBuf {
     let packaged = PathBuf::from(PACKAGED_CATALOGUE);
     if exists(&packaged) {
         return packaged;
@@ -155,6 +217,7 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use crate::config::{Local, Remote};
 
     struct Fixed(&'static [(&'static str, &'static str)]);
 
@@ -222,45 +285,118 @@ mod tests {
         assert!(ssh_config_in(&held).is_none());
     }
 
+    fn names(sources: &[Source]) -> Vec<(&str, Kind, &Path)> {
+        sources
+            .iter()
+            .map(|source| {
+                (
+                    source.name.as_str(),
+                    source.kind,
+                    source.directory.as_path(),
+                )
+            })
+            .collect()
+    }
+
+    fn configured() -> Config {
+        Config {
+            remotes: vec![
+                Remote {
+                    name: "public".to_owned(),
+                    url: PROJECT_CATALOGUE_URL.to_owned(),
+                    path: "catalogue".to_owned(),
+                },
+                Remote {
+                    name: "internal".to_owned(),
+                    url: "https://example.test/c.tar.gz".to_owned(),
+                    path: "catalogue".to_owned(),
+                },
+            ],
+            locals: vec![Local {
+                name: "team".to_owned(),
+                path: PathBuf::from("/srv/team"),
+            }],
+            ..Config::default()
+        }
+    }
+
     #[test]
-    fn the_catalogue_override_is_taken_verbatim() {
-        let held = environment(&[(CATALOGUE_ENV, "/tmp/some/catalogue")]);
+    fn catalogues_are_ordered_remotes_then_locals_then_clones() {
+        let held = environment(&[("HOME", "/home/x")]);
+        let sources = catalogue_sources_in(&held, &configured(), &|_| true);
         assert_eq!(
-            catalogue_directory_in(&held, &nothing_exists),
-            PathBuf::from("/tmp/some/catalogue")
+            names(&sources),
+            [
+                (
+                    "public",
+                    Kind::Remote,
+                    Path::new("/home/x/.local/share/vm/catalogues/public")
+                ),
+                (
+                    "internal",
+                    Kind::Remote,
+                    Path::new("/home/x/.local/share/vm/catalogues/internal")
+                ),
+                ("team", Kind::Local, Path::new("/srv/team")),
+                (
+                    "clones",
+                    Kind::Local,
+                    Path::new("/home/x/.local/share/vm/local")
+                ),
+            ]
         );
     }
 
     #[test]
-    fn the_override_beats_a_fetched_catalogue() {
-        let held = environment(&[(CATALOGUE_ENV, "/override"), ("HOME", "/home/x")]);
+    fn without_configured_remotes_the_project_catalogue_is_used() {
+        let held = environment(&[("HOME", "/home/x")]);
+        let sources = catalogue_sources_in(&held, &Config::default(), &|_| true);
         assert_eq!(
-            catalogue_directory_in(&held, &|_| true),
-            PathBuf::from("/override")
+            names(&sources)[0],
+            (
+                "project",
+                Kind::Remote,
+                Path::new("/home/x/.local/share/vm/catalogues/project")
+            )
         );
+        assert_eq!(sources.len(), 2);
     }
 
     #[test]
-    fn a_fetched_catalogue_beats_the_packaged_one() {
+    fn an_unfetched_project_catalogue_falls_back_to_the_packaged_one() {
         let held = environment(&[("HOME", "/home/x")]);
-        let fetched = PathBuf::from("/home/x/.local/share/vm/catalogue");
-        let found = catalogue_directory_in(&held, &|path| path == fetched);
-        assert_eq!(found, fetched);
-    }
-
-    #[test]
-    fn the_packaged_catalogue_is_used_when_nothing_has_been_fetched() {
-        let held = environment(&[("HOME", "/home/x")]);
-        let found = catalogue_directory_in(&held, &|path| path == Path::new(PACKAGED_CATALOGUE));
-        assert_eq!(found, PathBuf::from(PACKAGED_CATALOGUE));
+        let sources = catalogue_sources_in(&held, &configured(), &|path| {
+            path == Path::new(PACKAGED_CATALOGUE)
+        });
+        assert_eq!(sources[0].directory, PathBuf::from(PACKAGED_CATALOGUE));
+        assert_eq!(
+            sources[1].directory,
+            PathBuf::from("/home/x/.local/share/vm/catalogues/internal")
+        );
     }
 
     #[test]
     fn the_packaged_path_is_the_answer_of_last_resort() {
         let held = environment(&[("HOME", "/home/x")]);
+        let sources = catalogue_sources_in(&held, &Config::default(), &nothing_exists);
+        assert_eq!(sources[0].directory, PathBuf::from(PACKAGED_CATALOGUE));
+    }
+
+    #[test]
+    fn the_catalogue_override_replaces_every_remote() {
+        let held = environment(&[(CATALOGUE_ENV, "/override"), ("HOME", "/home/x")]);
+        let sources = catalogue_sources_in(&held, &configured(), &|_| true);
         assert_eq!(
-            catalogue_directory_in(&held, &nothing_exists),
-            PathBuf::from(PACKAGED_CATALOGUE)
+            names(&sources),
+            [
+                ("override", Kind::Remote, Path::new("/override")),
+                ("team", Kind::Local, Path::new("/srv/team")),
+                (
+                    "clones",
+                    Kind::Local,
+                    Path::new("/home/x/.local/share/vm/local")
+                ),
+            ]
         );
     }
 

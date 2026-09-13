@@ -1,7 +1,7 @@
 use crate::style::Style;
 use crate::table;
 use crate::units::{human, human_pair};
-use vm_core::catalogue::{Artifact, Entry};
+use vm_core::catalogue::{Artifact, Entry, Kind};
 use vm_core::instance::{self, Instance, Port};
 use vm_core::machine::{Chipset, Disk, Firmware};
 use vm_core::process;
@@ -18,25 +18,23 @@ pub struct ImageRow {
     pub held: bool,
     /// Size on disk as the catalogue records it, if it does.
     pub size: Option<u64>,
+    pub catalogue: String,
 }
 
-/// Which catalogue an image listing reads.
+/// Which kinds of catalogue an image listing reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     All,
-    /// Images made on this host.
     Local,
-    /// Images from the fetched catalogue.
     Remote,
 }
 
 impl Origin {
-    const fn name(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::Local => "local",
-            Self::Remote => "remote",
-        }
+    pub const fn admits(self, kind: Kind) -> bool {
+        matches!(
+            (self, kind),
+            (Self::All, _) | (Self::Local, Kind::Local) | (Self::Remote, Kind::Remote)
+        )
     }
 
     pub const fn of(local: bool, remote: bool) -> Self {
@@ -63,6 +61,7 @@ impl Report for Images {
                 ("description", Value::string(row.description.clone())),
                 ("held", Value::Bool(row.held)),
                 ("size", row.size.map_or(Value::Null, Value::Integer)),
+                ("catalogue", Value::string(row.catalogue.clone())),
             ])
         }))
     }
@@ -88,11 +87,20 @@ impl Report for Images {
                     } else {
                         String::new()
                     },
+                    row.catalogue.clone(),
                     row.description.clone(),
                 ]
             })
             .collect();
-        let headings = ["REPOSITORY", "TAG", "ARCH", "SIZE", "PULLED", "DESCRIPTION"];
+        let headings = [
+            "REPOSITORY",
+            "TAG",
+            "ARCH",
+            "SIZE",
+            "PULLED",
+            "CATALOGUE",
+            "DESCRIPTION",
+        ];
         let mut lines = table::render(&headings, &cells);
         if let Some(first) = lines.first_mut() {
             *first = style.heading(first);
@@ -121,7 +129,10 @@ pub struct Inspect {
     pub disk: Disk,
     /// Every architecture the entry has a build for.
     pub architectures: Vec<String>,
-    pub origin: Origin,
+    pub catalogue: String,
+    pub kind: Kind,
+    /// Lower catalogues whose entry this one hides.
+    pub shadows: Vec<String>,
     /// The catalogue file describing the image.
     pub entry: String,
     /// Where the image is in the store, when held.
@@ -150,7 +161,9 @@ impl Inspect {
             machine: artifact.machine,
             disk: artifact.disk,
             architectures: entry.architectures(),
-            origin: Origin::Remote,
+            catalogue: entry.catalogue.clone(),
+            kind: entry.kind,
+            shadows: entry.shadows.clone(),
             entry: entry.path.display().to_string(),
             path: None,
             used_by: Vec::new(),
@@ -210,7 +223,9 @@ impl Report for Inspect {
             ("machine", Value::string(self.machine.name())),
             ("disk", Value::string(self.disk.name())),
             ("architectures", Value::strings(self.architectures.clone())),
-            ("origin", Value::string(self.origin.name())),
+            ("origin", Value::string(self.kind.name())),
+            ("catalogue", Value::string(self.catalogue.clone())),
+            ("shadows", Value::strings(self.shadows.clone())),
             ("entry", Value::string(self.entry.clone())),
             ("path", self.path.clone().map_or(Value::Null, Value::String)),
             ("used_by", Value::strings(self.used_by.clone())),
@@ -229,11 +244,7 @@ impl Report for Inspect {
             ("Architecture", self.architecture()),
             (
                 "Origin",
-                match self.origin {
-                    Origin::Local => "local, made on this host",
-                    Origin::All | Origin::Remote => "remote catalogue",
-                }
-                .to_owned(),
+                format!("{} ({})", self.kind.name(), self.catalogue),
             ),
             ("Entry", self.entry.clone()),
             ("Format", self.formatting()),
@@ -241,7 +252,7 @@ impl Report for Inspect {
                 "Source",
                 self.url
                     .clone()
-                    .unwrap_or_else(|| "cloned here; nowhere to fetch it from".to_owned()),
+                    .unwrap_or_else(|| "none; it cannot be fetched".to_owned()),
             ),
             ("Digest", self.digest.clone()),
             (
@@ -257,6 +268,9 @@ impl Report for Inspect {
                     .map_or_else(|| "no".to_owned(), |path| format!("yes, at {path}")),
             ),
         ]);
+        if !self.shadows.is_empty() {
+            fields.push(("Shadows", self.shadows.join(", ")));
+        }
         if !self.used_by.is_empty() {
             fields.push(("Used by", self.used_by.join(", ")));
         }
@@ -325,30 +339,60 @@ impl Report for Pull {
     }
 }
 
-pub struct Update {
+/// One remote catalogue's update.
+pub struct Updated {
+    pub name: String,
     pub url: String,
     pub path: String,
-    pub files: usize,
-    pub entries: usize,
+    /// The files and entries installed, or why nothing was.
+    pub outcome: std::result::Result<(usize, usize), String>,
+}
+
+pub struct Update {
+    pub catalogues: Vec<Updated>,
 }
 
 impl Report for Update {
     fn to_value(&self) -> Value {
-        Value::map([
-            ("url", Value::string(self.url.clone())),
-            ("path", Value::string(self.path.clone())),
-            ("files", Value::Integer(self.files as u64)),
-            ("entries", Value::Integer(self.entries as u64)),
-        ])
+        Value::list(self.catalogues.iter().map(|held| {
+            let (files, entries, error) = match &held.outcome {
+                Ok((files, entries)) => (
+                    Value::Integer(*files as u64),
+                    Value::Integer(*entries as u64),
+                    Value::Null,
+                ),
+                Err(reason) => (Value::Null, Value::Null, Value::string(reason.clone())),
+            };
+            Value::map([
+                ("name", Value::string(held.name.clone())),
+                ("url", Value::string(held.url.clone())),
+                ("path", Value::string(held.path.clone())),
+                ("files", files),
+                ("entries", entries),
+                ("error", error),
+            ])
+        }))
     }
 
     fn render_text(&self, style: Style) -> Vec<String> {
-        vec![format!(
-            "Updated from {} ({} entries in {} files)",
-            style.name(&self.url),
-            self.entries,
-            self.files
-        )]
+        self.catalogues
+            .iter()
+            .map(|held| match &held.outcome {
+                Ok((files, entries)) => format!(
+                    "Updated {} from {} ({entries} entries in {files} files)",
+                    style.name(&held.name),
+                    held.url
+                ),
+                Err(reason) => format!(
+                    "Could not update {}; its previous copy stays in use: {reason}",
+                    style.name(&held.name)
+                ),
+            })
+            .collect()
+    }
+
+    fn succeeded(&self) -> bool {
+        self.catalogues.iter().all(|held| held.outcome.is_ok())
     }
 }
 
@@ -1115,6 +1159,7 @@ mod tests {
                 description: "Debian 13".to_owned(),
                 held: true,
                 size: Some(512 * 1024 * 1024),
+                catalogue: "project".to_owned(),
             }],
             origin: Origin::All,
         }
@@ -1507,7 +1552,9 @@ mod tests {
             machine: Chipset::Q35,
             disk: Disk::Virtio,
             architectures: vec!["amd64".to_owned()],
-            origin: Origin::Remote,
+            catalogue: "project".to_owned(),
+            kind: Kind::Remote,
+            shadows: Vec::new(),
             entry: "/catalogue/entry.toml".to_owned(),
             path: None,
             used_by: Vec::new(),
@@ -1540,7 +1587,9 @@ mod tests {
             machine: Chipset::Q35,
             disk: Disk::Virtio,
             architectures: vec!["amd64".to_owned(), "arm64".to_owned()],
-            origin: Origin::Local,
+            catalogue: "team".to_owned(),
+            kind: Kind::Local,
+            shadows: vec!["internal".to_owned(), "project".to_owned()],
             entry: "/local/debian/trixie.toml".to_owned(),
             path: Some("/store/sha512/abc".to_owned()),
             used_by: vec!["one".to_owned(), "two".to_owned()],
@@ -1571,6 +1620,8 @@ mod tests {
         let json = to_json(&report.to_value());
         for expected in [
             r#""origin": "local""#,
+            r#""catalogue": "team""#,
+            r#""internal""#,
             r#""path": "/store/sha512/abc""#,
             r#""entry": "/local/debian/trixie.toml""#,
             r#""arm64""#,
@@ -1580,14 +1631,21 @@ mod tests {
         }
 
         report.architectures = vec!["arm64".to_owned()];
-        report.origin = Origin::Remote;
+        report.kind = Kind::Remote;
+        report.catalogue = "internal".to_owned();
+        report.shadows = Vec::new();
         report.held = false;
         report.path = None;
         report.used_by = Vec::new();
         assert!(field(&report, "Architecture").unwrap().ends_with("  arm64"));
-        assert!(field(&report, "Origin").unwrap().contains("remote"));
+        assert!(
+            field(&report, "Origin")
+                .unwrap()
+                .ends_with("remote (internal)")
+        );
         assert!(field(&report, "Pulled").unwrap().ends_with("  no"));
         assert_eq!(field(&report, "Used by"), None);
+        assert_eq!(field(&report, "Shadows"), None);
         let json = to_json(&report.to_value());
         assert!(json.contains(r#""path": null"#), "{json}");
         assert!(json.contains(r#""used_by": []"#), "{json}");
@@ -1613,7 +1671,9 @@ mod tests {
             machine: Chipset::Q35,
             disk: Disk::Virtio,
             architectures: vec!["amd64".to_owned()],
-            origin: Origin::Remote,
+            catalogue: "project".to_owned(),
+            kind: Kind::Remote,
+            shadows: Vec::new(),
             entry: "/catalogue/entry.toml".to_owned(),
             path: None,
             used_by: Vec::new(),
@@ -1796,6 +1856,9 @@ mod tests {
                 login: vm_core::catalogue::Login::None,
                 artifacts: Vec::new(),
                 path: std::path::PathBuf::from("/catalogue/puredarwin/minimal.toml"),
+                catalogue: "project".to_owned(),
+                kind: Kind::Remote,
+                shadows: Vec::new(),
             },
             &Artifact {
                 arch: "amd64".to_owned(),
@@ -1829,18 +1892,60 @@ mod tests {
     }
 
     #[test]
-    fn an_update_counts_entries_and_files() {
-        let report = Update {
-            url: "https://example.test/c.tar.gz".to_owned(),
-            path: "/home/x/.local/share/vm/catalogue".to_owned(),
-            files: 4,
-            entries: 3,
+    fn an_update_reports_each_catalogue_and_fails_if_any_did() {
+        let mut report = Update {
+            catalogues: vec![
+                Updated {
+                    name: "project".to_owned(),
+                    url: "https://example.test/c.tar.gz".to_owned(),
+                    path: "/home/x/.local/share/vm/catalogues/project".to_owned(),
+                    outcome: Ok((4, 3)),
+                },
+                Updated {
+                    name: "internal".to_owned(),
+                    url: "https://internal.test/c.tar.gz".to_owned(),
+                    path: "/home/x/.local/share/vm/catalogues/internal".to_owned(),
+                    outcome: Err("connection refused".to_owned()),
+                },
+            ],
         };
         let text = to_json(&report.to_value());
-        assert!(text.contains(r#""entries": 3"#), "{text}");
-        assert!(text.contains(r#""files": 4"#), "{text}");
+        for expected in [
+            r#""entries": 3"#,
+            r#""files": 4"#,
+            r#""error": null"#,
+            r#""error": "connection refused""#,
+            r#""name": "internal""#,
+        ] {
+            assert!(text.contains(expected), "{expected} in {text}");
+        }
         let lines = report.render_text(Style::plain());
-        assert!(lines[0].contains("3 entries in 4 files"), "{lines:?}");
+        assert!(
+            lines[0].contains("project") && lines[0].contains("3 entries in 4 files"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].contains("internal") && lines[1].contains("previous copy"),
+            "{lines:?}"
+        );
+        assert!(!report.succeeded());
+        report.catalogues.pop();
+        assert!(report.succeeded());
+    }
+
+    #[test]
+    fn an_image_listing_names_each_image_catalogue() {
+        let lines = images().render_text(Style::plain());
+        assert!(lines[0].contains("CATALOGUE"), "{lines:?}");
+        assert!(lines[1].contains("project"), "{lines:?}");
+        assert!(to_json(&images().to_value()).contains(r#""catalogue": "project""#));
+    }
+
+    #[test]
+    fn a_kind_filter_admits_only_its_kind() {
+        assert!(Origin::All.admits(Kind::Local) && Origin::All.admits(Kind::Remote));
+        assert!(Origin::Local.admits(Kind::Local) && !Origin::Local.admits(Kind::Remote));
+        assert!(Origin::Remote.admits(Kind::Remote) && !Origin::Remote.admits(Kind::Local));
     }
 
     #[test]
@@ -1863,7 +1968,9 @@ mod tests {
             machine: Chipset::Q35,
             disk: Disk::Virtio,
             architectures: vec!["amd64".to_owned()],
-            origin: Origin::Remote,
+            catalogue: "project".to_owned(),
+            kind: Kind::Remote,
+            shadows: Vec::new(),
             entry: "/catalogue/entry.toml".to_owned(),
             path: None,
             used_by: Vec::new(),

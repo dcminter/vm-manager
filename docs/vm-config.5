@@ -12,16 +12,38 @@ when
 .I XDG_CONFIG_HOME
 is unset. Omitted settings take their defaults. An unreadable file, invalid
 TOML or an unknown setting is an error.
-.SH SETTINGS
+.SH CATALOGUES
+Images are named by catalogues. Remote catalogues are fetched by
+.BR "vm update" ;
+local catalogues are read where they are. Where catalogues name the same image,
+the later one wins: remotes in the order given, then locals in the order given,
+then
+.BR clones ,
+the local catalogue
+.B vm clone
+writes to. A name used twice within one catalogue is an error.
 .TP
-.BR catalogue_url " (string)"
-The gzipped tar
-.B vm update
-fetches. Defaults to the project's repository on GitHub.
-.TP
-.BR catalogue_path " (string)"
-The directory within that archive holding the entries. Default
+.B [[remote]]
+A remote catalogue.
+.B name
+(lowercase letters, digits and dashes) identifies it;
+.B url
+is the gzipped tar to fetch;
+.B path
+is the directory within it holding the entries, default
 .BR catalogue .
+Without any
+.BR [[remote]] ,
+the project's catalogue on GitHub is the one remote, named
+.BR project .
+.TP
+.B [[local]]
+A local catalogue:
+.B name
+as for a remote, and
+.BR path ,
+an absolute directory of entries.
+.SH SETTINGS
 .TP
 .BR auto_pull " (boolean)"
 Whether
@@ -61,11 +83,22 @@ Default
 .SH EXAMPLE
 .RS
 .nf
-catalogue_url = "https://mirror.example.com/vm/catalogue.tar.gz"
-catalogue_path = "catalogue"
 auto_pull = false
 add_ssh_config = true
 default_user = "$USER"
+
+[[remote]]
+name = "project"
+url = "https://codeload.github.com/dcminter/vm\-manager/tar.gz/refs/heads/main"
+
+[[remote]]
+name = "internal"
+url = "https://mirror.example.com/vm/catalogue.tar.gz"
+path = "images"
+
+[[local]]
+name = "team"
+path = "/srv/vm/catalogue"
 .fi
 .RE
 .SH SEE ALSO

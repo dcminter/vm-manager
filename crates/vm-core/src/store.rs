@@ -433,6 +433,9 @@ mod tests {
             login: Login::CloudInit,
             artifacts: vec![artifact()],
             path: PathBuf::from("/catalogue/debian/trixie.toml"),
+            catalogue: "project".to_owned(),
+            kind: crate::catalogue::Kind::Remote,
+            shadows: Vec::new(),
         }
     }
 

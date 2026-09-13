@@ -21,6 +21,11 @@ impl Format {
 pub trait Report {
     fn to_value(&self) -> Value;
     fn render_text(&self, style: Style) -> Vec<String>;
+
+    /// Whether the command did everything it was asked to.
+    fn succeeded(&self) -> bool {
+        true
+    }
 }
 
 pub fn emit(report: &dyn Report, format: Format, style: Style) -> io::Result<()> {

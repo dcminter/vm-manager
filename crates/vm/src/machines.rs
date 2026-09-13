@@ -949,7 +949,7 @@ pub fn remove_image(
     let parsed: vm_core::Reference = reference.parse()?;
     let (entry, artifact) = catalogue.resolve(&parsed, host_architecture())?;
     // A clone's entry was written here, so it is removed with the image.
-    let local = artifact.url.is_none();
+    let local = entry.catalogue == vm_core::config::CLONES_CATALOGUE;
     if !store.contains(&artifact.digest) && !local {
         // Nothing to remove, and the name would remain.
         return Err(Error::UnheldImage {
@@ -971,10 +971,11 @@ pub fn remove_image(
         0
     };
     store.forget(&entry.name, &entry.tag, &artifact.arch);
-    if local && let Some(root) = vm_core::paths::local_catalogue_directory() {
-        let directory = root.join(&entry.name);
-        let _ = std::fs::remove_file(directory.join(format!("{}.toml", entry.tag)));
-        let _ = std::fs::remove_dir(&directory);
+    if local {
+        let _ = std::fs::remove_file(&entry.path);
+        if let Some(directory) = entry.path.parent() {
+            let _ = std::fs::remove_dir(directory);
+        }
     }
     Ok(reports::Untagged {
         name: entry.name.clone(),

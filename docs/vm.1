@@ -26,20 +26,20 @@ catalogue's build for the architecture is refused.
 .SH COMMANDS
 .TP
 .B images
-List the images in the local catalogue, with the size each occupies once
-fetched.
-.B \-\-local
-shows only images made on this host, such as by
-.BR "vm clone" ;
-.B \-\-remote
-shows only images from the fetched catalogue.
+List the images the catalogues name, with the size each occupies once fetched
+and the catalogue naming it.
+.BR \-\-local ", " \-\-remote
+and
+.BI \-\-catalogue " NAME"
+limit the list to those catalogues; see
+.BR vm\-config (5).
 .TP
 .BI inspect " IMAGE"
 Show an image's build for this host's architecture, or for
 .BR \-\-arch " ARCH" :
-its other architectures, whether it is local or from the remote catalogue, its
-catalogue entry file, its source and digest, how its guest is reached, where it
-is stored if pulled, and the machines using it.
+its other architectures, the catalogue naming it and any lower catalogues it
+hides, its catalogue entry file, its source and digest, how its guest is
+reached, where it is stored if pulled, and the machines using it.
 .TP
 .BI pull " IMAGE"
 Fetch an image into the local store and verify it against the catalogue digest.
@@ -50,8 +50,9 @@ or
 .BR zstd (1);
 the digest covers the file as published.
 .TP
-.B update
-Refresh the local catalogue from its remote source.
+.BR update " [" \fINAME\fR ]
+Refresh every remote catalogue, or the one named. A catalogue that cannot be
+fetched keeps its previous copy, and the command exits 1.
 .TP
 .BI run " IMAGE"
 Create and start a machine. See
@@ -149,7 +150,7 @@ shows only the last lines.
 Delete an image name from the local store. A catalogue image is listed again as
 unfetched; an image made by
 .B vm clone
-loses its catalogue entry. An image in use by a machine is refused without
+loses its catalogue entry. Entries in other local catalogues are left in place. An image in use by a machine is refused without
 .BR \-\-force .
 Names for identical images share one file, which is deleted with the last name.
 .TP
@@ -308,11 +309,13 @@ Optional settings. See
 .I $XDG_DATA_HOME/vm/images
 The image store.
 .TP
-.I $XDG_DATA_HOME/vm/catalogue
-The fetched catalogue.
+.I $XDG_DATA_HOME/vm/catalogues/NAME
+Each remote catalogue, as last fetched.
 .TP
 .I $XDG_DATA_HOME/vm/local
-Catalogue entries for images made by
+The
+.B clones
+catalogue, holding entries for images made by
 .BR "vm clone" .
 .TP
 .I $XDG_STATE_HOME/vm/instances
@@ -336,7 +339,7 @@ The default output format.
 A shell name; prints completion for that shell.
 .TP
 .B VM_CATALOGUE
-Overrides the catalogue directory.
+A catalogue directory used in place of every remote catalogue.
 .SH NOTES
 A guest can
 .BR ping (8)

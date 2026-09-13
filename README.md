@@ -31,10 +31,10 @@ cargo run -p vm -- images
 
 | Command | Purpose |
 |---|---|
-| `vm images` | List the images in the local catalogue; `--local` or `--remote` narrows it |
+| `vm images` | List the images the catalogues name; `--local`, `--remote` or `--catalogue` narrows it |
 | `vm inspect <image>` | Show an image's details, origin and users; `--arch` picks a build |
 | `vm pull <image>` | Fetch an image into the local store |
-| `vm update` | Refresh the local catalogue from its remote source |
+| `vm update [catalogue]` | Refresh the remote catalogues, or one |
 | `vm run <image>` | Create and start a machine |
 | `vm start <name>` | Start a stopped machine, optionally changing its settings |
 | `vm ssh <name>` | Open a shell on a machine, or run a command in it |
@@ -138,10 +138,32 @@ COMPLETE=fish vm | source
 ## Configuration
 
 `$XDG_CONFIG_HOME/vm/config.toml` is optional. `man vm-config` describes its
-settings: the catalogue source, whether `vm run` fetches missing images,
-whether machines get an SSH config entry by default, and `default_user`, the
-account created when `--user` is not given. `default_user = "$USER"` uses the
-name of the user running `vm`.
+settings: the catalogues, whether `vm run` fetches missing images, whether
+machines get an SSH config entry by default, and `default_user`, the account
+created when `--user` is not given. `default_user = "$USER"` uses the name of
+the user running `vm`.
+
+Several catalogues can name images. Remote catalogues are fetched by
+`vm update`; local ones are read in place. When two name the same image the
+later one wins: remotes in the order listed, then locals in the order listed,
+then the catalogue `vm clone` writes to.
+
+```toml
+[[remote]]
+name = "project"
+url = "https://codeload.github.com/dcminter/vm-manager/tar.gz/refs/heads/main"
+
+[[remote]]
+name = "internal"
+url = "https://mirror.example.com/vm/catalogue.tar.gz"
+path = "images"
+
+[[local]]
+name = "team"
+path = "/srv/vm/catalogue"
+```
+
+Without a `[[remote]]` the project's catalogue is the only remote.
 
 ## Output
 

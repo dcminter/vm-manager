@@ -94,8 +94,35 @@ pub fn held_image() -> Vec<CompletionCandidate> {
 }
 
 fn loaded() -> Option<(Catalogue, Store)> {
-    let catalogue = Catalogue::load_layered(&crate::catalogue_layers()).ok()?;
+    let catalogue = Catalogue::load_layered(&crate::catalogue_sources().ok()?).ok()?;
     Some((catalogue, Store::discover().ok()?))
+}
+
+pub fn catalogue_name() -> Vec<CompletionCandidate> {
+    crate::catalogue_sources().map_or_else(
+        |_| Vec::new(),
+        |sources| {
+            sources
+                .into_iter()
+                .map(|source| {
+                    CompletionCandidate::new(source.name).help(Some(source.kind.name().into()))
+                })
+                .collect()
+        },
+    )
+}
+
+pub fn remote_catalogue_name() -> Vec<CompletionCandidate> {
+    vm_core::config::Config::load().map_or_else(
+        |_| Vec::new(),
+        |config| {
+            config
+                .remotes()
+                .into_iter()
+                .map(|remote| CompletionCandidate::new(remote.name).help(Some(remote.url.into())))
+                .collect()
+        },
+    )
 }
 
 /// Each entry's `name:tag` and aliases, for the entries with a fitting build for `arch`, or any.

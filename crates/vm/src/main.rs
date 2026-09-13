@@ -16,7 +16,7 @@ use output::{Format, Report};
 use reports::Origin;
 use std::process::ExitCode;
 use style::Style;
-use vm_core::catalogue::Catalogue;
+use vm_core::catalogue::{Catalogue, Source};
 use vm_core::store::{Pulled, Store};
 use vm_core::{Reference, host_architecture, paths};
 
@@ -48,12 +48,15 @@ enum Command {
         /// Show every architecture rather than this host's
         #[arg(long)]
         all_architectures: bool,
-        /// Show only images made on this host, such as clones
+        /// Show only images from local catalogues
         #[arg(long, conflicts_with = "remote")]
         local: bool,
-        /// Show only images from the fetched catalogue
+        /// Show only images from remote catalogues
         #[arg(long)]
         remote: bool,
+        /// Show only images from the named catalogue
+        #[arg(long, add = ArgValueCandidates::new(completion::catalogue_name))]
+        catalogue: Option<String>,
     },
     /// Show what an image reference resolves to
     Inspect {
@@ -70,8 +73,12 @@ enum Command {
         #[arg(add = ArgValueCandidates::new(completion::catalogue_image))]
         reference: String,
     },
-    /// Refresh the local catalogue from its remote source
-    Update,
+    /// Refresh the remote catalogues
+    Update {
+        /// Refresh only this remote catalogue
+        #[arg(add = ArgValueCandidates::new(completion::remote_catalogue_name))]
+        catalogue: Option<String>,
+    },
     /// Create and start a virtual machine
     Run {
         /// Image reference, such as debian:trixie
@@ -321,7 +328,8 @@ fn main() -> ExitCode {
     match run(&cli, style) {
         Ok(Outcome::Written) => ExitCode::SUCCESS,
         Ok(Outcome::Reported(report)) => match output::emit(report.as_ref(), cli.format, style) {
-            Ok(()) => ExitCode::SUCCESS,
+            Ok(()) if report.succeeded() => ExitCode::SUCCESS,
+            Ok(()) => ExitCode::FAILURE,
             Err(error) if output::is_closed_pipe(&error) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("vm: cannot write output: {error}");
@@ -492,15 +500,18 @@ fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> 
 
 /// The rest, which need both.
 fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>> {
-    let origin = match &cli.command {
-        Command::Images { local, remote, .. } => Origin::of(*local, *remote),
-        _ => Origin::All,
+    let config = vm_core::config::Config::load()?;
+    let sources = paths::catalogue_sources(&config);
+    let (origin, named) = match &cli.command {
+        Command::Images {
+            local,
+            remote,
+            catalogue,
+            ..
+        } => (Origin::of(*local, *remote), catalogue.as_deref()),
+        _ => (Origin::All, None),
     };
-    let catalogue = Catalogue::load_layered(&origin_layers(
-        origin,
-        paths::catalogue_directory(),
-        paths::local_catalogue_directory(),
-    ))?;
+    let catalogue = Catalogue::load_layered(&select_sources(sources, origin, named)?)?;
     let store = Store::discover()?;
     match &cli.command {
         Command::Images {
@@ -520,7 +531,7 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
         Command::Pull { reference } => Ok(Box::new(pull(
             &catalogue, &store, style, cli.format, reference,
         )?)),
-        Command::Update => Ok(Box::new(update()?)),
+        Command::Update { catalogue } => Ok(Box::new(update(&config, catalogue.as_deref())?)),
         Command::Rmi { reference, force } => Ok(Box::new(machines::remove_image(
             &catalogue, &store, reference, *force,
         )?)),
@@ -597,40 +608,65 @@ const fn toggle(on: bool, off: bool) -> Option<bool> {
     }
 }
 
-/// The fetched catalogue, with local clones layered over it.
-fn catalogue_layers() -> Vec<std::path::PathBuf> {
-    origin_layers(
-        Origin::All,
-        paths::catalogue_directory(),
-        paths::local_catalogue_directory(),
-    )
+/// Every catalogue the config names, lowest precedence first.
+fn catalogue_sources() -> vm_core::Result<Vec<Source>> {
+    Ok(paths::catalogue_sources(&vm_core::config::Config::load()?))
 }
 
-/// The catalogue directories holding images of an origin, in layering order.
-fn origin_layers(
+/// The catalogues of one kind, or the one named.
+fn select_sources(
+    sources: Vec<Source>,
     origin: Origin,
-    fetched: std::path::PathBuf,
-    local: Option<std::path::PathBuf>,
-) -> Vec<std::path::PathBuf> {
-    match origin {
-        Origin::All => std::iter::once(fetched).chain(local).collect(),
-        Origin::Local => local.into_iter().collect(),
-        Origin::Remote => vec![fetched],
+    named: Option<&str>,
+) -> vm_core::Result<Vec<Source>> {
+    if let Some(name) = named
+        && !sources.iter().any(|source| source.name == name)
+    {
+        return Err(vm_core::Error::UnknownCatalogue {
+            name: name.to_owned(),
+            available: sources.into_iter().map(|source| source.name).collect(),
+        });
     }
+    Ok(sources
+        .into_iter()
+        .filter(|source| origin.admits(source.kind))
+        .filter(|source| named.is_none_or(|name| source.name == name))
+        .collect())
 }
 
-fn update() -> vm_core::Result<reports::Update> {
-    let config = vm_core::config::Config::load()?;
-    let destination = paths::data_directory()
-        .ok_or(vm_core::Error::NoImageStore)?
-        .join("catalogue");
-    let updated = vm_core::update::run(&config, &destination, &vm_core::store::http_agent())?;
-    Ok(reports::Update {
-        url: updated.url,
-        path: updated.path.display().to_string(),
-        files: updated.files,
-        entries: updated.entries,
-    })
+/// Refreshes every remote catalogue, or the one named.
+fn update(
+    config: &vm_core::config::Config,
+    named: Option<&str>,
+) -> vm_core::Result<reports::Update> {
+    let remotes = config.remotes();
+    if let Some(name) = named
+        && !remotes.iter().any(|remote| remote.name == name)
+    {
+        return Err(vm_core::Error::UnknownCatalogue {
+            name: name.to_owned(),
+            available: remotes.into_iter().map(|remote| remote.name).collect(),
+        });
+    }
+    let agent = vm_core::store::http_agent();
+    let catalogues = remotes
+        .iter()
+        .filter(|remote| named.is_none_or(|name| remote.name == name))
+        .map(|remote| {
+            let destination = paths::remote_catalogue_directory(&remote.name)
+                .ok_or(vm_core::Error::NoImageStore)?;
+            let outcome = vm_core::update::run(remote, &destination, &agent)
+                .map(|updated| (updated.files, updated.entries))
+                .map_err(|error| error.to_string());
+            Ok(reports::Updated {
+                name: remote.name.clone(),
+                url: remote.url.clone(),
+                path: destination.display().to_string(),
+                outcome,
+            })
+        })
+        .collect::<vm_core::Result<Vec<_>>>()?;
+    Ok(reports::Update { catalogues })
 }
 
 fn images(
@@ -655,6 +691,7 @@ fn images(
                     description: entry.description.clone(),
                     held: store.contains(&artifact.digest),
                     size: artifact.size.or_else(|| held_size(store, artifact)),
+                    catalogue: entry.catalogue.clone(),
                 })
                 .collect::<Vec<_>>()
         })
@@ -678,21 +715,11 @@ fn inspect(
     let reference: Reference = reference.parse()?;
     let (entry, artifact) = catalogue.resolve(&reference, arch)?;
     let mut report = reports::Inspect::new(entry, artifact, store.contains(&artifact.digest));
-    report.origin = origin_of(entry, paths::local_catalogue_directory().as_deref());
     if report.held {
         report.path = Some(store.path_for(&artifact.digest).display().to_string());
     }
     report.used_by = machines::holders(&artifact.digest.to_string()).unwrap_or_default();
     Ok(report)
-}
-
-/// Whether an entry was made on this host or came from the fetched catalogue.
-fn origin_of(entry: &vm_core::catalogue::Entry, local: Option<&std::path::Path>) -> Origin {
-    if local.is_some_and(|local| entry.path.starts_with(local)) {
-        Origin::Local
-    } else {
-        Origin::Remote
-    }
 }
 
 fn pull(
@@ -908,65 +935,75 @@ mod tests {
         assert!(Cli::try_parse_from(["vm", "images", "--local", "--remote"]).is_err());
     }
 
-    #[test]
-    fn each_origin_reads_only_its_own_catalogue() {
-        let fetched = std::path::PathBuf::from("/data/vm/catalogue");
-        let local = std::path::PathBuf::from("/data/vm/local");
-        let layers = |origin| origin_layers(origin, fetched.clone(), Some(local.clone()));
-        assert_eq!(layers(Origin::All), vec![fetched.clone(), local.clone()]);
-        assert_eq!(layers(Origin::Local), vec![local.clone()]);
-        assert_eq!(layers(Origin::Remote), vec![fetched.clone()]);
-        assert!(origin_layers(Origin::Local, fetched.clone(), None).is_empty());
-        assert_eq!(
-            origin_layers(Origin::All, fetched.clone(), None),
-            vec![fetched]
-        );
+    fn sources() -> Vec<Source> {
+        [
+            ("project", vm_core::catalogue::Kind::Remote),
+            ("internal", vm_core::catalogue::Kind::Remote),
+            ("team", vm_core::catalogue::Kind::Local),
+            ("clones", vm_core::catalogue::Kind::Local),
+        ]
+        .into_iter()
+        .map(|(name, kind)| Source {
+            name: name.to_owned(),
+            kind,
+            directory: std::path::PathBuf::from("/c").join(name),
+        })
+        .collect()
+    }
+
+    fn selected(origin: Origin, named: Option<&str>) -> Vec<String> {
+        select_sources(sources(), origin, named)
+            .unwrap()
+            .into_iter()
+            .map(|source| source.name)
+            .collect()
     }
 
     #[test]
-    fn a_clone_description_is_optional() {
+    fn catalogues_are_selected_by_kind_or_name_keeping_their_order() {
+        assert_eq!(
+            selected(Origin::All, None),
+            ["project", "internal", "team", "clones"]
+        );
+        assert_eq!(selected(Origin::Remote, None), ["project", "internal"]);
+        assert_eq!(selected(Origin::Local, None), ["team", "clones"]);
+        assert_eq!(selected(Origin::All, Some("team")), ["team"]);
+        assert!(selected(Origin::Remote, Some("team")).is_empty());
+        let error = select_sources(sources(), Origin::All, Some("nope")).unwrap_err();
+        assert_eq!(error.kind(), "unknown-catalogue");
+        assert!(error.to_string().contains("internal"), "{error}");
+    }
+
+    #[test]
+    fn images_and_update_take_a_catalogue_name() {
         use clap::Parser as _;
-        let description = |arguments: &[&str]| match Cli::try_parse_from(arguments).unwrap().command
+        match Cli::try_parse_from(["vm", "images", "--catalogue", "team"])
+            .unwrap()
+            .command
         {
-            Command::Clone { description, .. } => description,
-            _ => panic!("not a clone"),
-        };
-        assert_eq!(description(&["vm", "clone", "a", "b:c"]), None);
-        assert_eq!(
-            description(&["vm", "clone", "a", "b:c", "--description", "With tools"]),
-            Some("With tools".to_owned())
-        );
-        assert!(Cli::try_parse_from(["vm", "clone", "a", "b:c", "--description", ""]).is_err());
+            Command::Images { catalogue, .. } => assert_eq!(catalogue.as_deref(), Some("team")),
+            _ => panic!("not images"),
+        }
+        match Cli::try_parse_from(["vm", "update"]).unwrap().command {
+            Command::Update { catalogue } => assert_eq!(catalogue, None),
+            _ => panic!("not an update"),
+        }
+        match Cli::try_parse_from(["vm", "update", "internal"])
+            .unwrap()
+            .command
+        {
+            Command::Update { catalogue } => assert_eq!(catalogue.as_deref(), Some("internal")),
+            _ => panic!("not an update"),
+        }
     }
 
     #[test]
-    fn an_entry_under_the_local_catalogue_is_local() {
-        let entry = |path: &str| vm_core::catalogue::Entry {
-            name: "x".to_owned(),
-            tag: "y".to_owned(),
-            aliases: Vec::new(),
-            description: String::new(),
-            login: vm_core::catalogue::Login::None,
-            artifacts: Vec::new(),
-            path: std::path::PathBuf::from(path),
+    fn updating_an_unknown_catalogue_names_the_remotes() {
+        let Err(error) = update(&vm_core::config::Config::default(), Some("nope")) else {
+            panic!("an unknown catalogue was updated");
         };
-        let local = std::path::Path::new("/data/vm/local");
-        assert_eq!(
-            origin_of(&entry("/data/vm/local/x/y.toml"), Some(local)),
-            Origin::Local
-        );
-        assert_eq!(
-            origin_of(&entry("/data/vm/catalogue/x/y.toml"), Some(local)),
-            Origin::Remote
-        );
-        assert_eq!(
-            origin_of(&entry("/data/vm/localish/x/y.toml"), Some(local)),
-            Origin::Remote
-        );
-        assert_eq!(
-            origin_of(&entry("/data/vm/local/x/y.toml"), None),
-            Origin::Remote
-        );
+        assert_eq!(error.kind(), "unknown-catalogue");
+        assert!(error.to_string().contains("project"), "{error}");
     }
 
     #[test]

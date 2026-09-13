@@ -1,5 +1,5 @@
 use crate::catalogue::Catalogue;
-use crate::config::Config;
+use crate::config::Remote;
 use crate::error::{Error, Result};
 use crate::tar;
 use std::fs;
@@ -17,18 +17,18 @@ pub struct Updated {
 }
 
 /// Downloads the catalogue and installs it.
-pub fn run(config: &Config, destination: &Path, agent: &ureq::Agent) -> Result<Updated> {
-    let files = fetch(&config.catalogue_url, agent)?;
-    install(&files, config, destination)
+pub fn run(remote: &Remote, destination: &Path, agent: &ureq::Agent) -> Result<Updated> {
+    let files = fetch(&remote.url, agent)?;
+    install(&files, remote, destination)
 }
 
 /// Stages and parses the entries before replacing the live catalogue.
-pub fn install(files: &[tar::File], config: &Config, destination: &Path) -> Result<Updated> {
-    let wanted = select(files, &config.catalogue_path);
+pub fn install(files: &[tar::File], remote: &Remote, destination: &Path) -> Result<Updated> {
+    let wanted = select(files, &remote.path);
     if wanted.is_empty() {
         return Err(Error::EmptyCatalogue {
-            url: config.catalogue_url.clone(),
-            path: config.catalogue_path.clone(),
+            url: remote.url.clone(),
+            path: remote.path.clone(),
         });
     }
     let staging = staging_path(destination);
@@ -45,7 +45,7 @@ pub fn install(files: &[tar::File], config: &Config, destination: &Path) -> Resu
     };
     swap(&staging, destination)?;
     Ok(Updated {
-        url: config.catalogue_url.clone(),
+        url: remote.url.clone(),
         path: destination.to_owned(),
         files: wanted.len(),
         entries,
@@ -194,6 +194,10 @@ mod tests {
         }
     }
 
+    fn remote() -> Remote {
+        crate::config::Config::default().remotes().remove(0)
+    }
+
     impl Drop for Scratch {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
@@ -235,7 +239,7 @@ digest = "sha512:{}"
             ("debian/trixie.toml", entry_toml("debian", "trixie")),
             ("debian/forky.toml", entry_toml("debian", "forky")),
         ]);
-        let updated = install(&files, &Config::default(), &scratch.catalogue()).unwrap();
+        let updated = install(&files, &remote(), &scratch.catalogue()).unwrap();
         assert_eq!(updated.files, 2);
         assert_eq!(updated.entries, 2);
         assert!(scratch.catalogue().join("debian/trixie.toml").is_file());
@@ -245,9 +249,9 @@ digest = "sha512:{}"
     fn an_install_replaces_what_was_there_before() {
         let scratch = Scratch::new("replaces");
         let first = archive(&[("debian/trixie.toml", entry_toml("debian", "trixie"))]);
-        install(&first, &Config::default(), &scratch.catalogue()).unwrap();
+        install(&first, &remote(), &scratch.catalogue()).unwrap();
         let second = archive(&[("ubuntu/noble.toml", entry_toml("ubuntu", "noble"))]);
-        install(&second, &Config::default(), &scratch.catalogue()).unwrap();
+        install(&second, &remote(), &scratch.catalogue()).unwrap();
         assert!(scratch.catalogue().join("ubuntu/noble.toml").is_file());
         assert!(!scratch.catalogue().join("debian/trixie.toml").exists());
     }
@@ -256,9 +260,9 @@ digest = "sha512:{}"
     fn a_catalogue_that_does_not_parse_leaves_the_old_one_in_place() {
         let scratch = Scratch::new("rollback");
         let good = archive(&[("debian/trixie.toml", entry_toml("debian", "trixie"))]);
-        install(&good, &Config::default(), &scratch.catalogue()).unwrap();
+        install(&good, &remote(), &scratch.catalogue()).unwrap();
         let bad = archive(&[("debian/broken.toml", "this is not toml".to_owned())]);
-        let error = install(&bad, &Config::default(), &scratch.catalogue()).unwrap_err();
+        let error = install(&bad, &remote(), &scratch.catalogue()).unwrap_err();
         assert!(matches!(error, Error::CatalogueParse { .. }), "{error}");
         assert!(scratch.catalogue().join("debian/trixie.toml").is_file());
         let loaded = Catalogue::load(&scratch.catalogue()).unwrap();
@@ -269,7 +273,7 @@ digest = "sha512:{}"
     fn a_failed_install_leaves_no_staging_directory_behind() {
         let scratch = Scratch::new("staging");
         let bad = archive(&[("debian/broken.toml", "not toml".to_owned())]);
-        assert!(install(&bad, &Config::default(), &scratch.catalogue()).is_err());
+        assert!(install(&bad, &remote(), &scratch.catalogue()).is_err());
         assert!(!staging_path(&scratch.catalogue()).exists());
     }
 
@@ -280,7 +284,7 @@ digest = "sha512:{}"
             path: "repo-main/README.md".to_owned(),
             contents: b"nothing here".to_vec(),
         }];
-        let error = install(&files, &Config::default(), &scratch.catalogue()).unwrap_err();
+        let error = install(&files, &remote(), &scratch.catalogue()).unwrap_err();
         assert!(matches!(error, Error::EmptyCatalogue { .. }), "{error}");
         assert!(!scratch.catalogue().exists());
     }
@@ -289,8 +293,8 @@ digest = "sha512:{}"
     fn a_successful_install_leaves_no_retired_copy_behind() {
         let scratch = Scratch::new("retired");
         let files = archive(&[("debian/trixie.toml", entry_toml("debian", "trixie"))]);
-        install(&files, &Config::default(), &scratch.catalogue()).unwrap();
-        install(&files, &Config::default(), &scratch.catalogue()).unwrap();
+        install(&files, &remote(), &scratch.catalogue()).unwrap();
+        install(&files, &remote(), &scratch.catalogue()).unwrap();
         assert!(!retired_path(&scratch.catalogue()).exists());
     }
 
@@ -298,7 +302,7 @@ digest = "sha512:{}"
     fn nested_directories_in_the_archive_are_recreated() {
         let scratch = Scratch::new("nested");
         let files = archive(&[("a/b/c/deep.toml", entry_toml("deep", "one"))]);
-        install(&files, &Config::default(), &scratch.catalogue()).unwrap();
+        install(&files, &remote(), &scratch.catalogue()).unwrap();
         assert!(scratch.catalogue().join("a/b/c/deep.toml").is_file());
     }
 

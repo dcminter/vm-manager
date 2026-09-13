@@ -15,6 +15,17 @@ pub enum Error {
         path: PathBuf,
         source: basic_toml::Error,
     },
+    Config {
+        path: PathBuf,
+        reason: String,
+    },
+    UnknownCatalogue {
+        name: String,
+        available: Vec<String>,
+    },
+    UpdateFailed {
+        failed: Vec<String>,
+    },
     CatalogueEntry {
         path: PathBuf,
         reason: String,
@@ -211,6 +222,9 @@ impl Error {
             Self::Reference { .. } => "invalid-reference",
             Self::CatalogueRead { .. } => "catalogue-unreadable",
             Self::CatalogueParse { .. } => "catalogue-unparseable",
+            Self::Config { .. } => "config-invalid",
+            Self::UnknownCatalogue { .. } => "unknown-catalogue",
+            Self::UpdateFailed { .. } => "update-failed",
             Self::CatalogueEntry { .. } => "catalogue-entry-invalid",
             Self::UnknownImage { .. } => "unknown-image",
             Self::UnsupportedArchitecture { .. } => "unsupported-architecture",
@@ -283,6 +297,17 @@ impl fmt::Display for Error {
             }
             Self::CatalogueRead { path, source } => {
                 write!(f, "cannot read catalogue at {}: {source}", path.display())
+            }
+            Self::Config { path, reason } => {
+                write!(f, "{}: {reason}", path.display())
+            }
+            Self::UnknownCatalogue { name, available } => write!(
+                f,
+                "no catalogue named '{name}'; available: {}",
+                available.join(", ")
+            ),
+            Self::UpdateFailed { failed } => {
+                write!(f, "could not update {}", failed.join(", "))
             }
             Self::CatalogueParse { path, source } => {
                 write!(

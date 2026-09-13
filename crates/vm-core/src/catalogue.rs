@@ -83,6 +83,31 @@ impl Artifact {
     }
 }
 
+/// Whether a catalogue is fetched or read where it is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Kind {
+    #[default]
+    Remote,
+    Local,
+}
+
+impl Kind {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Remote => "remote",
+            Self::Local => "local",
+        }
+    }
+}
+
+/// A catalogue directory and what it is called.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    pub name: String,
+    pub kind: Kind,
+    pub directory: PathBuf,
+}
+
 /// A named, tagged image as the catalogue describes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
@@ -94,6 +119,10 @@ pub struct Entry {
     pub artifacts: Vec<Artifact>,
     /// The file the entry was read from.
     pub path: PathBuf,
+    pub catalogue: String,
+    pub kind: Kind,
+    /// Lower catalogues whose entry of the same name this one hides.
+    pub shadows: Vec<String>,
 }
 
 impl Entry {
@@ -132,12 +161,15 @@ impl Catalogue {
         Ok(catalogue)
     }
 
-    /// Reads directories in order, later entries shadowing earlier ones.
-    pub fn load_layered(roots: &[PathBuf]) -> Result<Self> {
+    /// Reads catalogues in order, later entries shadowing earlier ones.
+    pub fn load_layered(sources: &[Source]) -> Result<Self> {
         let mut catalogue = Self::default();
-        for root in roots {
-            let layer = Self::load(root)?;
+        for source in sources {
+            let layer = Self::load(&source.directory)?;
             for entry in layer.entries() {
+                let mut entry = entry.clone();
+                entry.catalogue.clone_from(&source.name);
+                entry.kind = source.kind;
                 catalogue.replace(entry);
             }
         }
@@ -145,9 +177,18 @@ impl Catalogue {
     }
 
     /// Inserts an entry, displacing any with the same names.
-    fn replace(&mut self, entry: &Entry) {
+    fn replace(&mut self, mut entry: Entry) {
         let mut keys = vec![key(&entry.name, &entry.tag)];
         keys.extend(entry.aliases.iter().map(|alias| key(&entry.name, alias)));
+        for candidate in &keys {
+            if let Some(displaced) = self.entries.get(candidate) {
+                for name in std::iter::once(&displaced.catalogue).chain(&displaced.shadows) {
+                    if *name != entry.catalogue && !entry.shadows.contains(name) {
+                        entry.shadows.push(name.clone());
+                    }
+                }
+            }
+        }
         for candidate in keys {
             self.entries.insert(candidate, entry.clone());
         }
@@ -305,6 +346,9 @@ fn read_entry(path: &Path) -> Result<Entry> {
         login: raw.login,
         artifacts,
         path: path.to_owned(),
+        catalogue: String::new(),
+        kind: Kind::Remote,
+        shadows: Vec::new(),
     })
 }
 
@@ -581,6 +625,69 @@ size = 1024
         let message = error.to_string();
         assert!(message.contains("riscv64"), "{message}");
         assert!(message.contains("amd64"), "{message}");
+    }
+
+    fn source(scratch: &Scratch, name: &str, kind: Kind) -> Source {
+        Source {
+            name: name.to_owned(),
+            kind,
+            directory: scratch.0.join(name),
+        }
+    }
+
+    #[test]
+    fn the_last_catalogue_to_name_an_image_wins_and_records_what_it_hides() {
+        let scratch = Scratch::new("layers");
+        scratch.write(
+            "public/debian/trixie.toml",
+            &entry_toml("debian", "trixie", r#""latest""#),
+        );
+        scratch.write(
+            "internal/debian/trixie.toml",
+            &entry_toml("debian", "trixie", ""),
+        );
+        scratch.write(
+            "internal/alpine/edge.toml",
+            &entry_toml("alpine", "edge", ""),
+        );
+        scratch.write(
+            "team/debian/trixie.toml",
+            &entry_toml("debian", "trixie", ""),
+        );
+        let catalogue = Catalogue::load_layered(&[
+            source(&scratch, "public", Kind::Remote),
+            source(&scratch, "internal", Kind::Remote),
+            source(&scratch, "team", Kind::Local),
+            source(&scratch, "absent", Kind::Local),
+        ])
+        .unwrap();
+        let (entry, _) = catalogue
+            .resolve(&reference("debian:trixie"), "amd64")
+            .unwrap();
+        assert_eq!(entry.catalogue, "team");
+        assert_eq!(entry.kind, Kind::Local);
+        assert_eq!(entry.shadows, ["internal", "public"]);
+        assert_eq!(entry.path, scratch.0.join("team/debian/trixie.toml"));
+        let (alias, _) = catalogue
+            .resolve(&reference("debian:latest"), "amd64")
+            .unwrap();
+        assert_eq!(alias.catalogue, "public");
+        let (alpine, _) = catalogue
+            .resolve(&reference("alpine:edge"), "amd64")
+            .unwrap();
+        assert_eq!(
+            (alpine.catalogue.as_str(), alpine.kind),
+            ("internal", Kind::Remote)
+        );
+        assert!(alpine.shadows.is_empty());
+    }
+
+    #[test]
+    fn a_name_used_twice_within_one_catalogue_is_still_an_error() {
+        let scratch = Scratch::new("within");
+        scratch.write("one/debian/a.toml", &entry_toml("debian", "trixie", ""));
+        scratch.write("one/debian/b.toml", &entry_toml("debian", "trixie", ""));
+        assert!(Catalogue::load_layered(&[source(&scratch, "one", Kind::Remote)]).is_err());
     }
 
     #[test]
