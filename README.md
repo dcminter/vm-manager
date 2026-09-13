@@ -3,14 +3,11 @@
 Create and manage QEMU virtual machines from prebuilt OS images, with a command
 set modelled on Docker and various cloud clients.
 
-```bash
-vm images
-vm run --name demo debian:trixie
-vm ssh demo
-vm stop demo
-```
+A simple `vm` command for the command line:
 
-`vmg` does the same in a window:
+![Animated CLI Examples](./docs/cli-animation.gif)
+
+`vmg` or `vm gui` lets you do all the same things with a desktop GUI:
 
 ![The vmg window](docs/vmg.png)
 
