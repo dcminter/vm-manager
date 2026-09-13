@@ -164,6 +164,13 @@ pub enum Error {
         path: PathBuf,
     },
     NoHome,
+    UnusableDefaultUser {
+        name: String,
+        current: bool,
+    },
+    NoCurrentUser {
+        reason: String,
+    },
     CopyBetweenGuests,
     CopyWithoutGuest,
     Signal {
@@ -240,6 +247,8 @@ impl Error {
             Self::NoGuestAccess { .. } => "no-guest-access",
             Self::SshHostTaken { .. } => "ssh-host-taken",
             Self::NoHome => "no-home",
+            Self::UnusableDefaultUser { .. } => "unusable-default-user",
+            Self::NoCurrentUser { .. } => "no-current-user",
             Self::CopyBetweenGuests => "copy-between-guests",
             Self::CopyWithoutGuest => "copy-without-guest",
             Self::Launch { .. } => "launch-failed",
@@ -462,6 +471,25 @@ impl fmt::Display for Error {
             Self::NoHome => write!(
                 f,
                 "HOME is not set, so there is no SSH configuration to add to"
+            ),
+            Self::UnusableDefaultUser {
+                name,
+                current: true,
+            } => write!(
+                f,
+                "'{name}', the name of the user running vm, is not a usable guest account name; \
+                 give --user, or set default_user in config.toml"
+            ),
+            Self::UnusableDefaultUser {
+                name,
+                current: false,
+            } => write!(
+                f,
+                "'{name}', the default_user in config.toml, is not a usable user name"
+            ),
+            Self::NoCurrentUser { reason } => write!(
+                f,
+                "could not find the name of the user running vm ({reason}); give --user"
             ),
             Self::CopyBetweenGuests => write!(
                 f,

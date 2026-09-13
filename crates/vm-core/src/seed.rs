@@ -205,7 +205,7 @@ fn is_hostname(text: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
-fn is_username(text: &str) -> bool {
+pub fn is_username(text: &str) -> bool {
     !text.is_empty()
         && text.len() <= 32
         && text.starts_with(|character: char| character.is_ascii_lowercase() || character == '_')

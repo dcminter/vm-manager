@@ -22,7 +22,16 @@ pub struct Config {
     /// Whether `vm run` adds an SSH configuration entry without being asked to.
     #[serde(default)]
     pub add_ssh_config: bool,
+    /// The account `vm run` creates without `--user`; [`CURRENT_USER`] means the user running `vm`.
+    #[serde(default)]
+    pub default_user: Option<String>,
 }
+
+/// The account `vm run` creates when neither `--user` nor the config names one.
+pub const FALLBACK_USER: &str = "vm";
+
+/// The `default_user` value standing for the user running `vm`.
+pub const CURRENT_USER: &str = "$USER";
 
 const fn default_auto_pull() -> bool {
     true
@@ -43,6 +52,7 @@ impl Default for Config {
             catalogue_path: default_catalogue_path(),
             auto_pull: default_auto_pull(),
             add_ssh_config: false,
+            default_user: None,
         }
     }
 }
@@ -54,6 +64,24 @@ impl Config {
             || Ok(Self::default()),
             |directory| Self::read(&directory.join("config.toml")),
         )
+    }
+
+    /// The account to create when `--user` is not given.
+    pub fn user(&self) -> Result<String> {
+        self.user_with(current_user)
+    }
+
+    fn user_with(&self, current: impl FnOnce() -> Result<String>) -> Result<String> {
+        let (name, current) = match self.default_user.as_deref() {
+            None => return Ok(FALLBACK_USER.to_owned()),
+            Some(CURRENT_USER) => (current()?, true),
+            Some(name) => (name.to_owned(), false),
+        };
+        if crate::seed::is_username(&name) {
+            Ok(name)
+        } else {
+            Err(Error::UnusableDefaultUser { name, current })
+        }
     }
 
     pub fn read(path: &Path) -> Result<Self> {
@@ -68,6 +96,24 @@ impl Config {
                 source,
             }),
         }
+    }
+}
+
+/// The login name of the user running this process.
+fn current_user() -> Result<String> {
+    let output = std::process::Command::new("id")
+        .arg("-un")
+        .output()
+        .map_err(|source| Error::NoCurrentUser {
+            reason: source.to_string(),
+        })?;
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if output.status.success() && !name.is_empty() {
+        Ok(name)
+    } else {
+        Err(Error::NoCurrentUser {
+            reason: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        })
     }
 }
 
@@ -159,6 +205,88 @@ mod tests {
         let config = Config::read(&path).unwrap();
         assert!(config.add_ssh_config);
         assert!(config.auto_pull);
+    }
+
+    #[test]
+    fn the_default_user_is_vm_unless_configured() {
+        assert_eq!(Config::default().user().unwrap(), "vm");
+        let scratch = Scratch::new("defaultuser");
+        let path = scratch.write("default_user = \"dave\"\n");
+        let config = Config::read(&path).unwrap();
+        assert_eq!(config.default_user.as_deref(), Some("dave"));
+        assert_eq!(config.user().unwrap(), "dave");
+    }
+
+    #[test]
+    fn the_current_user_is_used_when_asked_for() {
+        let scratch = Scratch::new("currentuser");
+        let path = scratch.write("default_user = \"$USER\"\n");
+        let config = Config::read(&path).unwrap();
+        assert_eq!(
+            config.user_with(|| Ok("alice".to_owned())).unwrap(),
+            "alice"
+        );
+    }
+
+    #[test]
+    fn the_current_user_is_not_consulted_otherwise() {
+        let config = Config {
+            default_user: Some("dave".to_owned()),
+            ..Config::default()
+        };
+        let user = config.user_with(|| panic!("consulted")).unwrap();
+        assert_eq!(user, "dave");
+        assert_eq!(
+            Config::default().user_with(|| panic!("consulted")).unwrap(),
+            "vm"
+        );
+    }
+
+    #[test]
+    fn an_unusable_configured_user_is_refused() {
+        let config = Config {
+            default_user: Some("Has Space".to_owned()),
+            ..Config::default()
+        };
+        let error = config.user().unwrap_err();
+        assert_eq!(error.kind(), "unusable-default-user");
+        assert!(error.to_string().contains("Has Space"), "{error}");
+    }
+
+    #[test]
+    fn an_unusable_current_user_is_refused_and_says_where_it_came_from() {
+        let config = Config {
+            default_user: Some(CURRENT_USER.to_owned()),
+            ..Config::default()
+        };
+        let error = config
+            .user_with(|| Ok("Dave.Minter".to_owned()))
+            .unwrap_err();
+        assert_eq!(error.kind(), "unusable-default-user");
+        assert!(error.to_string().contains("running vm"), "{error}");
+    }
+
+    #[test]
+    fn a_failure_to_find_the_current_user_is_reported() {
+        let config = Config {
+            default_user: Some(CURRENT_USER.to_owned()),
+            ..Config::default()
+        };
+        let error = config
+            .user_with(|| {
+                Err(Error::NoCurrentUser {
+                    reason: "no such user".to_owned(),
+                })
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), "no-current-user");
+    }
+
+    #[test]
+    fn the_user_running_the_tests_has_a_login_name() {
+        let name = current_user().unwrap();
+        assert!(!name.is_empty());
+        assert!(!name.contains('\n'));
     }
 
     #[test]

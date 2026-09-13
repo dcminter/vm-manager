@@ -34,7 +34,8 @@ pub struct Request {
     pub memory: u64,
     pub cpus: u32,
     pub ports: Vec<Port>,
-    pub user: String,
+    /// Absent defers to the config file.
+    pub user: Option<String>,
     pub shares: Vec<Share>,
     pub disk_size: Option<String>,
     pub pull: Option<Pull>,
@@ -72,9 +73,12 @@ pub fn run(
         });
     }
     let config = vm_core::config::Config::load()?;
-    let ssh_config = request
-        .ssh_config
-        .unwrap_or_else(|| config.add_ssh_config && entry.login.is_seedable());
+    let resolved = Resolved {
+        user: request.user.clone().map_or_else(|| config.user(), Ok)?,
+        ssh_config: request
+            .ssh_config
+            .unwrap_or_else(|| config.add_ssh_config && entry.login.is_seedable()),
+    };
     let pull = match request.pull {
         Some(held) => held,
         None if config.auto_pull => Pull::Missing,
@@ -112,13 +116,13 @@ pub fn run(
         })
     });
     // Refused before a name is claimed.
-    if ssh_config {
+    if resolved.ssh_config {
         vm_core::ssh_config::check_name(&user_ssh_config()?, &name)?;
     }
     let directory = instances.create(&name)?;
     // From here a failure must release the claimed name.
     match build(
-        store, &directory, entry, artifact, request, &instances, ssh_config,
+        store, &directory, entry, artifact, request, &instances, &resolved,
     ) {
         Ok(report) => Ok(report),
         Err(error) => {
@@ -128,6 +132,12 @@ pub fn run(
     }
 }
 
+/// What `vm run` settled on from the request and the config file.
+struct Resolved {
+    user: String,
+    ssh_config: bool,
+}
+
 fn build(
     store: &Store,
     directory: &Directory,
@@ -135,7 +145,7 @@ fn build(
     artifact: &vm_core::catalogue::Artifact,
     request: &Request,
     instances: &Instances,
-    ssh_config: bool,
+    resolved: &Resolved,
 ) -> Result<reports::Run> {
     let name = directory.name();
     let mut held = Instance {
@@ -153,14 +163,14 @@ fn build(
             .unwrap_or_else(|| artifact.cpu().to_owned()),
         machine: request.machine.unwrap_or(artifact.machine),
         disk: request.disk.unwrap_or(artifact.disk),
-        user: request.user.clone(),
+        user: resolved.user.clone(),
         seeded: entry.login.is_seedable(),
         monitor: directory.monitor().to_owned(),
         ssh_port: None,
         pid: None,
         started: None,
         generation: 0,
-        ssh_config,
+        ssh_config: resolved.ssh_config,
         password: request.password.clone(),
         ports: request.ports.clone(),
         shares: request.shares.clone(),

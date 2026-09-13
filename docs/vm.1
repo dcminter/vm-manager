@@ -165,7 +165,11 @@ Share a host directory with the guest over virtiofs, mounted at every boot.
 Repeatable.
 .TP
 .BI \-\-user " NAME"
-The account to create in the guest. Default
+The account to create in the guest. Defaults to
+.B default_user
+in
+.BR vm\-config (5),
+or
 .BR vm .
 .TP
 .BI \-\-disk\-size " SIZE"

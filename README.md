@@ -126,8 +126,10 @@ COMPLETE=fish vm | source
 ## Configuration
 
 `$XDG_CONFIG_HOME/vm/config.toml` is optional. `man vm-config` describes its
-settings: the catalogue source, whether `vm run` fetches missing images, and
-whether machines get an SSH config entry by default.
+settings: the catalogue source, whether `vm run` fetches missing images,
+whether machines get an SSH config entry by default, and `default_user`, the
+account created when `--user` is not given. `default_user = "$USER"` uses the
+name of the user running `vm`.
 
 ## Output
 

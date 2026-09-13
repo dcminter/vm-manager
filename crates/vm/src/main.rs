@@ -79,9 +79,9 @@ enum Command {
         /// Forward a host port to a guest port, as host:guest
         #[arg(long, short, value_parser = machines::parse_port)]
         publish: Vec<vm_core::instance::Port>,
-        /// Account to create in the guest
-        #[arg(long, default_value = "vm", value_parser = machines::parse_user)]
-        user: String,
+        /// Account to create in the guest; defaults to the config file's setting, or vm
+        #[arg(long, value_parser = machines::parse_user)]
+        user: Option<String>,
         /// Share a host directory with the guest, as host:guest
         #[arg(long, short = 'v', value_parser = machines::parse_share)]
         volume: Vec<vm_core::instance::Share>,
@@ -779,6 +779,21 @@ mod tests {
         assert!(
             Cli::try_parse_from(["vm", "run", "x", "--add-ssh-config", "--no-ssh-config"]).is_err()
         );
+    }
+
+    #[test]
+    fn a_run_without_user_leaves_the_account_to_the_config_file() {
+        use clap::Parser as _;
+        let user = |arguments: &[&str]| match Cli::try_parse_from(arguments).unwrap().command {
+            Command::Run { user, .. } => user,
+            _ => panic!("not a run"),
+        };
+        assert_eq!(user(&["vm", "run", "x"]), None);
+        assert_eq!(
+            user(&["vm", "run", "x", "--user", "dave"]),
+            Some("dave".to_owned())
+        );
+        assert!(Cli::try_parse_from(["vm", "run", "x", "--user", "Bad Name"]).is_err());
     }
 
     #[test]

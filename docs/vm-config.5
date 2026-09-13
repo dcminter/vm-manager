@@ -46,6 +46,18 @@ Images without cloud-init get no entry, and
 overrides it. Existing machines are unaffected; use
 .B vm start
 to change them.
+.TP
+.BR default_user " (string)"
+The account
+.B vm run
+creates when
+.B \-\-user
+is not given. The value
+.B $USER
+means the login name of the user running
+.BR vm .
+Default
+.BR vm .
 .SH EXAMPLE
 .RS
 .nf
@@ -53,6 +65,7 @@ catalogue_url = "https://mirror.example.com/vm/catalogue.tar.gz"
 catalogue_path = "catalogue"
 auto_pull = false
 add_ssh_config = true
+default_user = "$USER"
 .fi
 .RE
 .SH SEE ALSO
