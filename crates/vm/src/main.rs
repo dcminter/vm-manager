@@ -1,4 +1,5 @@
 mod completion;
+mod configuration;
 mod console;
 mod machines;
 mod output;
@@ -294,6 +295,11 @@ enum Command {
         #[arg(long, short)]
         force: bool,
     },
+    /// Show the config file, or change a setting or catalogue in it
+    Config {
+        #[command(subcommand)]
+        action: Option<configuration::Action>,
+    },
     /// Remove machines and images nothing needs
     Prune {
         /// Prune only machines or only images
@@ -370,6 +376,9 @@ enum Outcome {
 }
 
 fn run(cli: &Cli, style: Style) -> vm_core::Result<Outcome> {
+    if let Command::Config { action } = &cli.command {
+        return configuration::run(action.as_ref()).map(Outcome::Reported);
+    }
     if let Some(outcome) = machine_command(cli, style)? {
         return Ok(outcome);
     }
@@ -595,6 +604,7 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
         | Command::Console { .. }
         | Command::Screen { .. }
         | Command::Screenshot { .. }
+        | Command::Config { .. }
         | Command::Rm { .. } => unreachable!("handled above"),
     }
 }

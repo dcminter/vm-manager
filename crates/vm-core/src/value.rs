@@ -588,6 +588,26 @@ impl Value {
         }
     }
 }
+/// A TOML basic string holding `text`.
+pub fn toml_string(text: &str) -> String {
+    let mut quoted = String::from("\"");
+    for character in text.chars() {
+        match character {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            control if control.is_control() => {
+                let _ = std::fmt::Write::write_fmt(
+                    &mut quoted,
+                    format_args!("\\u{:04X}", u32::from(control)),
+                );
+            }
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]

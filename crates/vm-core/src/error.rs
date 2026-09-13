@@ -180,6 +180,7 @@ pub enum Error {
         path: PathBuf,
     },
     NoHome,
+    NoConfigDirectory,
     UnusableDefaultUser {
         name: String,
         current: bool,
@@ -267,6 +268,7 @@ impl Error {
             Self::NoGuestAccess { .. } => "no-guest-access",
             Self::SshHostTaken { .. } => "ssh-host-taken",
             Self::NoHome => "no-home",
+            Self::NoConfigDirectory => "no-config-directory",
             Self::UnusableDefaultUser { .. } => "unusable-default-user",
             Self::NoCurrentUser { .. } => "no-current-user",
             Self::CopyBetweenGuests => "copy-between-guests",
@@ -300,6 +302,9 @@ impl fmt::Display for Error {
             }
             Self::Config { path, reason } => {
                 write!(f, "{}: {reason}", path.display())
+            }
+            Self::UnknownCatalogue { name, available } if available.is_empty() => {
+                write!(f, "no catalogue named '{name}'; none is configured")
             }
             Self::UnknownCatalogue { name, available } => write!(
                 f,
@@ -506,6 +511,10 @@ impl fmt::Display for Error {
                 "{} already has a Host entry for '{name}', which the machine's entry would take over; \
                  choose another --name, or leave out --add-ssh-config",
                 path.display()
+            ),
+            Self::NoConfigDirectory => write!(
+                f,
+                "neither XDG_CONFIG_HOME nor HOME is set, so there is nowhere for a config file"
             ),
             Self::NoHome => write!(
                 f,

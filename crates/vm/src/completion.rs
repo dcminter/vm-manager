@@ -112,6 +112,38 @@ pub fn catalogue_name() -> Vec<CompletionCandidate> {
     )
 }
 
+pub fn configured_remote() -> Vec<CompletionCandidate> {
+    configured(|settings| {
+        settings
+            .remotes
+            .into_iter()
+            .map(|remote| remote.name)
+            .collect()
+    })
+}
+
+pub fn configured_local() -> Vec<CompletionCandidate> {
+    configured(|settings| {
+        settings
+            .locals
+            .into_iter()
+            .map(|local| local.name)
+            .collect()
+    })
+}
+
+/// Names the config file itself lists.
+fn configured(names: fn(vm_core::config::Settings) -> Vec<String>) -> Vec<CompletionCandidate> {
+    vm_core::config::Config::path()
+        .and_then(|path| vm_core::config::Settings::read(&path).ok().flatten())
+        .map_or_else(Vec::new, |settings| {
+            names(settings)
+                .into_iter()
+                .map(CompletionCandidate::new)
+                .collect()
+        })
+}
+
 pub fn remote_catalogue_name() -> Vec<CompletionCandidate> {
     vm_core::config::Config::load().map_or_else(
         |_| Vec::new(),

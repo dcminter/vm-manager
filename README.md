@@ -35,6 +35,7 @@ cargo run -p vm -- images
 | `vm inspect <image>` | Show an image's details, origin and users; `--arch` picks a build |
 | `vm pull <image>` | Fetch an image into the local store |
 | `vm update [catalogue]` | Refresh the remote catalogues, or one |
+| `vm config` | Show the config file, or change a setting or catalogue |
 | `vm run <image>` | Create and start a machine |
 | `vm start <name>` | Start a stopped machine, optionally changing its settings |
 | `vm ssh <name>` | Open a shell on a machine, or run a command in it |
@@ -137,11 +138,21 @@ COMPLETE=fish vm | source
 
 ## Configuration
 
-`$XDG_CONFIG_HOME/vm/config.toml` is optional. `man vm-config` describes its
-settings: the catalogues, whether `vm run` fetches missing images, whether
-machines get an SSH config entry by default, and `default_user`, the account
-created when `--user` is not given. `default_user = "$USER"` uses the name of
-the user running `vm`.
+`$XDG_CONFIG_HOME/vm/config.toml` is optional. `vm config` shows where it is,
+what it sets and what is defaulted, and changes it:
+
+```bash
+vm config set default_user '$USER'
+vm config add remote internal https://mirror.example.com/vm/catalogue.tar.gz --path images
+vm config add local team /srv/vm/catalogue
+vm config remove remote internal
+```
+
+Invalid values are refused, and no file is created until a change is made.
+`man vm-config` describes the settings: the catalogues, whether `vm run`
+fetches missing images, whether machines get an SSH config entry by default,
+and `default_user`, the account created when `--user` is not given.
+`default_user = "$USER"` uses the name of the user running `vm`.
 
 Several catalogues can name images. Remote catalogues are fetched by
 `vm update`; local ones are read in place. When two name the same image the

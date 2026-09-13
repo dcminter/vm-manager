@@ -50,6 +50,43 @@ or
 .BR zstd (1);
 the digest covers the file as published.
 .TP
+.B config
+Show the config file's path and every setting and catalogue, marking defaults.
+With no file, say where one would be created; none is created until a change is
+made.
+.RS
+.TP
+.B config path
+Print the config file's path.
+.TP
+.BI "config get " KEY
+Print a setting's value.
+.TP
+.BI "config set " "KEY VALUE"
+Set
+.BR auto_pull ,
+.B add_ssh_config
+or
+.BR default_user .
+An invalid value is refused.
+.TP
+.BI "config unset " KEY
+Remove a setting, restoring its default.
+.TP
+.BI "config add remote " "NAME URL" "\fR [\fB\-\-path \fIPATH\fR] [\fB\-\-before \fINAME\fR]"
+Add a remote catalogue, last or before the one named. Added first, it follows
+.BR project ,
+which stays in use until removed.
+.TP
+.BI "config add local " "NAME DIRECTORY" "\fR [\fB\-\-before \fINAME\fR]"
+Add a local catalogue, last or before the one named.
+.TP
+.BI "config remove remote" "\fR|\fPlocal NAME"
+Remove a catalogue.
+.RE
+.IP
+A change rewrites the file in a standard layout; comments are not kept.
+.TP
 .BR update " [" \fINAME\fR ]
 Refresh every remote catalogue, or the one named. A catalogue that cannot be
 fetched keeps its previous copy, and the command exits 1.

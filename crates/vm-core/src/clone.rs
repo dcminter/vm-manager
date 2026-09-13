@@ -4,6 +4,7 @@ use crate::error::{Error, Result};
 use crate::instance::Instance;
 use crate::reference::{Algorithm, Digest, Reference};
 use crate::store::Store;
+use crate::value::toml_string;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -263,26 +264,6 @@ fn write_entry(
         source,
     })?;
     Ok(path)
-}
-
-/// A TOML basic string holding `text`.
-fn toml_string(text: &str) -> String {
-    let mut quoted = String::from("\"");
-    for character in text.chars() {
-        match character {
-            '"' => quoted.push_str("\\\""),
-            '\\' => quoted.push_str("\\\\"),
-            control if control.is_control() => {
-                let _ = std::fmt::Write::write_fmt(
-                    &mut quoted,
-                    format_args!("\\u{:04X}", u32::from(control)),
-                );
-            }
-            other => quoted.push(other),
-        }
-    }
-    quoted.push('"');
-    quoted
 }
 
 #[cfg(test)]
