@@ -40,7 +40,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     strategy:
-      # One failing distribution should not hide the state of the other.
+      # One failing distribution should not hide the state of the others.
       fail-fast: false
       matrix:
         include:
@@ -48,6 +48,8 @@ jobs:
             container: debian:trixie
           - distribution: noble
             container: ubuntu:24.04
+          - distribution: kali
+            container: kalilinux/kali-rolling
     container: ${{ matrix.container }}
     steps:
       - name: Install the build environment

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Builds the vm-manager and vm-manager-gui .debs: scripts/package <trixie|noble> <version> [output directory]
+# Builds the vm-manager and vm-manager-gui .debs: scripts/package <trixie|noble|kali> <version> [output directory]
 
 set -euo pipefail
 
-distribution="${1:?usage: package <trixie|noble> <version> [outdir]}"
-version="${2:?usage: package <trixie|noble> <version> [outdir]}"
+distribution="${1:?usage: package <trixie|noble|kali> <version> [outdir]}"
+version="${2:?usage: package <trixie|noble|kali> <version> [outdir]}"
 outdir="${3:-target/packages}"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,8 +26,16 @@ noble)
     suggests="tigervnc-viewer, vm-manager-gui"
     gui_depends="libgtk-4-1, libadwaita-1-0, libvte-2.91-gtk4-0, libglib2.0-0t64"
     ;;
+kali)
+    # Kali has no releases, only the rolling branch.
+    suffix="kali-rolling"
+    depends="qemu-system-x86, qemu-utils, openssh-client, virtiofsd, procps"
+    recommends="ovmf, xz-utils, zstd"
+    suggests="tigervnc-viewer, vm-manager-gui"
+    gui_depends="libgtk-4-1, libadwaita-1-0, libvte-2.91-gtk4-0, libglib2.0-0t64"
+    ;;
 *)
-    echo "package: unknown distribution '$distribution'; expected trixie or noble" >&2
+    echo "package: unknown distribution '$distribution'; expected trixie, noble or kali" >&2
     exit 2
     ;;
 esac
