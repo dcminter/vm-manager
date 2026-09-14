@@ -160,6 +160,9 @@ pub enum Error {
         scheme: &'static str,
         reason: String,
     },
+    Archive {
+        reason: String,
+    },
     Clone {
         reason: String,
     },
@@ -300,6 +303,7 @@ impl Error {
             Self::UnreadableSource { .. } => "unreadable-source",
 
             Self::Decompress { .. } => "decompression-failed",
+            Self::Archive { .. } => "archive-unreadable",
             Self::MachineSetting { .. } => "invalid-machine-setting",
             Self::Password { .. } => "unusable-password",
             Self::PasswordUnseeded { .. } => "password-needs-seed",
@@ -507,6 +511,9 @@ impl fmt::Display for Error {
             }
             Self::Decompress { scheme, reason } => {
                 write!(f, "cannot expand the {scheme} image: {reason}")
+            }
+            Self::Archive { reason } => {
+                write!(f, "cannot take the image from its archive: {reason}")
             }
             Self::ImageExists {
                 reference,

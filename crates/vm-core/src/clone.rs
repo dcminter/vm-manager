@@ -140,6 +140,7 @@ fn write_entry(
         size: Some(size),
         compression: Compression::None,
         source_format: None,
+        archive_member: None,
         media: Media::Disk,
         firmware: instance.firmware,
         cpu_model: (instance.cpu_model != crate::machine::DEFAULT_CPU_MODEL)

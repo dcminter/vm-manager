@@ -75,6 +75,8 @@ struct RawImage {
     compression: Compression,
     /// Absent when published in `format`.
     source_format: Option<String>,
+    /// The file in a published tar archive that is the image.
+    archive_member: Option<String>,
     #[serde(default)]
     media: Media,
     #[serde(default)]
@@ -102,6 +104,8 @@ pub struct Artifact {
     pub compression: Compression,
     /// The published image's format, where a pull converts it to `format`.
     pub source_format: Option<String>,
+    /// The file in a published tar archive that is the image.
+    pub archive_member: Option<String>,
     pub media: Media,
     pub firmware: Firmware,
     /// The CPU model this image needs, where the default will not boot it.
@@ -369,6 +373,9 @@ impl NewEntry<'_> {
         if let Some(format) = &artifact.source_format {
             let _ = writeln!(body, "source_format = {}", toml_string(format));
         }
+        if let Some(member) = &artifact.archive_member {
+            let _ = writeln!(body, "archive_member = {}", toml_string(member));
+        }
         if artifact.media.is_cdrom() {
             let _ = writeln!(body, "media = \"{}\"", artifact.media.name());
         }
@@ -449,6 +456,13 @@ fn check_media(image: &RawImage) -> std::result::Result<(), &'static str> {
     if image.media.is_cdrom() && (image.format != "raw" || image.source_format.is_some()) {
         return Err("a cdrom image needs format = \"raw\" and no source_format");
     }
+    if image
+        .archive_member
+        .as_deref()
+        .is_some_and(|member| member.is_empty() || member.chars().any(char::is_control))
+    {
+        return Err("an archive_member names a file with a non-empty path of plain characters");
+    }
     Ok(())
 }
 
@@ -486,6 +500,7 @@ fn read_entry(path: &Path) -> Result<Entry> {
                 size: image.size,
                 compression: image.compression,
                 source_format: image.source_format,
+                archive_member: image.archive_member,
                 media: image.media,
                 firmware: image.firmware,
                 cpu_model: match image.cpu_model {
@@ -637,6 +652,28 @@ digest = "sha256:{}"
     }
 
     #[test]
+    fn an_image_can_be_published_inside_an_archive() {
+        let artifact = artifact_of(&image_entry(
+            "qcow2",
+            "compression = \"xz\"\nsource_format = \"raw\"\narchive_member = \"disk.raw\"",
+        ))
+        .unwrap();
+        assert_eq!(artifact.archive_member.as_deref(), Some("disk.raw"));
+        assert_eq!(artifact.source_format.as_deref(), Some("raw"));
+        for member in ["\"\"", "\"disk\\nraw\""] {
+            let error = artifact_of(&image_entry(
+                "qcow2",
+                &format!(
+                    "archive_member = {member}\n# {}",
+                    "x".repeat(member.len() + 40)
+                ),
+            ))
+            .unwrap_err();
+            assert!(error.to_string().contains("archive_member"), "{error}");
+        }
+    }
+
+    #[test]
     fn a_cdrom_image_is_raw_and_published_as_it_is() {
         let artifact = artifact_of(&image_entry("raw", "media = \"cdrom\"")).unwrap();
         assert!(artifact.media.is_cdrom());
@@ -678,6 +715,7 @@ digest = "sha256:{}"
             size: Some(10),
             compression: Compression::None,
             source_format: None,
+            archive_member: None,
             media: Media::Disk,
             firmware: Firmware::Bios,
             cpu_model: None,
@@ -692,6 +730,7 @@ digest = "sha256:{}"
             url: Some("https://example.invalid/a \"b\".vmdk.xz".to_owned()),
             compression: Compression::Xz,
             source_format: Some("vmdk".to_owned()),
+            archive_member: Some("images/disk.vmdk".to_owned()),
             firmware: Firmware::Uefi,
             cpu_model: Some("Penryn,+avx".to_owned()),
             machine: Chipset::Pc,

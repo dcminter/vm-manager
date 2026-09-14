@@ -67,21 +67,21 @@ not match the catalogue is refused.
 ## Images
 
 The catalogue ships with `debian`, `ubuntu`, `fedora`, `centos`, `almalinux`,
-`rocky`, `opensuse`, `alpine`, `arch`, `omnios`, `freebsd`, `netbsd`, `9front`
-and `puredarwin`, several releases apiece. Each entry names a dated build and
-its publisher's checksum, which `vm pull` verifies.
+`rocky`, `opensuse`, `alpine`, `arch`, `kali`, `omnios`, `freebsd`, `netbsd`,
+`9front` and `puredarwin`, several releases apiece. Each entry names a dated
+build and its publisher's checksum, which `vm pull` verifies.
 
-An entry may declare that its image is compressed (`compression`), its
-`format`, a `source_format` to convert to qcow2 when pulled, `media = "cdrom"`
-for a CD-ROM image, and hardware it needs: `firmware`, `cpu_model`, `machine` and
-`disk`.
+An entry may declare that its image is compressed (`compression`), the file in
+a tar archive that is the image (`archive_member`), its `format`, a
+`source_format` to convert to qcow2 when pulled, `media = "cdrom"` for a CD-ROM
+image, and hardware it needs: `firmware`, `cpu_model`, `machine` and `disk`.
 
 ### Importing
 
 `vm import` names a local file or an `http` or `https` URL as an image in the
-`store` catalogue. The source may be compressed with xz, gzip or zstd. A disk
-image, such as vmdk, vdi, vhdx or raw, is converted to qcow2; an ISO CD-ROM
-image is kept as it is.
+`store` catalogue. The source may be compressed with xz, gzip or zstd, and may
+be a tar archive holding one file. A disk image, such as vmdk, vdi, vhdx or
+raw, is converted to qcow2; an ISO CD-ROM image is kept as it is.
 
 ```bash
 vm import ./appliance.vmdk appliance:1.0

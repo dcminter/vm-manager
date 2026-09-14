@@ -820,6 +820,9 @@ fn build_group(held: &Inspect, title: &str) -> Group {
         ),
         Row::new("Published compression", held.compression.clone()),
     ];
+    if let Some(member) = &held.archive_member {
+        build.push(Row::new("In a tar archive as", member.clone()));
+    }
     if let Some(format) = &held.source_format {
         build.push(Row::new("Converted from", format.clone()));
     }
@@ -1241,6 +1244,7 @@ mod tests {
             format: "qcow2".to_owned(),
             compression: "none".to_owned(),
             source_format: None,
+            archive_member: None,
             media: vm_core::catalogue::Media::Disk,
             url: None,
             digest: String::new(),

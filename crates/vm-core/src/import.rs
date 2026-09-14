@@ -9,6 +9,7 @@ use crate::error::{Error, Result};
 use crate::machine::{Chipset, Disk, Firmware};
 use crate::reference::{Algorithm, Digest, Reference};
 use crate::store::{self, Progress, Store};
+use crate::tar;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -162,6 +163,8 @@ struct Received {
     /// The hex hash of the bytes as published.
     hash: String,
     compression: Compression,
+    /// The file taken from the source, when it was a tar archive.
+    member: Option<String>,
     /// The expanded image: the file given, or a staged copy.
     path: PathBuf,
     /// Where it came from, as it is described.
@@ -191,7 +194,8 @@ fn import(
     let in_place = received.path != staged.received;
     let prepared = prepare(&received.path, in_place, staged, report)?;
     let fetchable = request.fetchable && request.source.is_url();
-    let unchanged = !prepared.converted && received.compression.is_none();
+    let unchanged =
+        !prepared.converted && received.compression.is_none() && received.member.is_none();
     let digest = if fetchable || (unchanged && algorithm == ALGORITHM) {
         store.place(&prepared.path, &published)?;
         published
@@ -220,6 +224,7 @@ fn import(
             Compression::None
         },
         source_format: (fetchable && prepared.converted).then(|| prepared.format.clone()),
+        archive_member: received.member.clone().filter(|_| fetchable),
         media: prepared.media,
         firmware: request.hardware.firmware,
         cpu_model: request.hardware.cpu_model.clone(),
@@ -253,7 +258,7 @@ fn import(
     })
 }
 
-/// Reads the source through, expanding it if it is compressed.
+/// Reads the source through, expanding it if it is compressed and unpacking it if it is an archive.
 fn receive(
     source: &Source,
     staged: &Path,
@@ -290,29 +295,39 @@ fn receive(
     };
     let mut head = Vec::new();
     (&mut stream)
-        .take(6)
+        .take(512)
         .read_to_end(&mut head)
         .map_err(failed)?;
     let compression = conversion::sniff(&head);
+    let archive = tar::is_archive(&head);
     let mut stream = std::io::Cursor::new(head).chain(stream);
     let mut observe = |received| report(Event::Receiving(Progress { received, total }));
     match file {
         // Read where it is, since a descriptor's extents sit beside it.
-        Some(path) if compression.is_none() => {
+        Some(path) if compression.is_none() && !archive => {
             let (_, hash) =
                 digest::copy_hashing(&mut stream, std::io::sink(), algorithm, &mut observe)
                     .map_err(failed)?;
             Ok(Received {
                 hash,
                 compression,
+                member: None,
                 path,
                 origin,
             })
         }
         _ => {
-            let hash = store::receive(&mut stream, compression, algorithm, staged, &mut observe)?;
+            let received = store::receive(
+                &mut stream,
+                compression,
+                store::Unpack::Detect,
+                algorithm,
+                staged,
+                &mut observe,
+            )?;
             Ok(Received {
-                hash,
+                hash: received.hash,
+                member: received.member,
                 compression,
                 path: staged.to_owned(),
                 origin,
@@ -561,6 +576,103 @@ mod tests {
         assert_eq!(format_of(&imported.path), "qcow2");
         assert_eq!(imported.artifact.compression, Compression::None);
         assert!(scratch.staged().is_empty(), "{:?}", scratch.staged());
+    }
+
+    #[test]
+    fn the_image_in_an_archive_file_is_taken_out_and_converted() {
+        let Some(scratch) = Scratch::new("archivefile") else {
+            return;
+        };
+        let raw = fs::read(scratch.image("disk.raw", "raw")).unwrap();
+        let Some(archive) = crate::testing::tarred(&[("disk.raw", &raw)]) else {
+            return;
+        };
+        let packed = scratch.0.join("image.tar.xz");
+        fs::write(&packed, pack("xz", &archive)).unwrap();
+        let imported = scratch
+            .import(&Source::File(packed), "mine:1", |_| {})
+            .unwrap();
+        assert_eq!(imported.format, "raw");
+        assert_eq!(format_of(&imported.path), "qcow2");
+        assert_eq!(imported.artifact.archive_member, None);
+        assert_eq!(
+            imported.artifact.digest,
+            sha256(&fs::read(&imported.path).unwrap())
+        );
+        assert!(scratch.staged().is_empty(), "{:?}", scratch.staged());
+    }
+
+    #[test]
+    fn an_uncompressed_archive_file_is_stored_as_its_image_not_as_the_archive() {
+        let Some(scratch) = Scratch::new("plainarchive") else {
+            return;
+        };
+        let qcow2 = fs::read(scratch.image("disk.qcow2", "qcow2")).unwrap();
+        let Some(archive) = crate::testing::tarred(&[("disk.qcow2", &qcow2)]) else {
+            return;
+        };
+        let tarball = scratch.0.join("image.tar");
+        fs::write(&tarball, &archive).unwrap();
+        let imported = scratch
+            .import(&Source::File(tarball), "mine:1", |_| {})
+            .unwrap();
+        assert_eq!(fs::read(&imported.path).unwrap(), qcow2);
+        assert_eq!(imported.artifact.digest, sha256(&qcow2));
+        assert_ne!(imported.artifact.digest, sha256(&archive));
+    }
+
+    #[test]
+    fn an_archive_download_stays_fetchable_by_its_member() {
+        let Some(scratch) = Scratch::new("archiveurl") else {
+            return;
+        };
+        let raw = fs::read(scratch.image("disk.raw", "raw")).unwrap();
+        let Some(archive) = crate::testing::tarred(&[("disk.raw", &raw)]) else {
+            return;
+        };
+        let published = pack("gzip", &archive);
+        let source = Source::Url(serve(published.clone()));
+        let imported = scratch.import(&source, "mine:1", |_| {}).unwrap();
+        let artifact = &imported.artifact;
+        assert_eq!(artifact.digest, sha256(&published));
+        assert_eq!(artifact.compression, Compression::Gzip);
+        assert_eq!(artifact.archive_member.as_deref(), Some("disk.raw"));
+        assert_eq!(artifact.source_format.as_deref(), Some("raw"));
+
+        fs::remove_file(&imported.path).unwrap();
+        let catalogue = scratch.catalogue();
+        let (_, written) = catalogue
+            .resolve(&"mine:1".parse().unwrap(), "amd64")
+            .unwrap();
+        assert_eq!(written.archive_member.as_deref(), Some("disk.raw"));
+        let refetched = Artifact {
+            url: Some(serve(published)),
+            ..written.clone()
+        };
+        scratch
+            .store()
+            .pull(&refetched, &store::http_agent(), &mut |_| {}, None)
+            .unwrap();
+        assert_eq!(format_of(&imported.path), "qcow2");
+    }
+
+    #[test]
+    fn an_archive_of_several_files_is_refused_and_nothing_is_left_behind() {
+        let Some(scratch) = Scratch::new("severalfiles") else {
+            return;
+        };
+        let Some(archive) = crate::testing::tarred(&[("a.vmdk", b"a"), ("b.ovf", b"b")]) else {
+            return;
+        };
+        let tarball = scratch.0.join("appliance.ova");
+        fs::write(&tarball, archive).unwrap();
+        let error = scratch
+            .import(&Source::File(tarball), "mine:1", |_| {})
+            .unwrap_err();
+        assert_eq!(error.kind(), "archive-unreadable", "{error}");
+        assert!(error.to_string().contains("a.vmdk, b.ovf"), "{error}");
+        assert!(scratch.staged().is_empty(), "{:?}", scratch.staged());
+        assert!(scratch.catalogue().entries().is_empty());
     }
 
     #[test]

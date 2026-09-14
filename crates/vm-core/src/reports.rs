@@ -64,6 +64,8 @@ pub struct Inspect {
     pub compression: String,
     /// The published format, when the image is converted on pull.
     pub source_format: Option<String>,
+    /// The file in the published tar archive that is the image.
+    pub archive_member: Option<String>,
     pub media: Media,
     pub url: Option<String>,
     pub digest: String,
@@ -99,6 +101,7 @@ impl Inspect {
             format: artifact.format.clone(),
             compression: artifact.compression.name().to_owned(),
             source_format: artifact.source_format.clone(),
+            archive_member: artifact.archive_member.clone(),
             media: artifact.media,
             url: artifact.url.clone(),
             digest: artifact.digest.to_string(),

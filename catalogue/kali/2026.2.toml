@@ -1,0 +1,25 @@
+name = "kali"
+tag = "2026.2"
+aliases = ["latest"]
+description = "Kali Linux 2026.2 generic cloud image"
+login = "cloud-init"
+
+[[image]]
+arch = "amd64"
+format = "qcow2"
+url = "https://kali.download/cloud-images/kali-2026.2/kali-linux-2026.2-cloud-genericcloud-amd64.tar.xz"
+digest = "sha256:3f4ca86ae1eca0dc2bf2092f065a959508e186c6b44f85758813a8e9a0604f3e"
+size = 1084227584
+compression = "xz"
+source_format = "raw"
+archive_member = "disk.raw"
+
+[[image]]
+arch = "arm64"
+format = "qcow2"
+url = "https://kali.download/cloud-images/kali-2026.2/kali-linux-2026.2-cloud-genericcloud-arm64.tar.xz"
+digest = "sha256:9ab19c28d049fdc6f1d5d30f6cc93b8b01997f11c89f6992f690c07b16b7b7e4"
+size = 1243217920
+compression = "xz"
+source_format = "raw"
+archive_member = "disk.raw"

@@ -4,6 +4,7 @@ use crate::conversion::{self, Conversion, Converting};
 use crate::digest;
 use crate::error::{Error, Result};
 use crate::reference::{Algorithm, Digest};
+use crate::tar;
 use crate::value::toml_string;
 use std::fs;
 use std::io::Read;
@@ -112,19 +113,27 @@ impl Store {
         let url = Self::source(artifact)?;
         let response = get(agent, url)?;
         // The entry's size is the stored file's, not the download's.
-        let stated = (artifact.compression.is_none() && artifact.source_format.is_none())
-            .then_some(artifact.size)
-            .flatten();
+        let stated = (artifact.compression.is_none()
+            && artifact.source_format.is_none()
+            && artifact.archive_member.is_none())
+        .then_some(artifact.size)
+        .flatten();
         let total = content_length(&response).or(stated);
         let mut body = response.into_body().into_reader();
         let mut observe = |received| report(Progress { received, total });
+        let unpack = artifact
+            .archive_member
+            .as_deref()
+            .map_or(Unpack::Plain, Unpack::Member);
         let actual = receive(
             &mut body,
             artifact.compression,
+            unpack,
             artifact.digest.algorithm(),
             partial,
             &mut observe,
-        )?;
+        )?
+        .hash;
         if !digest::matches(&artifact.digest, &actual) {
             return Err(Error::DigestMismatch {
                 url: url.clone(),
@@ -247,30 +256,187 @@ pub fn get(agent: &ureq::Agent, url: &str) -> Result<ureq::http::Response<ureq::
     Ok(response)
 }
 
-/// Writes a published stream to `destination` expanded, returning the hash of the bytes as published.
+/// Whether a published stream is a tar archive holding the image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unpack<'a> {
+    /// The stream is the image.
+    Plain,
+    /// The image is this file in the archive.
+    Member(&'a str),
+    /// The stream is an archive holding one file, or else the image.
+    Detect,
+}
+
+/// What a stream yielded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Received {
+    /// The hex hash of the bytes as published.
+    pub hash: String,
+    /// The file taken from an archive, if the stream was one.
+    pub member: Option<String>,
+}
+
+/// Writes a published stream to `destination` expanded and unpacked, hashing the bytes as published.
 pub fn receive(
     body: &mut impl Read,
     compression: Compression,
+    unpack: Unpack<'_>,
     algorithm: Algorithm,
     destination: &Path,
     observe: &mut dyn FnMut(u64),
-) -> Result<String> {
-    let file = fs::File::create(destination).map_err(|source| Error::Store {
-        path: destination.to_owned(),
-        action: "create",
-        source,
-    })?;
-    if let Some(command) = compression.command() {
-        return expand(command, compression, algorithm, body, file, observe);
-    }
-    let mut sink = std::io::BufWriter::new(file);
-    digest::copy_hashing(body, &mut sink, algorithm, observe)
-        .map(|(_, hash)| hash)
+) -> Result<Received> {
+    let file = fs::File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(destination)
         .map_err(|source| Error::Store {
             path: destination.to_owned(),
-            action: "write",
+            action: "create",
             source,
-        })
+        })?;
+    if unpack != Unpack::Plain {
+        return unpacking(
+            body,
+            compression,
+            unpack,
+            algorithm,
+            file,
+            destination,
+            observe,
+        );
+    }
+    let hash = if let Some(command) = compression.command() {
+        expand(command, compression, algorithm, body, file, observe)?
+    } else {
+        let mut sink = std::io::BufWriter::new(file);
+        digest::copy_hashing(body, &mut sink, algorithm, observe)
+            .map(|(_, hash)| hash)
+            .map_err(|source| Error::Store {
+                path: destination.to_owned(),
+                action: "write",
+                source,
+            })?
+    };
+    Ok(Received { hash, member: None })
+}
+
+/// Streams a download through any decompressor into the archive reader.
+fn unpacking(
+    body: &mut impl Read,
+    compression: Compression,
+    unpack: Unpack<'_>,
+    algorithm: Algorithm,
+    mut file: fs::File,
+    destination: &Path,
+    observe: &mut dyn FnMut(u64),
+) -> Result<Received> {
+    let written = |source| Error::Store {
+        path: destination.to_owned(),
+        action: "write",
+        source,
+    };
+    std::thread::scope(|scope| {
+        let (hashed, extracted) = if let Some(mut command) = compression.command() {
+            let scheme = compression.name();
+            let mut child = command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|source| compression.missing(&source))?;
+            let (Some(mut stdin), Some(mut stdout)) = (child.stdin.take(), child.stdout.take())
+            else {
+                return Err(Error::Decompress {
+                    scheme,
+                    reason: "the decompressor was given no pipes".to_owned(),
+                });
+            };
+            let reader = scope.spawn(move || unpack_stream(&mut stdout, unpack, &mut file));
+            let hashed =
+                digest::copy_hashing(body, &mut stdin, algorithm, observe).map(|(_, hash)| hash);
+            drop(stdin);
+            let extracted = reader.join();
+            let finished = child
+                .wait_with_output()
+                .map_err(|source| Error::Decompress {
+                    scheme,
+                    reason: source.to_string(),
+                })?;
+            if !finished.status.success() {
+                return Err(Error::Decompress {
+                    scheme,
+                    reason: complaint(&finished),
+                });
+            }
+            (hashed, extracted)
+        } else {
+            let mut hashed = HashedReader {
+                inner: body,
+                hashing: digest::Hashing::new(std::io::sink(), algorithm),
+                observe,
+            };
+            let extracted = unpack_stream(&mut hashed, unpack, &mut file);
+            (Ok(hashed.hashing.finish().1), Ok(extracted))
+        };
+        let member = match extracted {
+            Ok(Ok(Ok(member))) => member,
+            Ok(Ok(Err(malformed))) => {
+                return Err(Error::Archive {
+                    reason: malformed.to_string(),
+                });
+            }
+            Ok(Err(source)) => return Err(written(source)),
+            Err(_) => {
+                return Err(Error::Archive {
+                    reason: "the archive reader failed".to_owned(),
+                });
+            }
+        };
+        let hash = hashed.map_err(written)?;
+        Ok(Received { hash, member })
+    })
+}
+
+/// A reader that hashes what passes through it and reports how much has.
+struct HashedReader<'a, R> {
+    inner: &'a mut R,
+    hashing: digest::Hashing<std::io::Sink>,
+    observe: &'a mut dyn FnMut(u64),
+}
+
+impl<R: Read> Read for HashedReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        use std::io::Write as _;
+        let count = self.inner.read(buffer)?;
+        self.hashing.write_all(&buffer[..count])?;
+        (self.observe)(self.hashing.written());
+        Ok(count)
+    }
+}
+
+/// Takes the image out of an archive stream, or copies a stream that is not one.
+fn unpack_stream(
+    source: &mut impl Read,
+    unpack: Unpack<'_>,
+    file: &mut fs::File,
+) -> std::io::Result<std::result::Result<Option<String>, tar::Malformed>> {
+    let wanted = match unpack {
+        Unpack::Member(member) => tar::Wanted::Named(member),
+        Unpack::Detect | Unpack::Plain => {
+            let mut head = Vec::new();
+            (&mut *source).take(512).read_to_end(&mut head)?;
+            let mut source = std::io::Cursor::new(head).chain(source);
+            if unpack == Unpack::Plain || !tar::is_archive(source.get_ref().0.get_ref()) {
+                std::io::copy(&mut source, file)?;
+                return Ok(Ok(None));
+            }
+            return tar::extract(&mut source, tar::Wanted::Only, file)
+                .map(|outcome| outcome.map(Some));
+        }
+    };
+    tar::extract(source, wanted, file).map(|outcome| outcome.map(Some))
 }
 
 /// Rewrites a fetched image as qcow2, refusing one that would read other files on this host.
@@ -436,6 +602,7 @@ mod tests {
             size: Some(1024),
             compression: Compression::None,
             source_format: None,
+            archive_member: None,
             media: crate::catalogue::Media::Disk,
             firmware: crate::machine::Firmware::Bios,
             cpu_model: None,
@@ -790,17 +957,201 @@ mod tests {
             };
             let destination = scratch.0.join(scheme.name());
             let mut ignored = |_| {};
-            let hash = receive(
+            let received = receive(
                 &mut &published[..],
                 scheme,
+                Unpack::Plain,
                 Algorithm::Sha256,
                 &destination,
                 &mut ignored,
             )
             .unwrap();
-            assert_eq!(hash, hex(&published), "{scheme:?}");
+            assert_eq!(received.hash, hex(&published), "{scheme:?}");
+            assert_eq!(received.member, None, "{scheme:?}");
             assert_eq!(fs::read(&destination).unwrap(), plain, "{scheme:?}");
         }
+    }
+
+    fn published(scheme: Compression, archive: &[u8]) -> Vec<u8> {
+        if scheme.is_none() {
+            archive.to_vec()
+        } else {
+            packed(scheme, archive)
+        }
+    }
+
+    const SCHEMES: [Compression; 4] = [
+        Compression::None,
+        Compression::Gzip,
+        Compression::Xz,
+        Compression::Zstd,
+    ];
+
+    #[test]
+    fn a_member_is_taken_from_an_archive_however_it_is_compressed() {
+        let scratch = Scratch::new("member");
+        let disk = b"disk bytes".repeat(50_000);
+        let Some(archive) =
+            crate::testing::tarred(&[("readme.txt", b"read me"), ("disk.raw", &disk)])
+        else {
+            return;
+        };
+        for scheme in SCHEMES {
+            let bytes = published(scheme, &archive);
+            let destination = scratch.0.join(format!("member-{}", scheme.name()));
+            let mut seen = 0;
+            let received = receive(
+                &mut &bytes[..],
+                scheme,
+                Unpack::Member("disk.raw"),
+                Algorithm::Sha256,
+                &destination,
+                &mut |received| seen = received,
+            )
+            .unwrap();
+            assert_eq!(received.hash, hex(&bytes), "{scheme:?}");
+            assert_eq!(received.member.as_deref(), Some("disk.raw"), "{scheme:?}");
+            assert_eq!(fs::read(&destination).unwrap(), disk, "{scheme:?}");
+            assert_eq!(seen, bytes.len() as u64, "{scheme:?}");
+        }
+    }
+
+    #[test]
+    fn detection_unpacks_an_archive_of_one_file_and_passes_anything_else_through() {
+        let scratch = Scratch::new("detect");
+        let disk = vec![3u8; 70_000];
+        let Some(archive) = crate::testing::tarred(&[("images/disk.qcow2", &disk)]) else {
+            return;
+        };
+        for scheme in SCHEMES {
+            let destination = scratch.0.join(format!("detect-{}", scheme.name()));
+            let bytes = published(scheme, &archive);
+            let received = receive(
+                &mut &bytes[..],
+                scheme,
+                Unpack::Detect,
+                Algorithm::Sha256,
+                &destination,
+                &mut |_| {},
+            )
+            .unwrap();
+            assert_eq!(received.member.as_deref(), Some("images/disk.qcow2"));
+            assert_eq!(fs::read(&destination).unwrap(), disk, "{scheme:?}");
+
+            let bytes = published(scheme, &disk);
+            let received = receive(
+                &mut &bytes[..],
+                scheme,
+                Unpack::Detect,
+                Algorithm::Sha256,
+                &destination,
+                &mut |_| {},
+            )
+            .unwrap();
+            assert_eq!(received.member, None, "{scheme:?}");
+            assert_eq!(received.hash, hex(&bytes), "{scheme:?}");
+            assert_eq!(fs::read(&destination).unwrap(), disk, "{scheme:?}");
+        }
+        let short = b"under a block";
+        let received = receive(
+            &mut &short[..],
+            Compression::None,
+            Unpack::Detect,
+            Algorithm::Sha256,
+            &destination_of(&scratch),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(received.member, None);
+        assert_eq!(fs::read(destination_of(&scratch)).unwrap(), short);
+    }
+
+    fn destination_of(scratch: &Scratch) -> PathBuf {
+        scratch.0.join("destination")
+    }
+
+    #[test]
+    fn an_archive_without_the_member_is_refused_after_being_read_through() {
+        let scratch = Scratch::new("nomember");
+        // Larger than a pipe's buffer, so a reader that stopped early would block the writer.
+        let filler = vec![9u8; 4 << 20];
+        let Some(archive) = crate::testing::tarred(&[("a.raw", &filler), ("b.raw", b"b")]) else {
+            return;
+        };
+        for scheme in SCHEMES {
+            let bytes = published(scheme, &archive);
+            let error = receive(
+                &mut &bytes[..],
+                scheme,
+                Unpack::Member("disk.raw"),
+                Algorithm::Sha256,
+                &destination_of(&scratch),
+                &mut |_| {},
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), "archive-unreadable", "{scheme:?}");
+            assert!(error.to_string().contains("disk.raw"), "{error}");
+            let error = receive(
+                &mut &bytes[..],
+                scheme,
+                Unpack::Detect,
+                Algorithm::Sha256,
+                &destination_of(&scratch),
+                &mut |_| {},
+            )
+            .unwrap_err();
+            assert_eq!(error.kind(), "archive-unreadable", "{scheme:?}");
+            assert!(error.to_string().contains("a.raw, b.raw"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_corrupt_compressed_archive_is_refused_as_a_decompression_failure() {
+        let scratch = Scratch::new("corruptmember");
+        let Some(archive) = crate::testing::tarred(&[("disk.raw", &vec![1u8; 100_000])]) else {
+            return;
+        };
+        let mut bytes = packed(Compression::Gzip, &archive);
+        let middle = bytes.len() / 2;
+        bytes.truncate(middle);
+        let error = receive(
+            &mut &bytes[..],
+            Compression::Gzip,
+            Unpack::Member("disk.raw"),
+            Algorithm::Sha256,
+            &destination_of(&scratch),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), "decompression-failed", "{error}");
+    }
+
+    #[test]
+    fn an_image_published_inside_an_archive_is_stored_as_qcow2() {
+        let scratch = Scratch::new("archivepull");
+        let store = scratch.store();
+        let Some(raw) = image_bytes(&scratch, "raw") else {
+            return;
+        };
+        let Some(archive) = crate::testing::tarred(&[("disk.raw", &raw)]) else {
+            return;
+        };
+        let packed = packed(Compression::Xz, &archive);
+        let fetched = Artifact {
+            url: Some(crate::testing::serve(packed.clone())),
+            digest: Digest::from_str(&format!("sha256:{}", hex(&packed))).unwrap(),
+            compression: Compression::Xz,
+            source_format: Some("raw".to_owned()),
+            archive_member: Some("disk.raw".to_owned()),
+            ..artifact()
+        };
+        let outcome = store
+            .pull(&fetched, &http_agent(), &mut |_| {}, None)
+            .unwrap();
+        assert_eq!(outcome, Pulled::Fetched);
+        let held = store.path_for(&fetched.digest);
+        let probed = conversion::probe(&held, "testing").unwrap();
+        assert_eq!(probed.format, "qcow2");
     }
 
     #[test]

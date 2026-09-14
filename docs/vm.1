@@ -54,7 +54,8 @@ A compressed image is expanded with
 .BR xz (1),
 .BR gzip (1)
 or
-.BR zstd (1);
+.BR zstd (1),
+and an image published in a tar archive is taken out of it;
 the digest covers the file as published.
 .TP
 .BI import " SOURCE IMAGE"
@@ -71,7 +72,8 @@ catalogue. A source compressed with
 .BR gzip (1)
 or
 .BR zstd (1)
-is expanded. A disk image in any format
+is expanded, and a tar archive holding one file is unpacked; an archive holding
+several is refused. A disk image in any format
 .BR qemu\-img (1)
 reads is converted to qcow2; an ISO 9660 CD-ROM image is kept as it is. An
 imported URL stays fetchable, so a pull converts it again; a downloaded image

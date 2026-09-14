@@ -417,6 +417,7 @@ mod tests {
             size: None,
             compression: Compression::None,
             source_format: None,
+            archive_member: None,
             media: Media::Disk,
             firmware: Firmware::Bios,
             cpu_model: None,
@@ -460,6 +461,7 @@ mod tests {
         assert_eq!(suffix(&cdrom()), "iso");
         let converted = Artifact {
             source_format: Some("vmdk".to_owned()),
+            archive_member: None,
             ..artifact("qcow2")
         };
         assert_eq!(suffix(&converted), "qcow2");
@@ -751,6 +753,7 @@ mod tests {
             },
             Artifact {
                 source_format: Some("vmdk".to_owned()),
+                archive_member: None,
                 ..artifact("qcow2")
             },
         ] {

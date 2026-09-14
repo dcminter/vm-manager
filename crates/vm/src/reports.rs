@@ -89,6 +89,9 @@ impl InspectText for Inspect {
         if self.compression != "none" {
             let _ = write!(text, ", published {}", self.compression);
         }
+        if let Some(member) = &self.archive_member {
+            let _ = write!(text, ", as {member} in a tar archive");
+        }
         text
     }
 
@@ -129,6 +132,12 @@ impl Report for Inspect {
             (
                 "source_format",
                 self.source_format
+                    .clone()
+                    .map_or(Value::Null, Value::String),
+            ),
+            (
+                "archive_member",
+                self.archive_member
                     .clone()
                     .map_or(Value::Null, Value::String),
             ),
@@ -1685,6 +1694,7 @@ mod tests {
             format: "qcow2".to_owned(),
             compression: "none".to_owned(),
             source_format: None,
+            archive_member: None,
             media: vm_core::catalogue::Media::Disk,
             url: Some("https://example.test/a.qcow2".to_owned()),
             digest: "sha512:abc".to_owned(),
@@ -1722,6 +1732,7 @@ mod tests {
             format: "qcow2".to_owned(),
             compression: "none".to_owned(),
             source_format: None,
+            archive_member: None,
             media: vm_core::catalogue::Media::Disk,
             url: None,
             digest: "sha512:abc".to_owned(),
@@ -1808,6 +1819,7 @@ mod tests {
             format: "qcow2".to_owned(),
             compression: "xz".to_owned(),
             source_format: None,
+            archive_member: None,
             media: vm_core::catalogue::Media::Disk,
             url: None,
             digest: String::new(),
@@ -1838,6 +1850,15 @@ mod tests {
         report.source_format = Some("vmdk".to_owned());
         assert!(line(&report).ends_with("qcow2, converted from vmdk, published xz"));
         assert!(to_json(&report.to_value()).contains(r#""source_format": "vmdk""#));
+        assert!(to_json(&report.to_value()).contains(r#""archive_member": null"#));
+        report.archive_member = Some("disk.raw".to_owned());
+        assert!(
+            line(&report).ends_with(
+                "qcow2, converted from vmdk, published xz, as disk.raw in a tar archive"
+            )
+        );
+        assert!(to_json(&report.to_value()).contains(r#""archive_member": "disk.raw""#));
+        report.archive_member = None;
         report.source_format = None;
         report.compression = "none".to_owned();
         assert!(line(&report).ends_with("qcow2"));
@@ -1915,6 +1936,7 @@ mod tests {
             size: Some(1024 * 1024),
             compression: vm_core::compression::Compression::None,
             source_format: None,
+            archive_member: None,
             media: vm_core::catalogue::Media::Disk,
             firmware: Firmware::Bios,
             cpu_model: None,
@@ -2183,6 +2205,7 @@ mod tests {
                 size: None,
                 compression: vm_core::compression::Compression::None,
                 source_format: None,
+                archive_member: None,
                 media: vm_core::catalogue::Media::Disk,
                 firmware: Firmware::Uefi,
                 cpu_model: Some("Penryn".to_owned()),
@@ -2286,6 +2309,7 @@ mod tests {
             format: "qcow2".to_owned(),
             compression: "none".to_owned(),
             source_format: None,
+            archive_member: None,
             media: vm_core::catalogue::Media::Disk,
             url: None,
             digest: String::new(),

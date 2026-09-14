@@ -81,3 +81,28 @@ pub fn pack(tool: &str, plain: &[u8]) -> Vec<u8> {
     assert!(finished.status.success(), "{tool} would not pack");
     finished.stdout
 }
+
+/// Archives files with GNU tar, or `None` where it is not installed.
+pub fn tarred(files: &[(&str, &[u8])]) -> Option<Vec<u8>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+    let directory = std::env::temp_dir().join(format!(
+        "vm-tarred-{}-{}",
+        std::process::id(),
+        COUNT.fetch_add(1, Ordering::Relaxed)
+    ));
+    for (name, contents) in files {
+        let path = directory.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, contents).unwrap();
+    }
+    let output = std::process::Command::new("tar")
+        .arg("-C")
+        .arg(&directory)
+        .args(["-cf", "-"])
+        .args(files.iter().map(|(name, _)| name))
+        .output();
+    let _ = std::fs::remove_dir_all(&directory);
+    let output = output.ok()?;
+    output.status.success().then_some(output.stdout)
+}
