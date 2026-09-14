@@ -774,6 +774,71 @@ pub fn stop_dialog(parent: &impl IsA<gtk::Widget>, name: &str, sink: Rc<dyn Fn(C
     );
 }
 
+/// The run-command dialog's fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExecFields {
+    /// A command line for the guest's `sh`.
+    pub command: String,
+    pub workdir: String,
+    /// `KEY=VALUE`, one per line.
+    pub env: String,
+    pub root: bool,
+}
+
+/// A command run in a terminal tab, which forwards typing and gives it a terminal.
+pub fn exec_request(fields: &ExecFields) -> Result<vm_core::access::Exec, String> {
+    let command = blank(&fields.command).ok_or("a command is needed")?;
+    let env = fields
+        .env
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(settings::parse_env)
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(vm_core::access::Exec {
+        command: vec!["sh".to_owned(), "-c".to_owned(), command],
+        interactive: true,
+        tty: true,
+        env,
+        workdir: blank(&fields.workdir),
+        root: fields.root,
+    })
+}
+
+pub fn exec_dialog(parent: &impl IsA<gtk::Widget>, name: &str, sink: Rc<dyn Fn(Command)>) {
+    let form = Form::new(&format!("Run a Command on {name}"), "Run", false);
+    let group = form.group("Command");
+    let command = entry(&group, "Command line", "");
+    let workdir = entry(&group, "Working directory", "");
+    let root = switch(&group, "Run as root", "Through sudo, or doas", false);
+    let wait = spin(
+        &group,
+        "Seconds to wait for the machine to accept its key",
+        (0.0, 3600.0),
+        60.0,
+    );
+    let environment = form.group("Environment");
+    let env = lines(&environment, "Variables, one KEY=VALUE per line", "");
+    let name = name.to_owned();
+    form.present(
+        parent,
+        move || {
+            let fields = ExecFields {
+                command: command.text().to_string(),
+                workdir: workdir.text().to_string(),
+                env: text_of(&env),
+                root: root.is_active(),
+            };
+            Ok(vec![Command::Exec {
+                name: name.clone(),
+                request: Box::new(exec_request(&fields)?),
+                wait: std::time::Duration::from_secs(wait.value() as u64),
+            }])
+        },
+        sink,
+    );
+}
+
 pub fn copy_dialog(parent: &impl IsA<gtk::Widget>, name: &str, sink: Rc<dyn Fn(Command)>) {
     let form = Form::new(&format!("Copy files with {name}"), "Copy", false);
     let group = form.group("Direction");
@@ -1237,6 +1302,46 @@ mod tests {
         assert_eq!(request.disk, Some(Disk::Sata));
         assert_eq!(request.ssh_config, Some(false));
         assert_eq!(request.disk_size.as_deref(), Some("40G"));
+    }
+
+    #[test]
+    fn a_command_runs_through_sh_in_a_terminal_with_its_settings() {
+        let request = exec_request(&ExecFields {
+            command: "  ls -la | wc -l  ".to_owned(),
+            workdir: " /srv ".to_owned(),
+            env: "A=1\n\n  B=two words \n".to_owned(),
+            root: true,
+        })
+        .unwrap_or_else(|reason| panic!("{reason}"));
+        assert_eq!(request.command, ["sh", "-c", "ls -la | wc -l"]);
+        assert!(request.interactive && request.tty && request.root);
+        assert_eq!(request.workdir.as_deref(), Some("/srv"));
+        assert_eq!(
+            request.env,
+            [
+                ("A".to_owned(), "1".to_owned()),
+                ("B".to_owned(), "two words".to_owned())
+            ]
+        );
+        let plain = exec_request(&ExecFields {
+            command: "uptime".to_owned(),
+            ..ExecFields::default()
+        })
+        .unwrap_or_else(|reason| panic!("{reason}"));
+        assert!(plain.env.is_empty() && plain.workdir.is_none() && !plain.root);
+    }
+
+    #[test]
+    fn a_command_needs_a_command_line_and_well_formed_variables() {
+        assert!(exec_request(&ExecFields::default()).is_err());
+        assert!(
+            exec_request(&ExecFields {
+                command: "true".to_owned(),
+                env: "NOVALUE".to_owned(),
+                ..ExecFields::default()
+            })
+            .is_err()
+        );
     }
 
     #[test]

@@ -109,6 +109,11 @@ impl Outcome {
                 name,
                 ..
             } => format!("Copying with {name}"),
+            Self::Terminal {
+                kind: Terminal::Command,
+                name,
+                ..
+            } => format!("Running a command on {name}"),
         }
     }
 }
@@ -250,6 +255,7 @@ impl VmgWindow {
                 name,
                 command: Vec::new(),
             }),
+            Action::RunCommand => forms::exec_dialog(self, &name, self.sink()),
             Action::Logs => {
                 let tab = terminals::logs(&name);
                 self.open_terminal(&format!("logs:{name}"), &format!("{name} log"), tab);
@@ -464,6 +470,7 @@ impl VmgWindow {
                 let title = match kind {
                     Terminal::Shell => format!("{name} shell"),
                     Terminal::Copy => format!("{name} copy"),
+                    Terminal::Command => format!("{name} command"),
                 };
                 self.open_terminal(&key, &title, tab);
                 return;

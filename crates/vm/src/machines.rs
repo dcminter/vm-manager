@@ -37,6 +37,16 @@ pub fn connect(name: &str, command: &[String]) -> Result<std::convert::Infallibl
     Err(exec("ssh", &arguments))
 }
 
+/// Replaces this process with `ssh` running a command, once the guest accepts its key.
+pub fn execute(
+    name: &str,
+    request: &vm_core::access::Exec,
+    wait: Duration,
+) -> Result<std::convert::Infallible> {
+    let arguments = machines::exec_arguments(name, request, wait)?;
+    Err(exec("ssh", &arguments))
+}
+
 /// Copies between here and a guest, the same way.
 pub fn copy(from: &str, to: &str) -> Result<std::convert::Infallible> {
     let arguments = machines::scp_arguments(from, to)?;

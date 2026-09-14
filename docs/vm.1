@@ -220,7 +220,63 @@ Open a shell on a machine, or run a command in it, through
 .BR ssh (1),
 so
 .I ~/.ssh/config
-and the agent apply.
+and the agent apply. The guest's shell reads the command, so quoting and
+expansion happen there.
+.TP
+.BI exec " NAME " "\fR[\fIOPTIONS\fR] [\fB\-\-\fR] " "COMMAND \fR[\fIARG\fR...]"
+Run a command in a machine, passing each argument to it unchanged. Options come
+before the command; anything after it is the command's. Without
+.BR \-i ,
+standard input is empty, and standard output and error arrive separately and
+unaltered. It exits with the command's status, 255 when
+.BR ssh (1)
+fails, and 125 when
+.B vm
+fails before connecting. Keys, Ctrl-C included, reach the command only when
+standard input is forwarded. Without that or
+.BR \-t ,
+Ctrl-C ends
+.B vm
+and the command may run on. Output is never a document, whatever
+.B \-\-format
+says; that applies to errors from
+.B vm
+alone.
+.RS
+.TP
+.BR \-i ", " \-\-interactive
+Forward standard input; its end closes the command's.
+.TP
+.BR \-t ", " \-\-tty
+Give the command a terminal. Its error output then joins its output, and line
+endings may change. When standard input is a terminal, it is forwarded as with
+.BR \-i ,
+so an interactive program such as
+.BR top (1)
+hears the keyboard.
+.TP
+.BI \-e ", " \-\-env " KEY=VALUE"
+Set an environment variable. Repeatable.
+.TP
+.BI \-w ", " \-\-workdir " DIR"
+Run the command in this directory.
+.TP
+.BR \-u ", " "\-\-user root"
+Run the command as root, through
+.BR sudo (8)
+or
+.BR doas (1).
+.TP
+.BI \-\-wait " SECONDS"
+Wait this long for a starting machine to accept its key (default 60); 0
+connects at once.
+.RE
+.IP
+.nf
+vm exec box \-\- ls \-la "my file"
+tar \-c src | vm exec \-i box \-\- tar \-x \-C /srv
+vm exec \-it box \-\- htop
+.fi
 .TP
 .BI cp " FROM TO"
 Copy files to or from a machine, writing one side as

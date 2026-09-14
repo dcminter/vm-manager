@@ -80,7 +80,7 @@ pub fn spawn(program: &str, arguments: &[String]) -> Tab {
     let exited = child.clone();
     terminal.connect_child_exited(move |terminal, status| {
         exited.set(None);
-        terminal.feed(format!("\r\n[exited with {status}]\r\n").as_bytes());
+        terminal.feed(format!("\r\n[{}]\r\n", ending(status)).as_bytes());
     });
     Tab {
         root,
@@ -90,6 +90,14 @@ pub fn spawn(program: &str, arguments: &[String]) -> Tab {
                 let _ = vm_core::process::signal(&handle, vm_core::process::Signal::Terminate);
             }
         }),
+    }
+}
+
+/// How a child ended, read from the wait status the terminal reports.
+pub fn ending(status: i32) -> String {
+    match status & 0x7f {
+        0 => format!("exited with {}", (status >> 8) & 0xff),
+        signal => format!("ended by signal {signal}"),
     }
 }
 
@@ -282,6 +290,23 @@ pub fn last_lines(bytes: &[u8], count: usize) -> &[u8] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_ending_is_read_from_the_wait_status_as_a_shell_would() {
+        use std::os::unix::process::ExitStatusExt as _;
+        for code in [0, 1, 7, 125, 255] {
+            let status = std::process::Command::new("sh")
+                .args(["-c", &format!("exit {code}")])
+                .status()
+                .unwrap_or_else(|error| panic!("{error}"));
+            assert_eq!(ending(status.into_raw()), format!("exited with {code}"));
+        }
+        let killed = std::process::Command::new("sh")
+            .args(["-c", "kill -TERM $$"])
+            .status()
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(ending(killed.into_raw()), "ended by signal 15");
+    }
 
     #[test]
     fn the_last_lines_are_cut_at_a_line_boundary() {

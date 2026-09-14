@@ -204,6 +204,33 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         command: Vec<String>,
     },
+    /// Run a command in an instance with its arguments unchanged; exits with its status, or 125
+    Exec {
+        /// Instance name
+        #[arg(add = ArgValueCandidates::new(completion::running_instance))]
+        name: String,
+        /// Forward standard input
+        #[arg(long, short)]
+        interactive: bool,
+        /// Give the command a terminal, merging its error output into its output; typing reaches it when this is a terminal
+        #[arg(long, short)]
+        tty: bool,
+        /// Set an environment variable for the command; repeatable
+        #[arg(long = "env", short, value_name = "KEY=VALUE", value_parser = settings::parse_env)]
+        env: Vec<(String, String)>,
+        /// Directory in the guest to run the command in
+        #[arg(long, short, value_name = "DIR")]
+        workdir: Option<String>,
+        /// Run the command as root
+        #[arg(long, short, value_name = "USER", value_parser = clap::builder::PossibleValuesParser::new(["root"]))]
+        user: Option<String>,
+        /// Seconds to wait for the guest to accept its key; 0 connects at once
+        #[arg(long, value_name = "SECONDS", default_value_t = 60)]
+        wait: u64,
+        /// Program and arguments, after --
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<String>,
+    },
     /// Copy files to or from an instance, naming one side as name:path
     Cp {
         /// Source, as a path or name:path
@@ -425,10 +452,22 @@ fn main() -> ExitCode {
         },
         Err(error) => {
             output::emit_error(&error, cli.format);
-            ExitCode::FAILURE
+            failure_status(&cli.command)
         }
     }
 }
+
+/// The status for vm's own errors, apart from any a guest command returns.
+fn failure_status(command: &Command) -> ExitCode {
+    if matches!(command, Command::Exec { .. }) {
+        ExitCode::from(EXEC_FAILED)
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// What `vm exec` exits with when it fails before connecting, as `docker exec` does.
+const EXEC_FAILED: u8 = 125;
 
 /// When `vm run` fetches the image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -650,6 +689,10 @@ fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> 
             // Either this replaces the process or it reports why it could not.
             return machines::connect(name, command).map(|held| match held {});
         }
+        Command::Exec { .. } => {
+            // Either this replaces the process or it reports why it could not.
+            return execute(&cli.command).map(|held| match held {});
+        }
         Command::Cp { from, to } => {
             return machines::copy(from, to).map(|held| match held {});
         }
@@ -693,6 +736,41 @@ fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> 
         _ => return Ok(None),
     };
     Ok(Some(Outcome::Reported(report)))
+}
+
+/// Whether `vm exec` forwards input: when asked, or to a terminal command typed at a terminal.
+const fn forwards_input(interactive: bool, tty: bool, stdin_is_terminal: bool) -> bool {
+    interactive || (tty && stdin_is_terminal)
+}
+
+/// Runs what a `vm exec` asks for in place of this process.
+fn execute(command: &Command) -> vm_core::Result<std::convert::Infallible> {
+    let Command::Exec {
+        name,
+        interactive,
+        tty,
+        env,
+        workdir,
+        user,
+        wait,
+        command,
+    } = command
+    else {
+        unreachable!("not an exec");
+    };
+    let request = vm_core::access::Exec {
+        command: command.clone(),
+        interactive: forwards_input(
+            *interactive,
+            *tty,
+            std::io::IsTerminal::is_terminal(&std::io::stdin()),
+        ),
+        tty: *tty,
+        env: env.clone(),
+        workdir: workdir.clone(),
+        root: user.is_some(),
+    };
+    machines::execute(name, &request, std::time::Duration::from_secs(*wait))
 }
 
 /// The rest, which need both.
@@ -782,6 +860,7 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
         Command::Ps { .. }
         | Command::Start { .. }
         | Command::Ssh { .. }
+        | Command::Exec { .. }
         | Command::Cp { .. }
         | Command::Stop { .. }
         | Command::Kill { .. }
@@ -1549,6 +1628,128 @@ mod tests {
         };
         assert!(eject(&["vm", "start", "one", "--eject"]));
         assert!(!eject(&["vm", "start", "one"]));
+    }
+
+    fn exec_parts(arguments: &[&str]) -> (vm_core::access::Exec, u64) {
+        use clap::Parser as _;
+        match Cli::try_parse_from(arguments).unwrap().command {
+            Command::Exec {
+                interactive,
+                tty,
+                env,
+                workdir,
+                user,
+                wait,
+                command,
+                ..
+            } => (
+                vm_core::access::Exec {
+                    command,
+                    interactive,
+                    tty,
+                    env,
+                    workdir,
+                    root: user.is_some(),
+                },
+                wait,
+            ),
+            _ => panic!("not an exec"),
+        }
+    }
+
+    #[test]
+    fn exec_takes_its_options_before_the_command_and_leaves_the_command_alone() {
+        let (request, wait) = exec_parts(&[
+            "vm",
+            "exec",
+            "box",
+            "-it",
+            "-e",
+            "A=1",
+            "--env",
+            "B=two words",
+            "-w",
+            "/srv",
+            "-u",
+            "root",
+            "--wait",
+            "5",
+            "--",
+            "ls",
+            "-la",
+            "--",
+            "my file",
+        ]);
+        assert!(request.interactive && request.tty && request.root);
+        assert_eq!(
+            request.env,
+            [
+                ("A".to_owned(), "1".to_owned()),
+                ("B".to_owned(), "two words".to_owned())
+            ]
+        );
+        assert_eq!(request.workdir.as_deref(), Some("/srv"));
+        assert_eq!(wait, 5);
+        assert_eq!(request.command, ["ls", "-la", "--", "my file"]);
+    }
+
+    #[test]
+    fn exec_needs_no_separator_and_waits_a_minute_by_default() {
+        let (request, wait) = exec_parts(&["vm", "exec", "box", "uname", "-a"]);
+        assert_eq!(request.command, ["uname", "-a"]);
+        assert!(!request.interactive && !request.tty && !request.root);
+        assert!(request.env.is_empty() && request.workdir.is_none());
+        assert_eq!(wait, 60);
+        let (request, _) = exec_parts(&["vm", "exec", "box", "sh", "-i"]);
+        assert!(
+            !request.interactive,
+            "a flag after the command is the command's"
+        );
+        assert_eq!(request.command, ["sh", "-i"]);
+    }
+
+    #[test]
+    fn exec_refuses_what_it_cannot_do() {
+        use clap::Parser as _;
+        for arguments in [
+            vec!["vm", "exec", "box"],
+            vec!["vm", "exec", "box", "--"],
+            vec!["vm", "exec", "box", "-u", "operator", "--", "id"],
+            vec!["vm", "exec", "box", "-e", "NOVALUE", "--", "id"],
+            vec!["vm", "exec", "box", "--wait", "soon", "--", "id"],
+        ] {
+            assert!(Cli::try_parse_from(&arguments).is_err(), "{arguments:?}");
+        }
+    }
+
+    #[test]
+    fn a_terminal_command_typed_at_a_terminal_hears_the_keyboard() {
+        // (interactive, tty, stdin is a terminal) → forwarded
+        for (interactive, tty, terminal, forwarded) in [
+            (false, false, false, false),
+            (false, false, true, false),
+            (false, true, false, false),
+            (false, true, true, true),
+            (true, false, false, true),
+            (true, false, true, true),
+            (true, true, false, true),
+            (true, true, true, true),
+        ] {
+            assert_eq!(
+                forwards_input(interactive, tty, terminal),
+                forwarded,
+                "-i {interactive}, -t {tty}, terminal {terminal}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_exec_reports_its_own_failures_as_125() {
+        use clap::Parser as _;
+        let exec = Cli::try_parse_from(["vm", "exec", "box", "true"]).unwrap();
+        assert_eq!(failure_status(&exec.command), ExitCode::from(125));
+        let ssh = Cli::try_parse_from(["vm", "ssh", "box", "true"]).unwrap();
+        assert_eq!(failure_status(&ssh.command), ExitCode::FAILURE);
     }
 
     #[test]

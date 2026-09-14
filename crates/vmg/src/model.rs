@@ -286,6 +286,7 @@ pub enum Action {
     Unpause,
     Console,
     Shell,
+    RunCommand,
     Logs,
     Screen,
     Screenshot,
@@ -314,6 +315,7 @@ impl Action {
             Self::Unpause => "Unpause",
             Self::Console => "Console",
             Self::Shell => "Shell",
+            Self::RunCommand => "Run Command…",
             Self::Logs => "Logs",
             Self::Screen => "Screen",
             Self::Screenshot => "Screenshot…",
@@ -338,7 +340,7 @@ impl Action {
             Self::Stop => "system-shutdown-symbolic",
             Self::Kill => "process-stop-symbolic",
             Self::Pause => "media-playback-pause-symbolic",
-            Self::Console | Self::Shell => "utilities-terminal-symbolic",
+            Self::Console | Self::Shell | Self::RunCommand => "utilities-terminal-symbolic",
             Self::Logs => "text-x-generic-symbolic",
             Self::Screen => "video-display-symbolic",
             Self::Screenshot => "camera-photo-symbolic",
@@ -564,7 +566,7 @@ pub fn machine_actions(state: &State, record: Option<&Instance>) -> Vec<Action> 
             }
             actions.extend([Action::Stop, Action::Kill, Action::Console]);
             if record.is_some_and(|held| held.seeded) {
-                actions.extend([Action::Shell, Action::CopyFiles]);
+                actions.extend([Action::Shell, Action::RunCommand, Action::CopyFiles]);
             }
             actions.extend([
                 Action::Logs,
@@ -1196,12 +1198,50 @@ mod tests {
         assert!(running.contains(&Action::Pause));
         assert!(running.contains(&Action::Stop));
         assert!(!running.contains(&Action::Shell));
+        assert!(!running.contains(&Action::RunCommand));
         let paused = machine_actions(&State::Live("paused".to_owned()), None);
         assert!(paused.contains(&Action::Unpause));
         let stopped = machine_actions(&State::Stopped, None);
         assert_eq!(stopped[0], Action::Start);
         assert!(!stopped.contains(&Action::Eject));
         assert_eq!(machine_actions(&State::Damaged, None), [Action::Remove]);
+    }
+
+    #[test]
+    fn a_running_machine_with_our_account_offers_a_shell_and_a_command() {
+        let record = Instance {
+            name: "one".to_owned(),
+            image: "debian:trixie".to_owned(),
+            digest: String::new(),
+            arch: "amd64".to_owned(),
+            created: 0,
+            memory: 2048,
+            cpus: 2,
+            firmware: vm_core::machine::Firmware::Bios,
+            cpu_model: "max".to_owned(),
+            machine: vm_core::machine::Chipset::Q35,
+            disk: vm_core::machine::Disk::Virtio,
+            user: "vm".to_owned(),
+            seeded: true,
+            monitor: std::path::PathBuf::new(),
+            ssh_port: Some(2222),
+            pid: None,
+            started: None,
+            generation: 0,
+            password: None,
+            ssh_config: false,
+            auto_remove: false,
+            media: vm_core::catalogue::Media::Disk,
+            cdrom: None,
+            ports: Vec::new(),
+            shares: Vec::new(),
+        };
+        let running = machine_actions(&State::Live("running".to_owned()), Some(&record));
+        assert!(running.contains(&Action::Shell));
+        assert!(running.contains(&Action::RunCommand));
+        assert_eq!(Action::RunCommand.label(), "Run Command…");
+        let stopped = machine_actions(&State::Stopped, Some(&record));
+        assert!(!stopped.contains(&Action::RunCommand));
     }
 
     #[test]

@@ -591,6 +591,57 @@ pub fn ssh_arguments(name: &str, command: &[String]) -> Result<Vec<String>> {
     crate::access::ssh(&held, &directory, command)
 }
 
+/// The `ssh` arguments that run a command in a machine, once it accepts the key or `wait` runs out.
+pub fn exec_arguments(
+    name: &str,
+    request: &crate::access::Exec,
+    wait: Duration,
+) -> Result<Vec<String>> {
+    let instances = Instances::discover()?;
+    let directory = instances.open(name)?;
+    let deadline = Instant::now() + wait;
+    loop {
+        let held = directory.read()?;
+        answering(&held)?;
+        let arguments = crate::access::exec(&held, &directory, request)?;
+        if wait.is_zero() || accepts_key(&crate::access::probe(&held, &directory)?)? {
+            return Ok(arguments);
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::GuestUnreachable {
+                name: name.to_owned(),
+                seconds: wait.as_secs(),
+            });
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+/// Whether a silent `ssh` with these arguments succeeds.
+fn accepts_key(arguments: &[String]) -> Result<bool> {
+    std::process::Command::new("ssh")
+        .args(arguments)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .map_err(|source| {
+            if source.kind() == std::io::ErrorKind::NotFound {
+                Error::MissingTool {
+                    binary: "ssh",
+                    package: "openssh-client",
+                    operation: "reaching a virtual machine",
+                }
+            } else {
+                Error::Launch {
+                    program: "ssh".to_owned(),
+                    source,
+                }
+            }
+        })
+}
+
 /// The `scp` arguments that copy between here and a guest, the same way.
 pub fn scp_arguments(from: &str, to: &str) -> Result<Vec<String>> {
     use crate::access::Location;

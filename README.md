@@ -43,6 +43,7 @@ cargo run -p vm -- images
 | `vm start <name>` | Start a stopped machine, optionally changing its settings; `--eject` removes its CD-ROM |
 | `vm gui` | Open the window, `vmg` |
 | `vm ssh <name>` | Open a shell on a machine, or run a command in it |
+| `vm exec <name> -- <command>` | Run a command in a machine with its arguments, streams and exit status intact |
 | `vm cp <from> <to>` | Copy files, naming one side as `name:path` |
 | `vm ps` | List machines; `--all` includes stopped ones, `--follow` refreshes, `-q` lists names only |
 | `vm stop <name>...` | Ask the guests to shut down, then force them |
@@ -132,6 +133,18 @@ ssh mytestvm
 This adds one `Include` line to the top of `~/.ssh/config`. A name already used
 by a `Host` there is refused. `vm rm` or `vm start --no-ssh-config` removes the
 entry.
+
+`vm exec` runs a command for scripts, as `docker exec` does: each argument
+reaches the guest unchanged, standard input is forwarded only with `-i`, `-t`
+gives a terminal, and it exits with the command's status, or 125 when `vm`
+itself fails. It waits up to a minute for a starting machine:
+
+```bash
+vm run debian:trixie --name ci --rm
+tar -c . | vm exec -i ci -- tar -x -C /srv
+vm exec -w /srv ci -- make test
+vm stop ci
+```
 
 `vm start` accepts the same settings as `vm run` and applies them from then on.
 `--no-port`, `--no-volume` and `--no-password` clear them.
@@ -258,18 +271,6 @@ archive = "catalogue-0.0.1.tar.gz"
 Commands write text by default, or `--format json` / `--format yaml` (or
 `VM_FORMAT`). In those formats standard output holds only the document; errors
 carry a stable `kind`.
-
-## Releases
-
-`scripts/release` runs the checks, prompts for the version and release notes,
-and pushes the tag. The tag triggers a workflow that attaches Debian Trixie and
-Ubuntu 24.04 packages to the release.
-
-`scripts/package <trixie|noble> <version>` builds a package locally.
-
-A `catalogue-<major>.<minor>.<patch>` tag publishes the catalogue at
-`https://vm-manager.com/catalogue-<major>.<minor>.<patch>.tar.gz`, and points
-`https://vm-manager.com/catalogue.toml` at the newest.
 
 ## Licence
 

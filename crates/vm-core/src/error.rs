@@ -226,6 +226,10 @@ pub enum Error {
     NoGuestAccess {
         name: String,
     },
+    GuestUnreachable {
+        name: String,
+        seconds: u64,
+    },
     SshHostTaken {
         name: String,
         path: PathBuf,
@@ -329,6 +333,7 @@ impl Error {
             Self::InstancePaused { .. } => "instance-paused",
             Self::NoCdrom { .. } => "no-cdrom",
             Self::NoGuestAccess { .. } => "no-guest-access",
+            Self::GuestUnreachable { .. } => "guest-unreachable",
             Self::SshHostTaken { .. } => "ssh-host-taken",
             Self::NoHome => "no-home",
             Self::NoConfigDirectory => "no-config-directory",
@@ -624,9 +629,14 @@ impl fmt::Display for Error {
             Self::InstancePaused { name } => write!(
                 f,
                 "'{name}' is paused, so nothing in it is answering; \
-                 let it carry on with 'vm resume {name}'"
+                 let it carry on with 'vm unpause {name}'"
             ),
             Self::NoCdrom { name } => write!(f, "{name} has no CD-ROM in its drive"),
+            Self::GuestUnreachable { name, seconds } => write!(
+                f,
+                "'{name}' did not accept its key over ssh within {seconds} seconds; \
+                 --wait gives it longer"
+            ),
             Self::NoGuestAccess { name } => write!(
                 f,
                 "'{name}' has no account of ours to connect to: its image takes no \

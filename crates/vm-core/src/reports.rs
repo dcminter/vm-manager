@@ -462,7 +462,7 @@ pub struct Console {
     pub lines: Vec<String>,
 }
 
-/// What `vm pause` and `vm resume` did, or found already done.
+/// What `vm pause` and `vm unpause` did, or found already done.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Switched {
     pub name: String,

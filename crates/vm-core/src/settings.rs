@@ -105,6 +105,26 @@ pub fn parse_port(text: &str) -> std::result::Result<Port, String> {
     })
 }
 
+/// Turns `KEY=VALUE` into an environment variable, the key a shell could name.
+pub fn parse_env(text: &str) -> std::result::Result<(String, String), String> {
+    let (key, value) = text
+        .split_once('=')
+        .ok_or_else(|| format!("'{text}' is not an environment variable; write it as KEY=VALUE"))?;
+    let named = key
+        .bytes()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+    if !named {
+        return Err(format!(
+            "'{key}' is not a variable name; use letters, digits and underscores"
+        ));
+    }
+    Ok((key.to_owned(), value.to_owned()))
+}
+
 /// A description on one line of text.
 pub fn parse_description(text: &str) -> std::result::Result<String, String> {
     if text.trim().is_empty() {
@@ -254,6 +274,18 @@ mod tests {
         assert_eq!(share.target, "/mnt/tmp");
         assert_eq!(share.tag, "tmp");
         assert!(!share.readonly);
+    }
+
+    #[test]
+    fn an_environment_variable_is_a_name_and_whatever_follows_the_first_equals() {
+        assert_eq!(
+            parse_env("GREETING=hello=world"),
+            Ok(("GREETING".to_owned(), "hello=world".to_owned()))
+        );
+        assert_eq!(parse_env("_X="), Ok(("_X".to_owned(), String::new())));
+        for refused in ["NOVALUE", "=x", "1X=y", "A-B=c", "A B=c", ""] {
+            assert!(parse_env(refused).is_err(), "{refused}");
+        }
     }
 
     #[test]

@@ -43,6 +43,7 @@ pub struct Export {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Terminal {
     Shell,
+    Command,
     Copy,
 }
 
@@ -108,6 +109,11 @@ pub enum Command {
         name: String,
         command: Vec<String>,
     },
+    Exec {
+        name: String,
+        request: Box<vm_core::access::Exec>,
+        wait: Duration,
+    },
     Copy {
         from: String,
         to: String,
@@ -144,6 +150,7 @@ impl Command {
             Self::Screen { name } => format!("Showing {name}"),
             Self::Configure(_) => "Changing the configuration".to_owned(),
             Self::Shell { name, .. } => format!("Opening a shell on {name}"),
+            Self::Exec { name, .. } => format!("Waiting for {name} to accept its key"),
             Self::Copy { from, to } => format!("Copying {from} to {to}"),
         }
     }
@@ -156,6 +163,7 @@ impl Command {
                 | Self::Inspect { .. }
                 | Self::Screen { .. }
                 | Self::Shell { .. }
+                | Self::Exec { .. }
                 | Self::Copy { .. }
                 | Self::Prune { dry_run: true, .. }
         )
@@ -333,6 +341,16 @@ fn perform(command: &Command, progress: &dyn Fn(String, Option<f64>)) -> Result<
             name: name.clone(),
             program: "ssh".to_owned(),
             arguments: machines::ssh_arguments(name, command)?,
+        },
+        Command::Exec {
+            name,
+            request,
+            wait,
+        } => Outcome::Terminal {
+            kind: Terminal::Command,
+            name: name.clone(),
+            program: "ssh".to_owned(),
+            arguments: machines::exec_arguments(name, request, *wait)?,
         },
         Command::Copy { from, to } => copy_terminal(from, to)?,
     };
