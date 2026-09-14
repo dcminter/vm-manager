@@ -438,7 +438,7 @@ mod tests {
             source_format: None,
             media: crate::catalogue::Media::Disk,
             firmware: crate::machine::Firmware::Bios,
-            cpu: None,
+            cpu_model: None,
             machine: crate::machine::Chipset::Q35,
             disk: crate::machine::Disk::Virtio,
         }

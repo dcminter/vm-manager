@@ -7,6 +7,7 @@ use crate::process::Handle;
 use crate::{paths, seed};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,8 +15,35 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Port {
+    /// The host address listened on; absent means the loopback address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<Ipv4Addr>,
     pub host: u16,
     pub guest: u16,
+}
+
+impl Port {
+    pub const fn new(host: u16, guest: u16) -> Self {
+        Self {
+            address: None,
+            host,
+            guest,
+        }
+    }
+
+    pub fn listen(&self) -> Ipv4Addr {
+        self.address.unwrap_or(Ipv4Addr::LOCALHOST)
+    }
+}
+
+/// Written as `[address:]host:guest`, as it is given.
+impl std::fmt::Display for Port {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(address) = self.address {
+            write!(formatter, "{address}:")?;
+        }
+        write!(formatter, "{}:{}", self.host, self.guest)
+    }
 }
 
 /// A host directory shared into the guest over virtiofs, with the `virtiofsd` serving it.
@@ -25,11 +53,20 @@ pub struct Share {
     pub tag: String,
     pub source: PathBuf,
     pub target: String,
+    /// Whether the guest is refused writes; omitted while false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub readonly: bool,
     pub pid: Option<u32>,
     pub started: Option<u64>,
 }
 
 impl Share {
+    /// Written as `host:guest[:ro]`, as it is given.
+    pub fn spec(&self) -> String {
+        let mode = if self.readonly { ":ro" } else { "" };
+        format!("{}:{}{mode}", self.source.display(), self.target)
+    }
+
     pub const fn handle(&self) -> Option<Handle> {
         match (self.pid, self.started) {
             (Some(pid), Some(started)) => Some(Handle { pid, started }),
@@ -62,8 +99,8 @@ pub struct Instance {
     #[serde(default, skip_serializing_if = "Firmware::is_default")]
     pub firmware: Firmware,
     /// Defaults to `max` when absent.
-    #[serde(default = "default_cpu")]
-    pub cpu: String,
+    #[serde(default = "default_cpu_model", alias = "cpu")]
+    pub cpu_model: String,
     /// Defaults to q35 when absent.
     #[serde(default, skip_serializing_if = "Chipset::is_default")]
     pub machine: Chipset,
@@ -90,6 +127,9 @@ pub struct Instance {
     /// Whether the directory holds an SSH config entry for the machine.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ssh_config: bool,
+    /// Whether the machine is removed once it is found stopped.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_remove: bool,
     /// How the image was given: as the disk's base, or as a CD-ROM beside a blank disk.
     #[serde(default, skip_serializing_if = "Media::is_disk")]
     pub media: Media,
@@ -103,8 +143,8 @@ pub struct Instance {
     pub shares: Vec<Share>,
 }
 
-fn default_cpu() -> String {
-    machine::DEFAULT_CPU.to_owned()
+fn default_cpu_model() -> String {
+    machine::DEFAULT_CPU_MODEL.to_owned()
 }
 
 #[expect(
@@ -526,6 +566,7 @@ pub fn seed_for(instance: &Instance, authorized_key: &str) -> seed::Seed {
             .map(|share| seed::Mount {
                 tag: share.tag.clone(),
                 target: share.target.clone(),
+                readonly: share.readonly,
             })
             .collect(),
         password: instance.password.clone(),
@@ -570,7 +611,7 @@ mod tests {
             memory: 2048,
             cpus: 2,
             firmware: crate::machine::Firmware::Bios,
-            cpu: "max".to_owned(),
+            cpu_model: "max".to_owned(),
             machine: crate::machine::Chipset::Q35,
             disk: crate::machine::Disk::Virtio,
             user: "vm".to_owned(),
@@ -581,6 +622,7 @@ mod tests {
             started: None,
             generation: 0,
             ssh_config: false,
+            auto_remove: false,
             media: crate::catalogue::Media::Disk,
             cdrom: None,
             password: None,
@@ -621,6 +663,7 @@ mod tests {
         let directory = instances.create("one").unwrap();
         let mut held = instance("one");
         held.ports.push(Port {
+            address: None,
             host: 2222,
             guest: 22,
         });
@@ -628,6 +671,7 @@ mod tests {
             tag: "work".to_owned(),
             source: PathBuf::from("/home/x/work"),
             target: "/mnt/work".to_owned(),
+            readonly: false,
             pid: None,
             started: None,
         });
@@ -640,6 +684,7 @@ mod tests {
         let scratch = Scratch::new("combinations");
         let instances = scratch.instances();
         let port = Port {
+            address: None,
             host: 2222,
             guest: 22,
         };
@@ -647,6 +692,7 @@ mod tests {
             tag: "work".to_owned(),
             source: PathBuf::from("/home/x/work"),
             target: "/mnt/work".to_owned(),
+            readonly: false,
             pid: None,
             started: None,
         };
@@ -689,11 +735,12 @@ mod tests {
         let directory = scratch.instances().create("one").unwrap();
         let mut held = instance("one");
         held.firmware = Firmware::Uefi;
-        held.cpu = "Penryn,vendor=GenuineIntel,+avx".to_owned();
+        held.cpu_model = "Penryn,vendor=GenuineIntel,+avx".to_owned();
         held.shares.push(Share {
             tag: "work".to_owned(),
             source: PathBuf::from("/home/x/work"),
             target: "/mnt/work".to_owned(),
+            readonly: false,
             pid: None,
             started: None,
         });
@@ -731,14 +778,103 @@ mod tests {
         let text: String = basic_toml::to_string(&instance("one"))
             .unwrap()
             .lines()
-            .filter(|line| !line.starts_with("cpu =") && !line.starts_with("firmware ="))
+            .filter(|line| !line.starts_with("cpu_model =") && !line.starts_with("firmware ="))
             .flat_map(|line| [line, "\n"])
             .collect();
-        assert!(!text.contains("cpu ="), "{text}");
+        assert!(!text.contains("cpu_model ="), "{text}");
         fs::write(directory.record(), text).unwrap();
         let read = directory.read().unwrap();
         assert_eq!(read.firmware, Firmware::Bios);
-        assert_eq!(read.cpu, "max");
+        assert_eq!(read.cpu_model, "max");
+    }
+
+    #[test]
+    fn a_record_naming_its_cpu_model_the_old_way_is_read() {
+        let text = basic_toml::to_string(&instance("one"))
+            .unwrap()
+            .replace("cpu_model = \"max\"", "cpu = \"Penryn,+avx\"");
+        assert!(text.contains("cpu = "), "{text}");
+        let read: Instance = basic_toml::from_str(&text).unwrap();
+        assert_eq!(read.cpu_model, "Penryn,+avx");
+        let rewritten = basic_toml::to_string(&read).unwrap();
+        assert!(
+            rewritten.contains("cpu_model = \"Penryn,+avx\""),
+            "{rewritten}"
+        );
+    }
+
+    #[test]
+    fn auto_removal_is_recorded_only_when_asked_for() {
+        let text = basic_toml::to_string(&instance("one")).unwrap();
+        assert!(!text.contains("auto_remove"), "{text}");
+        let mut held = instance("one");
+        held.auto_remove = true;
+        let text = basic_toml::to_string(&held).unwrap();
+        assert!(text.contains("auto_remove = true"), "{text}");
+        assert_eq!(basic_toml::from_str::<Instance>(&text).unwrap(), held);
+    }
+
+    #[test]
+    fn a_listening_address_and_a_read_only_share_survive_the_round_trip() {
+        let scratch = Scratch::new("addressreadonly");
+        let directory = scratch.instances().create("one").unwrap();
+        let mut held = instance("one");
+        held.ports.push(Port::new(8080, 80));
+        held.ports.push(Port {
+            address: Some(Ipv4Addr::UNSPECIFIED),
+            host: 8443,
+            guest: 443,
+        });
+        held.shares.push(Share {
+            tag: "work".to_owned(),
+            source: PathBuf::from("/home/x/work"),
+            target: "/mnt/work".to_owned(),
+            readonly: true,
+            pid: None,
+            started: None,
+        });
+        directory.write(&held).unwrap();
+        let text = fs::read_to_string(directory.record()).unwrap();
+        assert_eq!(text.matches("address =").count(), 1, "{text}");
+        assert!(text.contains("address = \"0.0.0.0\""), "{text}");
+        assert!(text.contains("readonly = true"), "{text}");
+        assert_eq!(directory.read().unwrap(), held);
+    }
+
+    #[test]
+    fn a_record_from_before_addresses_and_read_only_shares_is_read() {
+        let text = "name = \"one\"\nimage = \"debian:trixie\"\ndigest = \"sha512:abc\"\n\
+                    arch = \"amd64\"\ncreated = 1\nmemory = 2048\ncpus = 2\nuser = \"vm\"\n\
+                    seeded = true\nmonitor = \"/run/m.sock\"\n\n\
+                    [[ports]]\nhost = 2222\nguest = 22\n\n\
+                    [[shares]]\ntag = \"work\"\nsource = \"/home/x\"\ntarget = \"/mnt\"\n";
+        let read: Instance = basic_toml::from_str(text).unwrap();
+        assert_eq!(read.ports, vec![Port::new(2222, 22)]);
+        assert!(!read.shares[0].readonly);
+        assert!(!read.auto_remove);
+    }
+
+    #[test]
+    fn a_port_and_a_share_are_written_as_they_are_given() {
+        assert_eq!(Port::new(8080, 80).to_string(), "8080:80");
+        let port = Port {
+            address: Some(Ipv4Addr::new(192, 168, 1, 5)),
+            host: 8080,
+            guest: 80,
+        };
+        assert_eq!(port.to_string(), "192.168.1.5:8080:80");
+        assert_eq!(port.listen(), Ipv4Addr::new(192, 168, 1, 5));
+        let mut share = Share {
+            tag: "work".to_owned(),
+            source: PathBuf::from("/home/x/work"),
+            target: "/mnt/work".to_owned(),
+            readonly: false,
+            pid: None,
+            started: None,
+        };
+        assert_eq!(share.spec(), "/home/x/work:/mnt/work");
+        share.readonly = true;
+        assert_eq!(share.spec(), "/home/x/work:/mnt/work:ro");
     }
 
     #[test]
@@ -763,6 +899,7 @@ mod tests {
             tag: "t".to_owned(),
             source: PathBuf::from("/s"),
             target: "/t".to_owned(),
+            readonly: false,
             pid: None,
             started: None,
         });
@@ -950,6 +1087,7 @@ mod tests {
             tag: "work".to_owned(),
             source: PathBuf::from("/home/x"),
             target: "/mnt/work".to_owned(),
+            readonly: false,
             pid: Some(1),
             started: None,
         };
@@ -1052,6 +1190,7 @@ mod tests {
             tag: "work".to_owned(),
             source: PathBuf::from("/home/x"),
             target: "/mnt/work".to_owned(),
+            readonly: false,
             pid: None,
             started: None,
         });

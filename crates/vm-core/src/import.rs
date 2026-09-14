@@ -47,7 +47,7 @@ impl Source {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Hardware {
     pub firmware: Firmware,
-    pub cpu: Option<String>,
+    pub cpu_model: Option<String>,
     pub machine: Chipset,
     pub disk: Disk,
 }
@@ -222,7 +222,7 @@ fn import(
         source_format: (fetchable && prepared.converted).then(|| prepared.format.clone()),
         media: prepared.media,
         firmware: request.hardware.firmware,
-        cpu: request.hardware.cpu.clone(),
+        cpu_model: request.hardware.cpu_model.clone(),
         machine: request.hardware.machine,
         disk: request.hardware.disk,
     };
@@ -829,7 +829,7 @@ mod tests {
                 options.login = Login::CloudInit;
                 options.hardware = Hardware {
                     firmware: Firmware::Uefi,
-                    cpu: Some("Penryn".to_owned()),
+                    cpu_model: Some("Penryn".to_owned()),
                     machine: Chipset::Pc,
                     disk: Disk::Ide,
                 };
@@ -841,7 +841,7 @@ mod tests {
             .unwrap();
         assert_eq!(entry.login, Login::CloudInit);
         assert_eq!(artifact.firmware, Firmware::Uefi);
-        assert_eq!(artifact.cpu.as_deref(), Some("Penryn"));
+        assert_eq!(artifact.cpu_model.as_deref(), Some("Penryn"));
         assert_eq!(artifact.machine, Chipset::Pc);
         assert_eq!(artifact.disk, Disk::Ide);
     }

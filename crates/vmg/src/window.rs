@@ -1238,7 +1238,7 @@ mod tests {
         assert_eq!(stores.machines.item(1).unwrap(), before);
         let page = window.page_for(&NodeId::Machine("two".to_owned())).unwrap();
         assert_eq!(page.subtitle, "debian:trixie, paused");
-        assert!(page.actions.contains(&Action::Resume));
+        assert!(page.actions.contains(&Action::Unpause));
     }
 
     fn a_machine_that_goes_away_takes_its_tab(window: &VmgWindow) {

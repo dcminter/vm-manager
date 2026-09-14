@@ -17,6 +17,7 @@ const SHELL: &str = "/bin/bash";
 pub struct Mount {
     pub tag: String,
     pub target: String,
+    pub readonly: bool,
 }
 
 /// Everything the guest is told about itself.
@@ -107,19 +108,20 @@ impl Seed {
             fields.push((
                 "bootcmd",
                 Value::list(self.mounts.iter().flat_map(|mount| {
+                    let options: &[&str] = if mount.readonly { &["-o", "ro"] } else { &[] };
                     [
                         Value::list([
                             Value::string("mkdir"),
                             Value::string("-p"),
                             Value::string(&mount.target),
                         ]),
-                        Value::list([
-                            Value::string("mount"),
-                            Value::string("-t"),
-                            Value::string("virtiofs"),
-                            Value::string(&mount.tag),
-                            Value::string(&mount.target),
-                        ]),
+                        Value::list(
+                            ["mount", "-t", "virtiofs"]
+                                .iter()
+                                .chain(options)
+                                .map(|word| Value::string(*word))
+                                .chain([Value::string(&mount.tag), Value::string(&mount.target)]),
+                        ),
                     ]
                 })),
             ));
@@ -313,6 +315,7 @@ mod tests {
         seed.mounts.push(Mount {
             tag: "work".to_owned(),
             target: "/mnt/work".to_owned(),
+            readonly: false,
         });
         let text = seed.user_data();
         assert!(text.contains("bootcmd:"), "{text}");
@@ -320,6 +323,22 @@ mod tests {
         assert!(text.contains("- /mnt/work"), "{text}");
         assert!(text.contains("- virtiofs"), "{text}");
         assert!(text.contains("- mkdir"), "{text}");
+        assert!(!text.contains("\"-o\""), "{text}");
+    }
+
+    #[test]
+    fn a_read_only_mount_is_mounted_read_only() {
+        let mut seed = seed();
+        seed.mounts.push(Mount {
+            tag: "work".to_owned(),
+            target: "/mnt/work".to_owned(),
+            readonly: true,
+        });
+        let text = seed.user_data();
+        assert!(
+            text.contains("    - virtiofs\n    - \"-o\"\n    - ro\n    - work\n    - /mnt/work"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -328,6 +347,7 @@ mod tests {
         seed.mounts.push(Mount {
             tag: "work".to_owned(),
             target: "/mnt/work".to_owned(),
+            readonly: false,
         });
         assert!(
             !seed.user_data().contains("mounts:"),
@@ -441,6 +461,7 @@ mod tests {
         seed.mounts.push(Mount {
             tag: "work".to_owned(),
             target: "mnt/work".to_owned(),
+            readonly: false,
         });
         assert_eq!(seed.image().unwrap_err().kind(), "seed-invalid");
     }
@@ -451,6 +472,7 @@ mod tests {
         seed.mounts.push(Mount {
             tag: "work: elsewhere".to_owned(),
             target: "/mnt/work".to_owned(),
+            readonly: false,
         });
         assert!(seed.image().is_err());
     }

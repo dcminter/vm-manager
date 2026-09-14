@@ -25,6 +25,8 @@ pub const DISK: [&str; 4] = ["image default", "virtio", "sata", "ide"];
 pub const PULL: [&str; 4] = ["config default", "missing", "always", "never"];
 pub const SSH_CONFIG: [&str; 3] = ["config default", "yes", "no"];
 pub const COMPRESSION: [&str; 4] = ["none", "xz", "gzip", "zstd"];
+const PORTS_TITLE: &str = "Forwarded ports, as host:guest or address:host:guest";
+const VOLUMES_TITLE: &str = "Shared directories, one host:guest or host:guest:ro per line";
 
 /// Everything the run dialog collects, as text and indices.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -39,11 +41,12 @@ pub struct RunFields {
     pub disk_size: String,
     pub pull: usize,
     pub firmware: usize,
-    pub cpu: String,
+    pub cpu_model: String,
     pub machine: usize,
     pub disk: usize,
     pub password: String,
     pub ssh_config: usize,
+    pub auto_remove: bool,
 }
 
 fn blank(text: &str) -> Option<String> {
@@ -74,7 +77,7 @@ fn disk_of(index: usize) -> Result<Option<Disk>, String> {
         .transpose()
 }
 
-/// Ports as `host:guest`, separated by commas, spaces or lines.
+/// Ports as `[address:]host:guest`, separated by commas, spaces or lines.
 pub fn parse_ports(text: &str) -> Result<Vec<Port>, String> {
     text.split(|character: char| character == ',' || character.is_whitespace())
         .filter(|piece| !piece.is_empty())
@@ -82,7 +85,7 @@ pub fn parse_ports(text: &str) -> Result<Vec<Port>, String> {
         .collect()
 }
 
-/// Shares as `host:guest`, one per line.
+/// Shares as `host:guest[:ro]`, one per line.
 pub fn parse_shares(text: &str) -> Result<Vec<Share>, String> {
     text.lines()
         .map(str::trim)
@@ -132,13 +135,14 @@ pub fn run_request(fields: &RunFields) -> Result<Request, String> {
             _ => None,
         },
         firmware: firmware_of(fields.firmware)?,
-        cpu: blank(&fields.cpu)
-            .map(|cpu| settings::parse_cpu(&cpu))
+        cpu_model: blank(&fields.cpu_model)
+            .map(|cpu| settings::parse_cpu_model(&cpu))
             .transpose()?,
         machine: chipset_of(fields.machine)?,
         disk: disk_of(fields.disk)?,
         password: hashed(&fields.password)?,
         ssh_config: toggle_of(fields.ssh_config),
+        auto_remove: fields.auto_remove,
     })
 }
 
@@ -152,7 +156,7 @@ pub struct SettingsFields {
     pub volumes: String,
     pub disk_size: String,
     pub firmware: usize,
-    pub cpu: String,
+    pub cpu_model: String,
     pub machine: usize,
     pub disk: usize,
     pub password: String,
@@ -170,19 +174,19 @@ impl SettingsFields {
             ports: held
                 .ports
                 .iter()
-                .map(|port| format!("{}:{}", port.host, port.guest))
+                .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join(", "),
             user: held.user.clone(),
             volumes: held
                 .shares
                 .iter()
-                .map(|share| format!("{}:{}", share.source.display(), share.target))
+                .map(Share::spec)
                 .collect::<Vec<_>>()
                 .join("\n"),
             disk_size: String::new(),
             firmware: index_of(&FIRMWARE, held.firmware.name()),
-            cpu: held.cpu.clone(),
+            cpu_model: held.cpu_model.clone(),
             machine: index_of(&CHIPSET, held.machine.name()),
             disk: index_of(&DISK, held.disk.name()),
             password: String::new(),
@@ -202,16 +206,15 @@ pub fn start_changes(held: &Instance, fields: &SettingsFields) -> Result<Changes
     let ports = parse_ports(&fields.ports)?;
     let shares = parse_shares(&fields.volumes)?;
     let same_shares = shares.len() == held.shares.len()
-        && shares
-            .iter()
-            .zip(&held.shares)
-            .all(|(new, old)| new.source == old.source && new.target == old.target);
+        && shares.iter().zip(&held.shares).all(|(new, old)| {
+            new.source == old.source && new.target == old.target && new.readonly == old.readonly
+        });
     let user = blank(&fields.user).ok_or("a user name is needed")?;
     let firmware = firmware_of(fields.firmware)?;
     let machine = chipset_of(fields.machine)?;
     let disk = disk_of(fields.disk)?;
-    let cpu = blank(&fields.cpu)
-        .map(|cpu| settings::parse_cpu(&cpu))
+    let cpu = blank(&fields.cpu_model)
+        .map(|cpu| settings::parse_cpu_model(&cpu))
         .transpose()?;
     Ok(Changes {
         memory: (memory != held.memory).then_some(memory),
@@ -221,7 +224,7 @@ pub fn start_changes(held: &Instance, fields: &SettingsFields) -> Result<Changes
         user: (user != held.user).then_some(user),
         disk_size: blank(&fields.disk_size),
         firmware: firmware.filter(|wanted| *wanted != held.firmware),
-        cpu: cpu.filter(|wanted| *wanted != held.cpu),
+        cpu_model: cpu.filter(|wanted| *wanted != held.cpu_model),
         machine: machine.filter(|wanted| *wanted != held.machine),
         disk: disk.filter(|wanted| *wanted != held.disk),
         password: if fields.remove_password {
@@ -242,7 +245,7 @@ pub struct ImportFields {
     pub login: usize,
     pub arch: usize,
     pub firmware: usize,
-    pub cpu: String,
+    pub cpu_model: String,
     pub machine: usize,
     pub disk: usize,
     pub digest: String,
@@ -271,8 +274,8 @@ pub fn import_request(fields: &ImportFields) -> Result<Import, String> {
         login: *Login::ALL.get(fields.login).unwrap_or(&Login::None),
         hardware: vm_core::import::Hardware {
             firmware: firmware_of(fields.firmware)?.unwrap_or_default(),
-            cpu: blank(&fields.cpu)
-                .map(|cpu| settings::parse_cpu(&cpu))
+            cpu_model: blank(&fields.cpu_model)
+                .map(|cpu| settings::parse_cpu_model(&cpu))
                 .transpose()?,
             machine: chipset_of(fields.machine)?.unwrap_or_default(),
             disk: disk_of(fields.disk)?.unwrap_or_default(),
@@ -564,14 +567,14 @@ pub fn file_row(
 fn hardware_rows(
     form: &Form,
     firmware: usize,
-    cpu: &str,
+    cpu_model: &str,
     machine: usize,
     disk: usize,
 ) -> (adw::ComboRow, adw::EntryRow, adw::ComboRow, adw::ComboRow) {
     let group = form.group("Hardware");
     (
         combo(&group, "Firmware", &FIRMWARE, firmware),
-        entry(&group, "CPU model", cpu),
+        entry(&group, "CPU model", cpu_model),
         combo(&group, "Chipset", &CHIPSET, machine),
         combo(&group, "Disk controller", &DISK, disk),
     )
@@ -593,13 +596,19 @@ pub fn run_dialog(
     let password = password(&group, "Console password");
     let ssh_config = combo(&group, "Add an SSH config entry", &SSH_CONFIG, 0);
     let pull = combo(&group, "Fetch the image", &PULL, 0);
+    let auto_remove = switch(
+        &group,
+        "Remove once stopped",
+        "Deletes the machine and its disk when it stops",
+        false,
+    );
     let sizes = form.group("Size");
     let memory = entry(&sizes, "Memory", "2G");
     let cpus = spin(&sizes, "Processors", (1.0, 255.0), 2.0);
     let disk_size = entry(&sizes, "Disk size", "");
     let sharing = form.group("Sharing");
-    let ports = entry(&sharing, "Published ports, as host:guest", "");
-    let volumes = lines(&sharing, "Shared directories, one host:guest per line", "");
+    let ports = entry(&sharing, PORTS_TITLE, "");
+    let volumes = lines(&sharing, VOLUMES_TITLE, "");
     let (firmware, cpu, machine, disk) = hardware_rows(&form, 0, "", 0, 0);
     let _ = host;
     form.present(
@@ -616,11 +625,12 @@ pub fn run_dialog(
                 disk_size: disk_size.text().to_string(),
                 pull: pull.selected() as usize,
                 firmware: firmware.selected() as usize,
-                cpu: cpu.text().to_string(),
+                cpu_model: cpu.text().to_string(),
                 machine: machine.selected() as usize,
                 disk: disk.selected() as usize,
                 password: password.text().to_string(),
                 ssh_config: ssh_config.selected() as usize,
+                auto_remove: auto_remove.is_active(),
             };
             Ok(vec![Command::Run(Box::new(run_request(&fields)?))])
         },
@@ -656,16 +666,12 @@ pub fn settings_dialog(
     let cpus = spin(&sizes, "Processors", (1.0, 255.0), f64::from(fields.cpus));
     let disk_size = entry(&sizes, "Grow the disk to", "");
     let sharing = form.group("Sharing");
-    let ports = entry(&sharing, "Published ports, as host:guest", &fields.ports);
-    let volumes = lines(
-        &sharing,
-        "Shared directories, one host:guest per line",
-        &fields.volumes,
-    );
+    let ports = entry(&sharing, PORTS_TITLE, &fields.ports);
+    let volumes = lines(&sharing, VOLUMES_TITLE, &fields.volumes);
     let (firmware, cpu, machine, disk) = hardware_rows(
         &form,
         fields.firmware,
-        &fields.cpu,
+        &fields.cpu_model,
         fields.machine,
         fields.disk,
     );
@@ -691,7 +697,7 @@ pub fn settings_dialog(
                 volumes: text_of(&volumes),
                 disk_size: disk_size.text().to_string(),
                 firmware: firmware.selected() as usize,
-                cpu: cpu.text().to_string(),
+                cpu_model: cpu.text().to_string(),
                 machine: machine.selected() as usize,
                 disk: disk.selected() as usize,
                 password: password.text().to_string(),
@@ -851,7 +857,7 @@ pub fn import_dialog(parent: &impl IsA<gtk::Widget>, host: &Host, sink: Rc<dyn F
                 login: login.selected() as usize,
                 arch: arch.selected() as usize,
                 firmware: firmware.selected() as usize,
-                cpu: cpu.text().to_string(),
+                cpu_model: cpu.text().to_string(),
                 machine: machine.selected() as usize,
                 disk: disk.selected() as usize,
                 digest: digest.text().to_string(),
@@ -1142,6 +1148,63 @@ mod tests {
         assert_eq!(request.ssh_config, None);
         assert!(request.ports.is_empty());
         assert!(request.name.is_none());
+        assert!(!request.auto_remove);
+    }
+
+    #[test]
+    fn ports_and_volumes_take_an_address_and_a_mode() {
+        let ports = parse_ports("8080:80, 0.0.0.0:8443:443\n127.0.0.1:2222:22")
+            .unwrap_or_else(|reason| panic!("{reason}"));
+        assert_eq!(
+            ports.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["8080:80", "0.0.0.0:8443:443", "127.0.0.1:2222:22"]
+        );
+        let directory = std::env::temp_dir().display().to_string();
+        let shares = parse_shares(&format!("{directory}:/mnt/a:ro\n{directory}:/mnt/b\n"))
+            .unwrap_or_else(|reason| panic!("{reason}"));
+        assert_eq!(
+            shares
+                .iter()
+                .map(|share| share.readonly)
+                .collect::<Vec<_>>(),
+            [true, false]
+        );
+    }
+
+    #[test]
+    fn the_settings_show_addresses_and_modes_as_they_are_given() {
+        let mut held = machine();
+        held.ports.push(Port {
+            address: Some(std::net::Ipv4Addr::UNSPECIFIED),
+            host: 8443,
+            guest: 443,
+        });
+        let directory = std::env::temp_dir();
+        held.shares.push(Share {
+            tag: "share".to_owned(),
+            source: directory.clone(),
+            target: "/mnt/a".to_owned(),
+            readonly: true,
+            pid: None,
+            started: None,
+        });
+        let fields = SettingsFields::of(&held);
+        assert_eq!(fields.ports, "8080:80, 0.0.0.0:8443:443");
+        assert_eq!(fields.volumes, format!("{}:/mnt/a:ro", directory.display()));
+        let changes = start_changes(&held, &fields).unwrap_or_else(|reason| panic!("{reason}"));
+        assert_eq!(changes.ports, None);
+        assert_eq!(changes.shares, None);
+        let writable = SettingsFields {
+            volumes: format!("{}:/mnt/a", directory.display()),
+            ..fields
+        };
+        let changes = start_changes(&held, &writable).unwrap_or_else(|reason| panic!("{reason}"));
+        assert!(
+            changes
+                .shares
+                .is_some_and(|shares| shares.len() == 1 && !shares[0].readonly),
+            "a change of mode is a change"
+        );
     }
 
     #[test]
@@ -1157,13 +1220,15 @@ mod tests {
             disk_size: "40G".to_owned(),
             pull: 2,
             firmware: 2,
-            cpu: "max".to_owned(),
+            cpu_model: "max".to_owned(),
             machine: 1,
             disk: 2,
             password: String::new(),
             ssh_config: 2,
+            auto_remove: true,
         })
         .unwrap_or_else(|reason| panic!("{reason}"));
+        assert!(request.auto_remove);
         assert_eq!(request.memory, 4096);
         assert_eq!(request.ports.len(), 2);
         assert_eq!(request.pull, Some(Pull::Always));
@@ -1197,7 +1262,7 @@ mod tests {
             memory: 2048,
             cpus: 2,
             firmware: Firmware::Bios,
-            cpu: "max".to_owned(),
+            cpu_model: "max".to_owned(),
             machine: Chipset::Q35,
             disk: Disk::Virtio,
             user: "dave".to_owned(),
@@ -1208,10 +1273,12 @@ mod tests {
             started: None,
             generation: 0,
             ssh_config: false,
+            auto_remove: false,
             media: vm_core::catalogue::Media::Disk,
             cdrom: None,
             password: None,
             ports: vec![Port {
+                address: None,
                 host: 8080,
                 guest: 80,
             }],

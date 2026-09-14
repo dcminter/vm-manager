@@ -69,7 +69,7 @@ pub enum Command {
     Pause {
         name: String,
     },
-    Resume {
+    Unpause {
         name: String,
     },
     Remove {
@@ -130,7 +130,7 @@ impl Command {
                 name, force: true, ..
             } => format!("Killing {name}"),
             Self::Pause { name } => format!("Pausing {name}"),
-            Self::Resume { name } => format!("Resuming {name}"),
+            Self::Unpause { name } => format!("Unpausing {name}"),
             Self::Remove { name, .. } => format!("Removing {name}"),
             Self::Clone { name, target, .. } => format!("Cloning {name} to {target}"),
             Self::RemoveImage { reference, .. } => format!("Removing {reference}"),
@@ -275,7 +275,7 @@ fn perform(command: &Command, progress: &dyn Fn(String, Option<f64>)) -> Result<
             &mut observe,
         )?),
         Command::Pause { name } => Outcome::Switched(machines::pause(name)?),
-        Command::Resume { name } => Outcome::Switched(machines::resume(name)?),
+        Command::Unpause { name } => Outcome::Switched(machines::unpause(name)?),
         Command::Remove { name, force } => Outcome::Removed(machines::remove(name, *force)?),
         Command::Clone {
             name,

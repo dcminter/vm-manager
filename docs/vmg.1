@@ -16,10 +16,11 @@ The sidebar, hidden until the header button or F9 shows it, lists this host,
 its machines and the images it holds. Selecting one opens a tab. The host tab
 lists the machines and every image the catalogues name in tables, with toggles that narrow them to running machines, held images or the
 host's architecture, and a menu that acts on the checked rows. A machine's tab
-shows its state, access, hardware, ports and volumes, and the actions its state
-allows. An image's tab shows what
+shows what
 .B vm inspect
-reports. Right-clicking a table row offers the same actions.
+reports for it, and the actions its state allows. An image's tab shows what
+.B vm inspect
+reports for an image. Right-clicking a table row offers the same actions.
 .PP
 Consoles, shells, logs and file copies open as terminal tabs. A console tab is
 attached to the machine's serial console; a shell tab runs
@@ -52,8 +53,8 @@ Start, Settings…, Eject CD-ROM
 with its options in the settings dialog and
 .BR \-\-eject .
 .TP
-Pause, Resume, Stop, Kill, Remove…
-.BR pause ", " resume ", " stop ", " kill " and " rm .
+Pause, Unpause, Stop, Kill, Remove…
+.BR pause ", " unpause ", " stop ", " kill " and " rm .
 .TP
 Console, Shell, Logs, Copy Files…, Screen, Screenshot…, Clone…
 .BR console ", " ssh ", " logs ", " cp ", " screen ", " screenshot " and " clone .

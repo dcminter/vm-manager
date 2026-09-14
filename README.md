@@ -33,7 +33,7 @@ cargo run -p vm -- images
 | Command | Purpose |
 |---|---|
 | `vm images` | List the images the catalogues name; `--local`, `--remote` or `--catalogue` narrows it |
-| `vm inspect <image>` | Show an image's details, origin and users; `--arch` picks a build |
+| `vm inspect <name or image>` | Show a machine's settings, or an image's details, origin and users; `--type` chooses, `--arch` picks a build |
 | `vm pull <image>` | Fetch an image into the local store |
 | `vm import <source> <image>` | Bring an image file or URL into the local store |
 | `vm export <image> <file>` | Copy an image from the local store to a file |
@@ -44,18 +44,18 @@ cargo run -p vm -- images
 | `vm gui` | Open the window, `vmg` |
 | `vm ssh <name>` | Open a shell on a machine, or run a command in it |
 | `vm cp <from> <to>` | Copy files, naming one side as `name:path` |
-| `vm ps` | List machines; `--all` includes stopped ones, `--follow` refreshes |
-| `vm stop <name>` | Ask the guest to shut down, then force it |
-| `vm pause <name>` | Stop a machine's processors |
-| `vm resume <name>` | Resume a paused machine |
-| `vm kill <name>` | Stop a machine without telling the guest |
-| `vm logs <name>` | Show a machine's console output; `--follow` streams it |
+| `vm ps` | List machines; `--all` includes stopped ones, `--follow` refreshes, `-q` lists names only |
+| `vm stop <name>...` | Ask the guests to shut down, then force them |
+| `vm pause <name>...` | Stop machines' processors |
+| `vm unpause <name>...` | Let paused machines carry on |
+| `vm kill <name>...` | Stop machines without telling the guests |
+| `vm logs <name>` | Show a machine's console output; `--follow` streams it, `--tail` shortens it |
 | `vm console <name>` | Attach to a machine's serial console; Ctrl-] detaches |
 | `vm screen <name>` | Open a VNC viewer on a machine's screen |
 | `vm screenshot <name> [file]` | Save a machine's screen as a PNG |
-| `vm clone <name> <image>` | Save a machine's disk as a new image; `--description` describes it |
-| `vm rm <name>` | Delete a machine and its disk |
-| `vm rmi <image>` | Delete an image from the local store |
+| `vm clone <name> <image>` | Save a machine's disk as a new image; `-m` describes it |
+| `vm rm <name>...` | Delete machines and their disks |
+| `vm rmi <image>...` | Delete images from the local store |
 | `vm prune` | Remove machines and images nothing needs; `--all` includes anything unused |
 
 An image is named `repository:tag`, as in `debian:trixie`. The tag defaults to
@@ -73,7 +73,7 @@ its publisher's checksum, which `vm pull` verifies.
 
 An entry may declare that its image is compressed (`compression`), its
 `format`, a `source_format` to convert to qcow2 when pulled, `media = "cdrom"`
-for a CD-ROM image, and hardware it needs: `firmware`, `cpu`, `machine` and
+for a CD-ROM image, and hardware it needs: `firmware`, `cpu_model`, `machine` and
 `disk`.
 
 ### Importing
@@ -91,7 +91,7 @@ vm import https://example.com/os-installer.iso installer:1.0
 An imported URL stays fetchable: `vm prune --all` may remove the file, and
 `vm run` or `vm pull` fetches and converts it again. `--forget-url` keeps only
 the local copy. `--login cloud-init` marks an image that takes a cloud-init
-seed, `--firmware`, `--machine`, `--disk` and `--cpu` give hardware it needs,
+seed, `--firmware`, `--machine`, `--disk` and `--cpu-model` give hardware it needs,
 `--digest` checks the source, and `--force` replaces an image of the same name.
 
 ### Exporting
@@ -111,9 +111,11 @@ vm export appliance:1.0 ./appliance --compress zstd
 ## Machines
 
 `vm run` fetches the image if needed and starts a machine with its own
-writable disk. `-p host:guest` forwards a port, `-v /host/path:/guest/path`
-shares a directory, `-m` sets memory, `--cpus` processors, and `--name` the
-name.
+writable disk. `-p host:guest` forwards a port on 127.0.0.1, and
+`-p address:host:guest` on another address; `-v /host/path:/guest/path` shares a
+directory, read-only with a trailing `:ro`. `-m` sets memory, `--cpus`
+processors, `--cpu-model` the QEMU CPU model, and `--name` the name. `--rm`
+removes the machine once it stops.
 
 Each machine gets its own key pair and an account named by `--user`, so `vm
 ssh` needs no password. `vm ssh` wraps `ssh`, so `~/.ssh/config` and the agent
@@ -132,7 +134,7 @@ by a `Host` there is refused. `vm rm` or `vm start --no-ssh-config` removes the
 entry.
 
 `vm start` accepts the same settings as `vm run` and applies them from then on.
-`--no-publish`, `--no-volume` and `--no-password` clear them.
+`--no-port`, `--no-volume` and `--no-password` clear them.
 
 Images without cloud-init still run, but take no key and no account.
 

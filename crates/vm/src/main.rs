@@ -12,7 +12,7 @@ mod units;
 
 use clap::{Parser, Subcommand};
 use clap_complete::engine::{ArgValueCandidates, ArgValueCompleter};
-use output::{Format, Report};
+use output::{Batch, Format, Report};
 use reports::Origin;
 use std::process::ExitCode;
 use style::Style;
@@ -60,12 +60,15 @@ enum Command {
         #[arg(long, add = ArgValueCandidates::new(completion::catalogue_name))]
         catalogue: Option<String>,
     },
-    /// Show what an image reference resolves to
+    /// Show an instance, or what an image reference resolves to
     Inspect {
-        /// Image reference, such as debian:trixie
-        #[arg(add = ArgValueCandidates::new(completion::any_catalogue_image))]
+        /// Instance name, or image reference such as debian:trixie
+        #[arg(add = ArgValueCandidates::new(completion::inspectable))]
         reference: String,
-        /// Architecture of the build to show, instead of this host's
+        /// Look only for an instance or only for an image; an instance is otherwise preferred
+        #[arg(long = "type", value_enum, value_name = "TYPE")]
+        kind: Option<InspectType>,
+        /// Architecture of the image build to show, instead of this host's
         #[arg(long, add = ArgValueCandidates::new(completion::architecture))]
         arch: Option<String>,
     },
@@ -95,14 +98,14 @@ enum Command {
         /// Processors
         #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u32).range(1..=255))]
         cpus: u32,
-        /// Forward a host port to a guest port, as host:guest
-        #[arg(long, short, value_parser = settings::parse_port)]
-        publish: Vec<vm_core::instance::Port>,
+        /// Forward a host port to a guest port, as host:guest or address:host:guest; repeatable
+        #[arg(long, short, alias = "publish", value_name = "[ADDRESS:]HOST:GUEST", value_parser = settings::parse_port)]
+        port: Vec<vm_core::instance::Port>,
         /// Account to create in the guest; defaults to the config file's setting, or vm
-        #[arg(long, value_parser = settings::parse_user)]
+        #[arg(long, short, value_parser = settings::parse_user)]
         user: Option<String>,
-        /// Share a host directory with the guest, as host:guest
-        #[arg(long, short = 'v', value_parser = settings::parse_share)]
+        /// Share a host directory with the guest, as host:guest, read-only as host:guest:ro; repeatable
+        #[arg(long, short = 'v', value_name = "HOST:GUEST[:ro]", value_parser = settings::parse_share)]
         volume: Vec<vm_core::instance::Share>,
         /// Grow the disk to this size, such as 40G
         #[arg(long)]
@@ -114,8 +117,11 @@ enum Command {
         #[arg(long, value_parser = settings::parse_firmware, add = ArgValueCandidates::new(completion::firmware))]
         firmware: Option<vm_core::machine::Firmware>,
         /// QEMU CPU model instead of what the image asks for, such as Penryn,+avx
-        #[arg(long, value_parser = settings::parse_cpu)]
-        cpu: Option<String>,
+        #[arg(long, value_parser = settings::parse_cpu_model)]
+        cpu_model: Option<String>,
+        /// Remove the instance once it stops
+        #[arg(long = "rm")]
+        auto_remove: bool,
         /// Machine type, q35 or pc, instead of what the image asks for
         #[arg(long, value_parser = settings::parse_machine, add = ArgValueCandidates::new(completion::chipset))]
         machine: Option<vm_core::machine::Chipset>,
@@ -143,20 +149,20 @@ enum Command {
         /// Processors
         #[arg(long, value_parser = clap::value_parser!(u32).range(1..=255))]
         cpus: Option<u32>,
-        /// Forward a host port to a guest port, as host:guest, replacing existing forwards
-        #[arg(long, short, value_parser = settings::parse_port, conflicts_with = "no_publish")]
-        publish: Vec<vm_core::instance::Port>,
+        /// Forward a host port to a guest port, as host:guest or address:host:guest, replacing existing forwards; repeatable
+        #[arg(long, short, alias = "publish", value_name = "[ADDRESS:]HOST:GUEST", value_parser = settings::parse_port, conflicts_with = "no_port")]
+        port: Vec<vm_core::instance::Port>,
         /// Forward nothing
-        #[arg(long)]
-        no_publish: bool,
-        /// Share a host directory with the guest, as host:guest, replacing existing shares
-        #[arg(long, short = 'v', value_parser = settings::parse_share, conflicts_with = "no_volume")]
+        #[arg(long, alias = "no-publish")]
+        no_port: bool,
+        /// Share a host directory with the guest, as host:guest or host:guest:ro, replacing existing shares; repeatable
+        #[arg(long, short = 'v', value_name = "HOST:GUEST[:ro]", value_parser = settings::parse_share, conflicts_with = "no_volume")]
         volume: Vec<vm_core::instance::Share>,
         /// Share nothing
         #[arg(long)]
         no_volume: bool,
         /// Account to use in the guest; the one it has is left in place
-        #[arg(long, value_parser = settings::parse_user)]
+        #[arg(long, short, value_parser = settings::parse_user)]
         user: Option<String>,
         /// Grow the disk to this size, such as 40G
         #[arg(long)]
@@ -165,8 +171,8 @@ enum Command {
         #[arg(long, value_parser = settings::parse_firmware, add = ArgValueCandidates::new(completion::firmware))]
         firmware: Option<vm_core::machine::Firmware>,
         /// QEMU CPU model, such as Penryn,+avx
-        #[arg(long, value_parser = settings::parse_cpu)]
-        cpu: Option<String>,
+        #[arg(long, value_parser = settings::parse_cpu_model)]
+        cpu_model: Option<String>,
         /// Machine type, q35 or pc
         #[arg(long, value_parser = settings::parse_machine, add = ArgValueCandidates::new(completion::chipset))]
         machine: Option<vm_core::machine::Chipset>,
@@ -213,35 +219,39 @@ enum Command {
         #[arg(long, short)]
         all: bool,
         /// List them again every second until interrupted
-        #[arg(long, short)]
+        #[arg(long, conflicts_with = "quiet")]
         follow: bool,
+        /// List only their names
+        #[arg(long, short)]
+        quiet: bool,
     },
-    /// Shut an instance down
+    /// Shut instances down
     Stop {
-        /// Instance name
-        #[arg(add = ArgValueCandidates::new(completion::running_instance))]
-        name: String,
-        /// Seconds to wait for the guest before insisting
+        /// Instance names
+        #[arg(required = true, add = ArgValueCandidates::new(completion::running_instance))]
+        names: Vec<String>,
+        /// Seconds to wait for each guest before insisting
         #[arg(long, short, default_value_t = 30)]
         timeout: u64,
     },
-    /// Stop an instance's processors without telling the guest
+    /// Stop instances' processors without telling the guests
     Pause {
-        /// Instance name
-        #[arg(add = ArgValueCandidates::new(completion::running_instance))]
-        name: String,
+        /// Instance names
+        #[arg(required = true, add = ArgValueCandidates::new(completion::running_instance))]
+        names: Vec<String>,
     },
-    /// Let a paused instance carry on
-    Resume {
-        /// Instance name
-        #[arg(add = ArgValueCandidates::new(completion::running_instance))]
-        name: String,
+    /// Let paused instances carry on
+    #[command(alias = "resume")]
+    Unpause {
+        /// Instance names
+        #[arg(required = true, add = ArgValueCandidates::new(completion::running_instance))]
+        names: Vec<String>,
     },
-    /// Stop an instance without telling the guest
+    /// Stop instances without telling the guests
     Kill {
-        /// Instance name
-        #[arg(add = ArgValueCandidates::new(completion::running_instance))]
-        name: String,
+        /// Instance names
+        #[arg(required = true, add = ArgValueCandidates::new(completion::running_instance))]
+        names: Vec<String>,
     },
     /// Save an instance's disk as a new image
     Clone {
@@ -254,7 +264,7 @@ enum Command {
         #[arg(long, short)]
         force: bool,
         /// Description for the new image, instead of naming the source instance
-        #[arg(long, value_parser = settings::parse_description)]
+        #[arg(long, short = 'm', value_parser = settings::parse_description)]
         description: Option<String>,
     },
     /// Show an instance's console
@@ -265,8 +275,8 @@ enum Command {
         /// Write new output as it arrives, until the instance stops
         #[arg(long, short)]
         follow: bool,
-        /// Show only the last few lines
-        #[arg(long, short = 'n')]
+        /// Show only this many of the last lines
+        #[arg(long = "tail", short = 'n', value_name = "LINES")]
         lines: Option<usize>,
     },
     /// Attach this terminal to an instance's serial console; Ctrl-] detaches
@@ -298,7 +308,7 @@ enum Command {
         /// Name for the image, as repository:tag
         image: String,
         /// Description for the image, instead of naming the source
-        #[arg(long, value_parser = settings::parse_description)]
+        #[arg(long, short = 'm', value_parser = settings::parse_description)]
         description: Option<String>,
         /// How the guest is reached: cloud-init, or none for the console only
         #[arg(long, default_value = "none", value_parser = settings::parse_login, add = ArgValueCandidates::new(completion::login))]
@@ -310,8 +320,8 @@ enum Command {
         #[arg(long, value_parser = settings::parse_firmware, add = ArgValueCandidates::new(completion::firmware))]
         firmware: Option<vm_core::machine::Firmware>,
         /// QEMU CPU model the image needs, such as Penryn,+avx
-        #[arg(long, value_parser = settings::parse_cpu)]
-        cpu: Option<String>,
+        #[arg(long, value_parser = settings::parse_cpu_model)]
+        cpu_model: Option<String>,
         /// Machine type the image needs, q35 or pc
         #[arg(long, value_parser = settings::parse_machine, add = ArgValueCandidates::new(completion::chipset))]
         machine: Option<vm_core::machine::Chipset>,
@@ -346,12 +356,12 @@ enum Command {
         #[arg(long, short)]
         force: bool,
     },
-    /// Delete an image from the local store
+    /// Delete images from the local store
     Rmi {
-        /// Image reference, such as debian:trixie
-        #[arg(add = ArgValueCandidates::new(completion::held_image))]
-        reference: String,
-        /// Delete it even though machines need it
+        /// Image references, such as debian:trixie
+        #[arg(required = true, add = ArgValueCandidates::new(completion::held_image))]
+        references: Vec<String>,
+        /// Delete them even though machines need them
         #[arg(long, short)]
         force: bool,
     },
@@ -374,15 +384,22 @@ enum Command {
     },
     /// Open the graphical front end, vmg
     Gui,
-    /// Delete an instance and its disk
+    /// Delete instances and their disks
     Rm {
-        /// Instance name
-        #[arg(add = ArgValueCandidates::new(completion::any_instance))]
-        name: String,
-        /// Remove it even if it is running
+        /// Instance names
+        #[arg(required = true, add = ArgValueCandidates::new(completion::any_instance))]
+        names: Vec<String>,
+        /// Remove them even if they are running
         #[arg(long, short)]
         force: bool,
     },
+}
+
+/// Which kind of thing `vm inspect` looks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum InspectType {
+    Instance,
+    Image,
 }
 
 fn main() -> ExitCode {
@@ -493,13 +510,14 @@ fn run_request(command: &Command) -> vm_core::Result<Request> {
         name,
         memory,
         cpus,
-        publish,
+        port,
         user,
         volume,
         disk_size,
         pull,
         firmware,
-        cpu,
+        cpu_model,
+        auto_remove,
         machine,
         disk,
         password,
@@ -514,17 +532,18 @@ fn run_request(command: &Command) -> vm_core::Result<Request> {
         name: name.clone(),
         memory: *memory,
         cpus: *cpus,
-        ports: publish.clone(),
+        ports: port.clone(),
         user: user.clone(),
         shares: volume.clone(),
         disk_size: disk_size.clone(),
         pull: pull.map(Pull::plain),
         firmware: *firmware,
-        cpu: cpu.clone(),
+        cpu_model: cpu_model.clone(),
         machine: *machine,
         disk: *disk,
         password: asked_password(*password)?,
         ssh_config: toggle(*add_ssh_config, *no_ssh_config),
+        auto_remove: *auto_remove,
     })
 }
 
@@ -533,14 +552,14 @@ fn start_changes(command: &Command) -> vm_core::Result<Changes> {
     let Command::Start {
         memory,
         cpus,
-        publish,
-        no_publish,
+        port,
+        no_port,
         volume,
         no_volume,
         user,
         disk_size,
         firmware,
-        cpu,
+        cpu_model,
         machine,
         disk,
         password,
@@ -563,12 +582,12 @@ fn start_changes(command: &Command) -> vm_core::Result<Changes> {
         },
         memory: *memory,
         cpus: *cpus,
-        ports: replacement(publish, *no_publish),
+        ports: replacement(port, *no_port),
         shares: replacement(volume, *no_volume),
         user: user.clone(),
         disk_size: disk_size.clone(),
         firmware: *firmware,
-        cpu: cpu.clone(),
+        cpu_model: cpu_model.clone(),
         ssh_config: toggle(*add_ssh_config, *no_ssh_config),
         eject: *eject,
     })
@@ -577,12 +596,19 @@ fn start_changes(command: &Command) -> vm_core::Result<Changes> {
 /// Runs a command that needs no catalogue or store; `None` if this is not one.
 fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> {
     let report: Box<dyn Report> = match &cli.command {
-        Command::Ps { all, follow } => {
+        Command::Ps { all, follow, quiet } => {
             if *follow {
                 machines::watch(*all, cli.format, style)?;
                 return Ok(Some(Outcome::Written));
             }
-            Box::new(vm_core::machines::list(*all)?)
+            listing(*all, *quiet)?
+        }
+        Command::Inspect {
+            reference,
+            kind,
+            arch,
+        } if inspects_instance(reference, *kind, arch.is_some()) => {
+            Box::new(vm_core::machines::inspect(reference)?)
         }
         Command::Start { name, .. } => Box::new(vm_core::machines::start(
             name,
@@ -627,21 +653,31 @@ fn machine_command(cli: &Cli, style: Style) -> vm_core::Result<Option<Outcome>> 
         Command::Cp { from, to } => {
             return machines::copy(from, to).map(|held| match held {});
         }
-        Command::Stop { name, timeout } => Box::new(vm_core::machines::stop(
-            name,
-            std::time::Duration::from_secs(*timeout),
-            false,
-            &mut progress::observer(cli.format.is_text(), style),
-        )?),
-        Command::Pause { name } => Box::new(vm_core::machines::pause(name)?),
-        Command::Resume { name } => Box::new(vm_core::machines::resume(name)?),
-        Command::Kill { name } => Box::new(vm_core::machines::stop(
-            name,
-            std::time::Duration::from_secs(10),
-            true,
-            &mut progress::observer(cli.format.is_text(), style),
-        )?),
-        Command::Rm { name, force } => Box::new(vm_core::machines::remove(name, *force)?),
+        Command::Stop { names, timeout } => Batch::each(names, |name| {
+            Ok(Box::new(vm_core::machines::stop(
+                name,
+                std::time::Duration::from_secs(*timeout),
+                false,
+                &mut progress::observer(cli.format.is_text(), style),
+            )?))
+        })?,
+        Command::Pause { names } => {
+            Batch::each(names, |name| Ok(Box::new(vm_core::machines::pause(name)?)))?
+        }
+        Command::Unpause { names } => Batch::each(names, |name| {
+            Ok(Box::new(vm_core::machines::unpause(name)?))
+        })?,
+        Command::Kill { names } => Batch::each(names, |name| {
+            Ok(Box::new(vm_core::machines::stop(
+                name,
+                std::time::Duration::from_secs(10),
+                true,
+                &mut progress::observer(cli.format.is_text(), style),
+            )?))
+        })?,
+        Command::Rm { names, force } => Batch::each(names, |name| {
+            Ok(Box::new(vm_core::machines::remove(name, *force)?))
+        })?,
         Command::Clone {
             name,
             image,
@@ -684,7 +720,9 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
             *all_architectures,
             origin,
         ))),
-        Command::Inspect { reference, arch } => Ok(Box::new(vm_core::images::inspect(
+        Command::Inspect {
+            reference, arch, ..
+        } => Ok(Box::new(vm_core::images::inspect(
             &catalogue,
             &store,
             reference,
@@ -719,9 +757,11 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
             },
             &mut progress::observer(cli.format.is_text(), style),
         )?)),
-        Command::Rmi { reference, force } => Ok(Box::new(vm_core::machines::remove_image(
-            &catalogue, &store, reference, *force,
-        )?)),
+        Command::Rmi { references, force } => Batch::each(references, |reference| {
+            Ok(Box::new(vm_core::machines::remove_image(
+                &catalogue, &store, reference, *force,
+            )?))
+        }),
         Command::Prune {
             target,
             all,
@@ -746,7 +786,7 @@ fn catalogue_command(cli: &Cli, style: Style) -> vm_core::Result<Box<dyn Report>
         | Command::Stop { .. }
         | Command::Kill { .. }
         | Command::Pause { .. }
-        | Command::Resume { .. }
+        | Command::Unpause { .. }
         | Command::Clone { .. }
         | Command::Logs { .. }
         | Command::Console { .. }
@@ -771,7 +811,7 @@ fn import(
         login,
         arch,
         firmware,
-        cpu,
+        cpu_model,
         machine,
         disk,
         digest,
@@ -783,7 +823,7 @@ fn import(
     };
     let hardware = vm_core::import::Hardware {
         firmware: firmware.unwrap_or_default(),
-        cpu: cpu.clone(),
+        cpu_model: cpu_model.clone(),
         machine: machine.unwrap_or_default(),
         disk: disk.unwrap_or_default(),
     };
@@ -805,6 +845,27 @@ fn import(
         },
         &mut progress::observer(cli.format.is_text(), style),
     )
+}
+
+/// The instances `vm ps` lists, in full or by name alone.
+fn listing(all: bool, quiet: bool) -> vm_core::Result<Box<dyn Report>> {
+    let listed = vm_core::machines::list(all)?;
+    Ok(if quiet {
+        Box::new(reports::Names(
+            listed.rows.into_iter().map(|row| row.name).collect(),
+        ))
+    } else {
+        Box::new(listed)
+    })
+}
+
+/// Whether `vm inspect` shows an instance rather than an image.
+fn inspects_instance(reference: &str, kind: Option<InspectType>, arch: bool) -> bool {
+    match kind {
+        Some(InspectType::Instance) => true,
+        Some(InspectType::Image) => false,
+        None => !arch && vm_core::machines::exists(reference).unwrap_or(false),
+    }
 }
 
 /// A pair of opposing flags, where neither means as it was.
@@ -838,7 +899,7 @@ mod tests {
     #[test]
     fn a_list_and_its_refusal_cannot_be_asked_for_together() {
         use clap::Parser as _;
-        let outcome = Cli::try_parse_from(["vm", "start", "one", "-p", "80:80", "--no-publish"]);
+        let outcome = Cli::try_parse_from(["vm", "start", "one", "-p", "80:80", "--no-port"]);
         assert!(outcome.is_err());
         let outcome = Cli::try_parse_from(["vm", "start", "one", "-v", "/tmp:/mnt", "--no-volume"]);
         assert!(outcome.is_err());
@@ -847,12 +908,13 @@ mod tests {
     #[test]
     fn a_listing_can_be_followed_and_can_include_what_is_stopped() {
         use clap::Parser as _;
-        let cli = Cli::try_parse_from(["vm", "ps", "-a", "-f"]).unwrap();
+        let cli = Cli::try_parse_from(["vm", "ps", "-a", "--follow"]).unwrap();
         assert!(matches!(
             cli.command,
             Command::Ps {
                 all: true,
-                follow: true
+                follow: true,
+                quiet: false
             }
         ));
         let cli = Cli::try_parse_from(["vm", "ps"]).unwrap();
@@ -860,9 +922,256 @@ mod tests {
             cli.command,
             Command::Ps {
                 all: false,
-                follow: false
+                follow: false,
+                quiet: false
             }
         ));
+    }
+
+    #[test]
+    fn a_listing_can_name_only_the_instances_but_not_while_following() {
+        use clap::Parser as _;
+        for quiet in ["-q", "--quiet"] {
+            let cli = Cli::try_parse_from(["vm", "ps", "-a", quiet]).unwrap();
+            assert!(
+                matches!(
+                    cli.command,
+                    Command::Ps {
+                        all: true,
+                        follow: false,
+                        quiet: true
+                    }
+                ),
+                "{quiet}"
+            );
+        }
+        assert!(Cli::try_parse_from(["vm", "ps", "-q", "--follow"]).is_err());
+        assert!(
+            Cli::try_parse_from(["vm", "ps", "-f"]).is_err(),
+            "-f is not short for --follow"
+        );
+    }
+
+    #[test]
+    fn ports_are_given_with_port_and_still_accepted_with_publish() {
+        use clap::Parser as _;
+        use vm_core::instance::Port;
+        let ports = |arguments: &[&str]| match Cli::try_parse_from(arguments).unwrap().command {
+            Command::Run { port, .. } | Command::Start { port, .. } => port,
+            _ => panic!("neither a run nor a start"),
+        };
+        let expected = vec![
+            Port::new(8080, 80),
+            Port {
+                address: Some(std::net::Ipv4Addr::UNSPECIFIED),
+                host: 8443,
+                guest: 443,
+            },
+        ];
+        for arguments in [
+            ["vm", "run", "x", "-p", "8080:80", "-p", "0.0.0.0:8443:443"],
+            [
+                "vm",
+                "run",
+                "x",
+                "--port",
+                "8080:80",
+                "--port",
+                "0.0.0.0:8443:443",
+            ],
+            [
+                "vm",
+                "run",
+                "x",
+                "--publish",
+                "8080:80",
+                "-p",
+                "0.0.0.0:8443:443",
+            ],
+            [
+                "vm",
+                "start",
+                "x",
+                "--port",
+                "8080:80",
+                "--publish",
+                "0.0.0.0:8443:443",
+            ],
+        ] {
+            assert_eq!(ports(&arguments), expected, "{arguments:?}");
+        }
+        assert!(Cli::try_parse_from(["vm", "run", "x", "-p", "8080"]).is_err());
+        let cleared = |arguments: &[&str]| match Cli::try_parse_from(arguments).unwrap().command {
+            command @ Command::Start { .. } => start_changes(&command).unwrap().ports,
+            _ => panic!("not a start"),
+        };
+        assert_eq!(
+            cleared(&["vm", "start", "x", "--no-port"]),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            cleared(&["vm", "start", "x", "--no-publish"]),
+            Some(Vec::new())
+        );
+        assert_eq!(cleared(&["vm", "start", "x"]), None);
+    }
+
+    #[test]
+    fn a_volume_can_be_read_only() {
+        use clap::Parser as _;
+        let directory = std::env::temp_dir().display().to_string();
+        let first = format!("{directory}:/mnt/a:ro");
+        let second = format!("{directory}:/mnt/b");
+        let cli = Cli::try_parse_from(["vm", "run", "x", "-v", &first, "-v", &second]).unwrap();
+        let Command::Run { volume, .. } = cli.command else {
+            panic!("not a run");
+        };
+        assert_eq!(
+            volume
+                .iter()
+                .map(|share| (share.target.as_str(), share.readonly))
+                .collect::<Vec<_>>(),
+            [("/mnt/a", true), ("/mnt/b", false)]
+        );
+    }
+
+    #[test]
+    fn a_run_can_ask_for_removal_once_stopped() {
+        use clap::Parser as _;
+        let removed = |arguments: &[&str]| match Cli::try_parse_from(arguments).unwrap().command {
+            command @ Command::Run { .. } => run_request(&command).unwrap().auto_remove,
+            _ => panic!("not a run"),
+        };
+        assert!(removed(&["vm", "run", "x", "--rm"]));
+        assert!(!removed(&["vm", "run", "x"]));
+        assert!(Cli::try_parse_from(["vm", "start", "x", "--rm"]).is_err());
+    }
+
+    #[test]
+    fn the_user_has_a_short_form() {
+        use clap::Parser as _;
+        match Cli::try_parse_from(["vm", "run", "x", "-u", "dave"])
+            .unwrap()
+            .command
+        {
+            Command::Run { user, .. } => assert_eq!(user.as_deref(), Some("dave")),
+            _ => panic!("not a run"),
+        }
+        match Cli::try_parse_from(["vm", "start", "x", "-u", "dave"])
+            .unwrap()
+            .command
+        {
+            Command::Start { user, .. } => assert_eq!(user.as_deref(), Some("dave")),
+            _ => panic!("not a start"),
+        }
+    }
+
+    #[test]
+    fn the_old_cpu_flag_is_gone() {
+        use clap::Parser as _;
+        for command in ["run", "start", "import"] {
+            let mut arguments = vec!["vm", command, "x"];
+            if command == "import" {
+                arguments.push("y:1");
+            }
+            arguments.extend(["--cpu", "max"]);
+            assert!(Cli::try_parse_from(&arguments).is_err(), "{command}");
+        }
+    }
+
+    #[test]
+    fn commands_on_instances_take_several_names() {
+        use clap::Parser as _;
+        let names = |arguments: &[&str]| match Cli::try_parse_from(arguments).unwrap().command {
+            Command::Stop { names, .. }
+            | Command::Kill { names }
+            | Command::Pause { names }
+            | Command::Unpause { names }
+            | Command::Rm { names, .. } => names,
+            Command::Rmi { references, .. } => references,
+            _ => panic!("not a command taking names"),
+        };
+        for command in ["stop", "kill", "pause", "unpause", "resume", "rm", "rmi"] {
+            assert_eq!(names(&["vm", command, "one"]), ["one"], "{command}");
+            assert_eq!(
+                names(&["vm", command, "one", "two", "three"]),
+                ["one", "two", "three"],
+                "{command}"
+            );
+            assert!(Cli::try_parse_from(["vm", command]).is_err(), "{command}");
+        }
+        let cli = Cli::try_parse_from(["vm", "stop", "one", "two", "-t", "5"]).unwrap();
+        assert!(matches!(cli.command, Command::Stop { timeout: 5, .. }));
+        let cli = Cli::try_parse_from(["vm", "rm", "-f", "one", "two"]).unwrap();
+        assert!(matches!(cli.command, Command::Rm { force: true, .. }));
+    }
+
+    #[test]
+    fn a_description_has_a_short_form() {
+        use clap::Parser as _;
+        match Cli::try_parse_from(["vm", "clone", "one", "mine:1", "-m", "Mine"])
+            .unwrap()
+            .command
+        {
+            Command::Clone { description, .. } => assert_eq!(description.as_deref(), Some("Mine")),
+            _ => panic!("not a clone"),
+        }
+        match Cli::try_parse_from(["vm", "import", "disk.vmdk", "mine:1", "-m", "Mine"])
+            .unwrap()
+            .command
+        {
+            Command::Import { description, .. } => {
+                assert_eq!(description.as_deref(), Some("Mine"));
+            }
+            _ => panic!("not an import"),
+        }
+    }
+
+    #[test]
+    fn logs_take_a_tail_length() {
+        use clap::Parser as _;
+        let lines = |arguments: &[&str]| match Cli::try_parse_from(arguments).unwrap().command {
+            Command::Logs { lines, .. } => lines,
+            _ => panic!("not logs"),
+        };
+        assert_eq!(lines(&["vm", "logs", "one", "--tail", "5"]), Some(5));
+        assert_eq!(lines(&["vm", "logs", "one", "-n", "7"]), Some(7));
+        assert_eq!(lines(&["vm", "logs", "one"]), None);
+        assert!(Cli::try_parse_from(["vm", "logs", "one", "--lines", "5"]).is_err());
+    }
+
+    #[test]
+    fn inspect_can_be_told_what_to_look_for() {
+        use clap::Parser as _;
+        let kind = |arguments: &[&str]| match Cli::try_parse_from(arguments).unwrap().command {
+            Command::Inspect { kind, .. } => kind,
+            _ => panic!("not an inspect"),
+        };
+        assert_eq!(kind(&["vm", "inspect", "one"]), None);
+        assert_eq!(
+            kind(&["vm", "inspect", "one", "--type", "instance"]),
+            Some(InspectType::Instance)
+        );
+        assert_eq!(
+            kind(&["vm", "inspect", "debian", "--type", "image"]),
+            Some(InspectType::Image)
+        );
+        assert!(Cli::try_parse_from(["vm", "inspect", "one", "--type", "container"]).is_err());
+        assert!(inspects_instance(
+            "anything",
+            Some(InspectType::Instance),
+            false
+        ));
+        assert!(!inspects_instance(
+            "anything",
+            Some(InspectType::Image),
+            false
+        ));
+        assert!(
+            !inspects_instance("anything", None, true),
+            "an architecture is asked of an image"
+        );
+        assert!(!inspects_instance("debian:trixie", None, false));
     }
 
     #[test]
@@ -881,38 +1190,61 @@ mod tests {
             "debian:trixie",
             "--firmware",
             "uefi",
-            "--cpu",
+            "--cpu-model",
             "Penryn,+avx",
         ])
         .unwrap();
-        let Command::Run { firmware, cpu, .. } = cli.command else {
+        let Command::Run {
+            firmware,
+            cpu_model,
+            ..
+        } = cli.command
+        else {
             panic!("not a run");
         };
         assert_eq!(firmware, Some(vm_core::machine::Firmware::Uefi));
-        assert_eq!(cpu.as_deref(), Some("Penryn,+avx"));
+        assert_eq!(cpu_model.as_deref(), Some("Penryn,+avx"));
     }
 
     #[test]
     fn run_leaves_the_machine_to_the_image_when_nothing_is_said() {
         use clap::Parser as _;
         let cli = Cli::try_parse_from(["vm", "run", "debian:trixie"]).unwrap();
-        let Command::Run { firmware, cpu, .. } = cli.command else {
+        let Command::Run {
+            firmware,
+            cpu_model,
+            ..
+        } = cli.command
+        else {
             panic!("not a run");
         };
         assert_eq!(firmware, None);
-        assert_eq!(cpu, None);
+        assert_eq!(cpu_model, None);
     }
 
     #[test]
     fn start_takes_machine_changes() {
         use clap::Parser as _;
-        let cli = Cli::try_parse_from(["vm", "start", "pd", "--firmware", "bios", "--cpu", "max"])
-            .unwrap();
-        let Command::Start { firmware, cpu, .. } = cli.command else {
+        let cli = Cli::try_parse_from([
+            "vm",
+            "start",
+            "pd",
+            "--firmware",
+            "bios",
+            "--cpu-model",
+            "max",
+        ])
+        .unwrap();
+        let Command::Start {
+            firmware,
+            cpu_model,
+            ..
+        } = cli.command
+        else {
             panic!("not a start");
         };
         assert_eq!(firmware, Some(vm_core::machine::Firmware::Bios));
-        assert_eq!(cpu.as_deref(), Some("max"));
+        assert_eq!(cpu_model.as_deref(), Some("max"));
     }
 
     #[test]
@@ -937,8 +1269,8 @@ mod tests {
     fn unusable_machine_settings_are_refused_by_the_parser() {
         use clap::Parser as _;
         assert!(Cli::try_parse_from(["vm", "run", "x", "--firmware", "coreboot"]).is_err());
-        assert!(Cli::try_parse_from(["vm", "run", "x", "--cpu", "max -S"]).is_err());
-        assert!(Cli::try_parse_from(["vm", "start", "x", "--cpu", ""]).is_err());
+        assert!(Cli::try_parse_from(["vm", "run", "x", "--cpu-model", "max -S"]).is_err());
+        assert!(Cli::try_parse_from(["vm", "start", "x", "--cpu-model", ""]).is_err());
         assert!(Cli::try_parse_from(["vm", "run", "x", "--machine", "isapc"]).is_err());
         assert!(Cli::try_parse_from(["vm", "start", "x", "--disk", "scsi"]).is_err());
     }
@@ -1105,7 +1437,7 @@ mod tests {
             "pc",
             "--disk",
             "ide",
-            "--cpu",
+            "--cpu-model",
             "Penryn",
             "--digest",
             &digest,

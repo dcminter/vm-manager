@@ -27,11 +27,15 @@ pub fn parse_memory(text: &str) -> std::result::Result<u64, String> {
 
 /// Parses `/host/path:/guest/path`, tagging the share with the host directory's name.
 pub fn parse_share(text: &str) -> std::result::Result<Share, String> {
-    let (source, target) = text
-        .rsplit_once(':')
-        .ok_or_else(|| format!("'{text}' is not a share; write it as host:guest"))?;
+    let refuse = || format!("'{text}' is not a share; write it as host:guest or host:guest:ro");
+    let (text_without_mode, readonly) = match text.rsplit_once(':') {
+        Some((rest, "ro")) => (rest, true),
+        Some((rest, "rw")) => (rest, false),
+        _ => (text, false),
+    };
+    let (source, target) = text_without_mode.rsplit_once(':').ok_or_else(refuse)?;
     if source.is_empty() || target.is_empty() {
-        return Err(format!("'{text}' is not a share; write it as host:guest"));
+        return Err(refuse());
     }
     if !target.starts_with('/') {
         return Err(format!("'{target}' is not an absolute path in the guest"));
@@ -47,6 +51,7 @@ pub fn parse_share(text: &str) -> std::result::Result<Share, String> {
         tag: tag_for(&source),
         source,
         target: target.to_owned(),
+        readonly,
         pid: None,
         started: None,
     })
@@ -69,18 +74,34 @@ fn tag_for(source: &Path) -> String {
     }
 }
 
-/// Turns `2222:22` into a forward.
+/// Turns `2222:22` or `0.0.0.0:2222:22` into a forward.
 pub fn parse_port(text: &str) -> std::result::Result<Port, String> {
-    let (host, guest) = text
-        .split_once(':')
-        .ok_or_else(|| format!("'{text}' is not a port mapping; write it as host:guest"))?;
+    let number = |part: &str| {
+        part.parse::<u16>()
+            .map_err(|_| format!("'{part}' is not a port number"))
+    };
+    let parts: Vec<&str> = text.split(':').collect();
+    let (address, host, guest) = match parts.as_slice() {
+        [host, guest] => (None, *host, *guest),
+        [address, host, guest] => (
+            Some(
+                address
+                    .parse::<std::net::Ipv4Addr>()
+                    .map_err(|_| format!("'{address}' is not an IPv4 address"))?,
+            ),
+            *host,
+            *guest,
+        ),
+        _ => {
+            return Err(format!(
+                "'{text}' is not a port mapping; write it as host:guest or address:host:guest"
+            ));
+        }
+    };
     Ok(Port {
-        host: host
-            .parse()
-            .map_err(|_| format!("'{host}' is not a port number"))?,
-        guest: guest
-            .parse()
-            .map_err(|_| format!("'{guest}' is not a port number"))?,
+        address,
+        host: number(host)?,
+        guest: number(guest)?,
     })
 }
 
@@ -107,8 +128,8 @@ pub fn parse_disk(text: &str) -> std::result::Result<Disk, String> {
     text.parse().map_err(|error: Error| error.to_string())
 }
 
-pub fn parse_cpu(text: &str) -> std::result::Result<String, String> {
-    machine::check_cpu(text)
+pub fn parse_cpu_model(text: &str) -> std::result::Result<String, String> {
+    machine::check_cpu_model(text)
         .map(|()| text.to_owned())
         .map_err(|error| error.to_string())
 }
@@ -194,21 +215,37 @@ mod tests {
 
     #[test]
     fn a_port_mapping_is_host_then_guest() {
-        assert_eq!(
-            parse_port("2222:22"),
-            Ok(Port {
-                host: 2222,
-                guest: 22
-            })
-        );
+        assert_eq!(parse_port("2222:22"), Ok(Port::new(2222, 22)));
+    }
+
+    #[test]
+    fn a_port_mapping_can_name_the_address_it_listens_on() {
+        let port = parse_port("0.0.0.0:8080:80").unwrap();
+        assert_eq!(port.address, Some(std::net::Ipv4Addr::UNSPECIFIED));
+        assert_eq!((port.host, port.guest), (8080, 80));
+        assert_eq!(port.to_string(), "0.0.0.0:8080:80");
+        let loopback = parse_port("8080:80").unwrap();
+        assert_eq!(loopback.listen(), std::net::Ipv4Addr::LOCALHOST);
+        assert_eq!(loopback.to_string(), "8080:80");
     }
 
     #[test]
     fn a_port_mapping_that_is_not_one_is_refused() {
-        assert!(parse_port("2222").is_err());
-        assert!(parse_port("2222:").is_err());
-        assert!(parse_port("http:22").is_err());
-        assert!(parse_port("99999:22").is_err());
+        for refused in [
+            "2222",
+            "2222:",
+            ":22",
+            "http:22",
+            "99999:22",
+            "-1:22",
+            "localhost:8080:80",
+            "::1:8080:80",
+            "10.0.0.256:8080:80",
+            "1.2.3.4:5:6:7",
+            "",
+        ] {
+            assert!(parse_port(refused).is_err(), "{refused}");
+        }
     }
 
     #[test]
@@ -216,6 +253,22 @@ mod tests {
         let share = parse_share(&format!("{}:/mnt/tmp", std::env::temp_dir().display())).unwrap();
         assert_eq!(share.target, "/mnt/tmp");
         assert_eq!(share.tag, "tmp");
+        assert!(!share.readonly);
+    }
+
+    #[test]
+    fn a_share_can_be_read_only() {
+        let directory = std::env::temp_dir();
+        let share = parse_share(&format!("{}:/mnt/tmp:ro", directory.display())).unwrap();
+        assert_eq!(share.target, "/mnt/tmp");
+        assert!(share.readonly);
+        assert!(share.spec().ends_with(":/mnt/tmp:ro"), "{}", share.spec());
+        let share = parse_share(&format!("{}:/mnt/tmp:rw", directory.display())).unwrap();
+        assert_eq!(share.target, "/mnt/tmp");
+        assert!(!share.readonly);
+        assert!(share.spec().ends_with(":/mnt/tmp"), "{}", share.spec());
+        assert!(parse_share(&format!("{}:ro", directory.display())).is_err());
+        assert!(parse_share(&format!("{}:/mnt/tmp:rx", directory.display())).is_err());
     }
 
     #[test]

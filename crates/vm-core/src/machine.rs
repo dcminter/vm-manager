@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 /// The processor model presented unless an image or the user asks for another.
-pub const DEFAULT_CPU: &str = "max";
+pub const DEFAULT_CPU_MODEL: &str = "max";
 
 /// The size of the blank disk beside a CD-ROM image, unless one is asked for.
 pub const BLANK_DISK_SIZE: &str = "20G";
@@ -179,7 +179,7 @@ pub const fn check_disk(chipset: Chipset, disk: Disk) -> Result<()> {
 }
 
 /// Refuses a CPU model that could not be one, before it reaches the command line.
-pub fn check_cpu(text: &str) -> Result<()> {
+pub fn check_cpu_model(text: &str) -> Result<()> {
     let usable = !text.is_empty()
         && text.len() <= 256
         && text.starts_with(|first: char| first.is_ascii_alphanumeric())
@@ -190,7 +190,7 @@ pub fn check_cpu(text: &str) -> Result<()> {
         Ok(())
     } else {
         Err(Error::MachineSetting {
-            setting: "cpu",
+            setting: "CPU model",
             value: text.to_owned(),
             expected: "a QEMU CPU model such as 'max' or 'Penryn,+avx'",
         })
@@ -416,7 +416,7 @@ mod tests {
             "Skylake-Client-v4",
             "EPYC,-svm",
         ] {
-            assert!(check_cpu(model).is_ok(), "{model}");
+            assert!(check_cpu_model(model).is_ok(), "{model}");
         }
     }
 
@@ -431,7 +431,7 @@ mod tests {
             "a;b",
             &"a".repeat(257),
         ] {
-            let error = check_cpu(model).unwrap_err();
+            let error = check_cpu_model(model).unwrap_err();
             assert_eq!(error.kind(), "invalid-machine-setting", "{model:?}");
         }
     }

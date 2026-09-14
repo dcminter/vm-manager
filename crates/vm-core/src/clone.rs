@@ -142,7 +142,8 @@ fn write_entry(
         source_format: None,
         media: Media::Disk,
         firmware: instance.firmware,
-        cpu: (instance.cpu != crate::machine::DEFAULT_CPU).then(|| instance.cpu.clone()),
+        cpu_model: (instance.cpu_model != crate::machine::DEFAULT_CPU_MODEL)
+            .then(|| instance.cpu_model.clone()),
         machine: instance.machine,
         disk: instance.disk,
     };
@@ -195,7 +196,7 @@ mod tests {
             memory: 2048,
             cpus: 2,
             firmware: crate::machine::Firmware::Bios,
-            cpu: "max".to_owned(),
+            cpu_model: "max".to_owned(),
             machine: crate::machine::Chipset::Q35,
             disk: crate::machine::Disk::Virtio,
             user: "vm".to_owned(),
@@ -206,6 +207,7 @@ mod tests {
             started: None,
             generation: 0,
             ssh_config: false,
+            auto_remove: false,
             media: crate::catalogue::Media::Disk,
             cdrom: None,
             password: None,
@@ -314,7 +316,7 @@ mod tests {
         let digest = Digest::new(ALGORITHM, &"c".repeat(64));
         let mut held = instance("demo");
         held.firmware = crate::machine::Firmware::Uefi;
-        held.cpu = "Penryn,vendor=GenuineIntel,+avx".to_owned();
+        held.cpu_model = "Penryn,vendor=GenuineIntel,+avx".to_owned();
         held.machine = crate::machine::Chipset::Pc;
         held.disk = crate::machine::Disk::Ide;
         write_entry(&scratch.0, &held, "mine", "latest", &digest, 1, None).unwrap();
@@ -322,7 +324,7 @@ mod tests {
         let reference: Reference = "mine:latest".parse().unwrap();
         let (_, artifact) = catalogue.resolve(&reference, "amd64").unwrap();
         assert_eq!(artifact.firmware, crate::machine::Firmware::Uefi);
-        assert_eq!(artifact.cpu(), "Penryn,vendor=GenuineIntel,+avx");
+        assert_eq!(artifact.cpu_model(), "Penryn,vendor=GenuineIntel,+avx");
         assert_eq!(artifact.machine, crate::machine::Chipset::Pc);
         assert_eq!(artifact.disk, crate::machine::Disk::Ide);
     }

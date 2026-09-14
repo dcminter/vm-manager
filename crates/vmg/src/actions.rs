@@ -29,17 +29,26 @@ impl Outcome {
                 RunStatus::Restarted => format!("Started {}", run.name),
                 RunStatus::AlreadyRunning => format!("{} is already running", run.name),
             },
-            Self::Stopped(stopped) => match stopped.outcome {
-                StopOutcome::PoweredDown => format!("{} shut down", stopped.name),
-                StopOutcome::Killed => format!("Killed {}", stopped.name),
-                StopOutcome::Unresponsive => {
-                    format!("{} did not shut down, so it was killed", stopped.name)
+            Self::Stopped(stopped) => {
+                let said = match stopped.outcome {
+                    StopOutcome::PoweredDown => format!("{} shut down", stopped.name),
+                    StopOutcome::Killed => format!("Killed {}", stopped.name),
+                    StopOutcome::Unresponsive => {
+                        format!("{} did not shut down, so it was killed", stopped.name)
+                    }
+                    StopOutcome::Unreachable => {
+                        format!("{} was ended without asking the guest", stopped.name)
+                    }
+                    StopOutcome::AlreadyStopped => {
+                        format!("{} was already stopped", stopped.name)
+                    }
+                };
+                if stopped.removed {
+                    format!("{said}, and removed")
+                } else {
+                    said
                 }
-                StopOutcome::Unreachable => {
-                    format!("{} was ended without asking the guest", stopped.name)
-                }
-                StopOutcome::AlreadyStopped => format!("{} was already stopped", stopped.name),
-            },
+            }
             Self::Switched(switched) => format!("{} is {}", switched.name, switched.state),
             Self::Removed(removed) => format!("Removed {}", removed.name),
             Self::Cloned(cloned) => format!(
@@ -230,7 +239,7 @@ impl VmgWindow {
                 );
             }
             Action::Pause => self.send(Command::Pause { name }),
-            Action::Resume => self.send(Command::Resume { name }),
+            Action::Unpause => self.send(Command::Unpause { name }),
             Action::Console => match terminals::console(&name) {
                 Ok(tab) => {
                     self.open_terminal(&format!("console:{name}"), &format!("{name} console"), tab);
@@ -287,6 +296,18 @@ impl VmgWindow {
                         name,
                         timeout: if action == Action::Kill { 10 } else { 30 },
                         force: action == Action::Kill,
+                    });
+                }
+            }
+            Action::Pause | Action::Unpause => {
+                for (name, running) in machines {
+                    if !running {
+                        continue;
+                    }
+                    self.send(if action == Action::Pause {
+                        Command::Pause { name }
+                    } else {
+                        Command::Unpause { name }
                     });
                 }
             }

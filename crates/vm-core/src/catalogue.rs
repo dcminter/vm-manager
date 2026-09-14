@@ -79,7 +79,8 @@ struct RawImage {
     media: Media,
     #[serde(default)]
     firmware: Firmware,
-    cpu: Option<String>,
+    #[serde(alias = "cpu")]
+    cpu_model: Option<String>,
     #[serde(default)]
     machine: Chipset,
     #[serde(default)]
@@ -104,15 +105,17 @@ pub struct Artifact {
     pub media: Media,
     pub firmware: Firmware,
     /// The CPU model this image needs, where the default will not boot it.
-    pub cpu: Option<String>,
+    pub cpu_model: Option<String>,
     pub machine: Chipset,
     pub disk: Disk,
 }
 
 impl Artifact {
     /// The CPU model to present, falling back to the default.
-    pub fn cpu(&self) -> &str {
-        self.cpu.as_deref().unwrap_or(machine::DEFAULT_CPU)
+    pub fn cpu_model(&self) -> &str {
+        self.cpu_model
+            .as_deref()
+            .unwrap_or(machine::DEFAULT_CPU_MODEL)
     }
 }
 
@@ -378,8 +381,8 @@ impl NewEntry<'_> {
         if !artifact.disk.is_default() {
             let _ = writeln!(body, "disk = \"{}\"", artifact.disk.name());
         }
-        if let Some(cpu) = &artifact.cpu {
-            let _ = writeln!(body, "cpu = {}", toml_string(cpu));
+        if let Some(cpu) = &artifact.cpu_model {
+            let _ = writeln!(body, "cpu_model = {}", toml_string(cpu));
         }
         body
     }
@@ -485,9 +488,9 @@ fn read_entry(path: &Path) -> Result<Entry> {
                 source_format: image.source_format,
                 media: image.media,
                 firmware: image.firmware,
-                cpu: match image.cpu {
+                cpu_model: match image.cpu_model {
                     Some(cpu) => {
-                        machine::check_cpu(&cpu).map_err(|error| Error::CatalogueEntry {
+                        machine::check_cpu_model(&cpu).map_err(|error| Error::CatalogueEntry {
                             path: path.to_owned(),
                             reason: error.to_string(),
                         })?;
@@ -677,7 +680,7 @@ digest = "sha256:{}"
             source_format: None,
             media: Media::Disk,
             firmware: Firmware::Bios,
-            cpu: None,
+            cpu_model: None,
             machine: Chipset::Q35,
             disk: Disk::Virtio,
         }
@@ -690,7 +693,7 @@ digest = "sha256:{}"
             compression: Compression::Xz,
             source_format: Some("vmdk".to_owned()),
             firmware: Firmware::Uefi,
-            cpu: Some("Penryn,+avx".to_owned()),
+            cpu_model: Some("Penryn,+avx".to_owned()),
             machine: Chipset::Pc,
             disk: Disk::Ide,
             ..plain_artifact()
@@ -761,8 +764,8 @@ digest = "sha256:{}"
             .resolve(&"puredarwin:minimal".parse().unwrap(), "amd64")
             .unwrap();
         assert_eq!(artifact.firmware, Firmware::Bios);
-        assert_eq!(artifact.cpu, None);
-        assert_eq!(artifact.cpu(), "max");
+        assert_eq!(artifact.cpu_model, None);
+        assert_eq!(artifact.cpu_model(), "max");
         assert_eq!(artifact.machine, Chipset::Q35);
         assert_eq!(artifact.disk, Disk::Virtio);
     }
@@ -779,7 +782,40 @@ digest = "sha256:{}"
             .resolve(&"puredarwin:minimal".parse().unwrap(), "amd64")
             .unwrap();
         assert_eq!(artifact.firmware, Firmware::Uefi);
-        assert_eq!(artifact.cpu(), "Penryn,vendor=GenuineIntel,+avx");
+        assert_eq!(artifact.cpu_model(), "Penryn,vendor=GenuineIntel,+avx");
+    }
+
+    #[test]
+    fn an_entry_names_its_cpu_model_either_way() {
+        for key in ["cpu_model", "cpu"] {
+            let scratch = Scratch::new(&format!("cpukey{key}"));
+            scratch.write(
+                "puredarwin/minimal.toml",
+                &machine_entry(&format!("{key} = \"Penryn,+avx\"")),
+            );
+            let catalogue = scratch.load().unwrap();
+            let (_, artifact) = catalogue
+                .resolve(&"puredarwin:minimal".parse().unwrap(), "amd64")
+                .unwrap();
+            assert_eq!(artifact.cpu_model(), "Penryn,+avx", "{key}");
+        }
+    }
+
+    #[test]
+    fn a_written_entry_names_its_cpu_model_as_cpu_model() {
+        let artifact = Artifact {
+            cpu_model: Some("Penryn,+avx".to_owned()),
+            ..plain_artifact()
+        };
+        let text = NewEntry {
+            name: "mine",
+            tag: "1.0",
+            description: "d",
+            login: Login::None,
+            artifact: &artifact,
+        }
+        .to_toml();
+        assert!(text.contains("cpu_model = \"Penryn,+avx\""), "{text}");
     }
 
     #[test]
@@ -815,7 +851,7 @@ digest = "sha256:{}"
         );
         let error = scratch.load().unwrap_err();
         assert!(error.to_string().contains("minimal.toml"), "{error}");
-        assert!(error.to_string().contains("cpu"), "{error}");
+        assert!(error.to_string().contains("CPU model"), "{error}");
     }
 
     #[test]

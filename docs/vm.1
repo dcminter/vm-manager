@@ -34,12 +34,19 @@ and
 limit the list to those catalogues; see
 .BR vm\-config (5).
 .TP
-.BI inspect " IMAGE"
-Show an image's build for this host's architecture, or for
+.BI inspect " NAME\fR|\fPIMAGE"
+Show a machine: its state, image, sizes, hardware, account, SSH port, console
+password, forwarded ports, volumes and directory. Otherwise show an image's
+build for this host's architecture, or for
 .BR \-\-arch " ARCH" :
 its other architectures, the catalogue naming it and any lower catalogues it
 hides, its catalogue entry file, its source and digest, how its guest is
-reached, where it is stored if pulled, and the machines using it.
+reached, where it is stored if pulled, and the machines using it. A machine is
+preferred to an image of the same name unless
+.B \-\-arch
+is given;
+.BR "\-\-type instance" " or " "\-\-type image"
+looks for only one.
 .TP
 .BI pull " IMAGE"
 Fetch an image into the local store and verify it against the catalogue digest.
@@ -86,11 +93,11 @@ for an image that takes a seed, or
 .BI \-\-arch " ARCH"
 The image's architecture, instead of this host's.
 .TP
-.BR \-\-firmware ", " \-\-cpu ", " \-\-machine ", " \-\-disk
+.BR \-\-firmware ", " \-\-cpu\-model ", " \-\-machine ", " \-\-disk
 Hardware the image needs, as for
 .BR run .
 .TP
-.BI \-\-description " TEXT"
+.BI \-m ", " \-\-description " TEXT"
 The image's description, which otherwise names the source.
 .TP
 .BR \-f ", " \-\-force
@@ -183,8 +190,8 @@ the disk holds a system, so an installer's reboot starts the installed system.
 .TP
 .BI start " NAME"
 Start a stopped machine. Takes
-.BR \-\-memory ", " \-\-cpus ", " \-\-publish ", " \-\-volume ", " \-\-user ,
-.BR \-\-disk\-size ", " \-\-firmware ", " \-\-cpu ", " \-\-machine ", " \-\-disk ,
+.BR \-\-memory ", " \-\-cpus ", " \-\-port ", " \-\-volume ", " \-\-user ,
+.BR \-\-disk\-size ", " \-\-firmware ", " \-\-cpu\-model ", " \-\-machine ", " \-\-disk ,
 .B \-\-password
 and
 .B \-\-add\-ssh\-config
@@ -192,7 +199,7 @@ as
 .B run
 does; each change persists, and settings not given are kept. Forwards and shares
 are replaced as a list.
-.BR \-\-no\-publish ", " \-\-no\-volume ", " \-\-no\-password
+.BR \-\-no\-port ", " \-\-no\-volume ", " \-\-no\-password
 and
 .B \-\-no\-ssh\-config
 remove them.
@@ -222,18 +229,20 @@ List running machines;
 .B \-\-all
 includes stopped ones.
 .B \-\-follow
-refreshes every second. Memory and disk are shown as used out of allotted; the
+refreshes every second.
+.BR \-q ", " \-\-quiet
+lists names alone. Memory and disk are shown as used out of allotted; the
 document formats give
 .IR memory ", " memory_used ", " disk " and " disk_used
 in mebibytes.
 .TP
-.BI stop " NAME"
-Ask the guest to shut down, and kill it after
-.B \-\-timeout
+.BI stop " NAME..."
+Ask each guest to shut down, and kill it after
+.BR \-t ", " \-\-timeout
 seconds (default 30).
 .TP
-.BI pause " NAME"
-Stop a machine's processors. Nothing is saved, so a paused machine does not
+.BI pause " NAME..."
+Stop machines' processors. Nothing is saved, so a paused machine does not
 survive a host reboot or
 .BR "vm kill" .
 .B vm ssh
@@ -241,11 +250,13 @@ and
 .B vm cp
 refuse a paused machine.
 .TP
-.BI resume " NAME"
-Resume a paused machine.
+.BI unpause " NAME..."
+Let paused machines carry on.
+.B resume
+is another name for it.
 .TP
-.BI kill " NAME"
-Stop a machine without telling the guest.
+.BI kill " NAME..."
+Stop machines without telling the guests.
 .TP
 .BI console " NAME"
 Attach the terminal to the machine's serial console. Ctrl-] detaches. One
@@ -276,11 +287,11 @@ Colour is kept when writing to a terminal; the guest's other terminal controls,
 such as cursor queries and screen clears, are left out.
 .B \-\-follow
 streams it until the machine stops;
-.BI \-n ", " \-\-lines " COUNT"
+.BI \-n ", " \-\-tail " COUNT"
 shows only the last lines.
 .TP
-.BI rmi " IMAGE"
-Delete an image name from the local store. A catalogue image is listed again as
+.BI rmi " IMAGE..."
+Delete image names from the local store. A catalogue image is listed again as
 unfetched; an image made by
 .B vm clone
 or
@@ -295,13 +306,13 @@ Save a machine's disk as the image
 flattening it and then verifying it. A running guest is paused meanwhile unless
 .B \-\-force
 is given.
-.BI \-\-description " TEXT"
+.BI \-m ", " \-\-description " TEXT"
 sets the image's description, which otherwise names the source machine.
 .TP
-.BI rm " NAME"
-Delete a machine and its disk.
+.BI rm " NAME..."
+Delete machines and their disks.
 .B \-\-force
-removes a running one.
+removes running ones.
 .TP
 .BI prune " " [\fBmachines\fR|\fBimages\fR]
 Remove machines and images nothing needs: machines first, then images, or only
@@ -332,14 +343,35 @@ Memory, in mebibytes unless suffixed with M or G. Default 2G.
 .BI \-\-cpus " COUNT"
 Processors. Default 2.
 .TP
-.BI \-p ", " \-\-publish " HOST:GUEST"
-Forward a host port to a guest port. Repeatable.
+.BI \-p ", " \-\-port " \fR[\fPADDRESS\fB:\fP\fR]\fPHOST:GUEST"
+Forward a TCP port on the host to a guest port. The host port listens on
+.B 127.0.0.1
+unless an IPv4
+.I ADDRESS
+is given, such as
+.BR 0.0.0.0 .
+Repeatable.
+.B \-\-publish
+is another name for it.
 .TP
-.BI \-v ", " \-\-volume " HOST:GUEST"
-Share a host directory with the guest over virtiofs, mounted at every boot.
+.BI \-v ", " \-\-volume " HOST:GUEST\fR[\fP:ro\fR]\fP"
+Share a host directory with the guest over virtiofs, mounted at every boot;
+read-only with
+.BR :ro .
 Repeatable.
 .TP
-.BI \-\-user " NAME"
+.B \-\-rm
+Remove the machine once it stops:
+.B vm stop
+and
+.B vm kill
+remove it, and a guest that shuts itself down is removed the next time
+.B vm
+or
+.B vmg
+reads the machines.
+.TP
+.BI \-u ", " \-\-user " NAME"
 The account to create in the guest. Defaults to
 .B default_user
 in
@@ -358,7 +390,7 @@ blank disk; default 20G.
 .BR bios " or " uefi ,
 overriding the image.
 .TP
-.BI \-\-cpu " MODEL"
+.BI \-\-cpu\-model " MODEL"
 A QEMU CPU model, such as
 .BR Penryn,+avx ,
 overriding the image. Most images use
@@ -411,6 +443,8 @@ or
 A document is the only thing on standard output; progress and errors go to
 standard error. Errors carry a stable
 .BR kind .
+A command given several names carries on past a name that fails and exits 1;
+its document is then a list holding a report or an error for each name.
 .B vm logs \-\-follow
 and
 .B vm console

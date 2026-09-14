@@ -1,7 +1,7 @@
 //! Launching the hypervisor behind a trait, so the lifecycle is testable without booting.
 
 use crate::error::{Error, Result};
-use crate::instance::{Directory, Instance};
+use crate::instance::{Directory, Instance, Share};
 use crate::machine::{self, Firmware};
 use crate::process::Handle;
 use std::fs::File;
@@ -116,7 +116,7 @@ pub fn arguments(instance: &Instance, directory: &Directory) -> Vec<String> {
     ));
     // The default is `max` rather than `host`, which only exists under KVM.
     push("-cpu");
-    push(&instance.cpu);
+    push(&instance.cpu_model);
     if instance.firmware == Firmware::Uefi {
         if let Some(code) = machine::uefi_code(&instance.arch) {
             push("-drive");
@@ -231,13 +231,20 @@ fn network(instance: &Instance) -> String {
             .fold(String::from("user,id=net0"), |mut netdev, port| {
                 let _ = write!(
                     netdev,
-                    ",hostfwd=tcp:127.0.0.1:{}-:{}",
-                    port.host, port.guest
+                    ",hostfwd=tcp:{}:{}-:{}",
+                    port.listen(),
+                    port.host,
+                    port.guest
                 );
                 netdev
             });
-    // The forward `vm ssh` uses, kept out of the published list.
-    if let Some(port) = instance.ssh_port {
+    // The forward `vm ssh` uses, kept out of the published list unless already in it.
+    if let Some(port) = instance.ssh_port
+        && !instance
+            .ports
+            .iter()
+            .any(|published| published.host == port && published.guest == 22)
+    {
         let _ = write!(netdev, ",hostfwd=tcp:127.0.0.1:{port}-:22");
     }
     netdev
@@ -265,16 +272,20 @@ fn locate(name: &str, path: &str, extras: &[&str], exists: &dyn Fn(&Path) -> boo
 }
 
 /// What to run to serve one share, unsandboxed because the sandbox needs `CAP_SYS_ADMIN`.
-pub fn share_launch(source: &Path, socket: &Path, log: PathBuf) -> Launch {
+pub fn share_launch(share: &Share, socket: &Path, log: PathBuf) -> Launch {
+    let mut arguments = vec![
+        format!("--socket-path={}", socket.display()),
+        "--shared-dir".to_owned(),
+        share.source.display().to_string(),
+        "--sandbox".to_owned(),
+        "none".to_owned(),
+    ];
+    if share.readonly {
+        arguments.push("--readonly".to_owned());
+    }
     Launch {
         program: virtiofsd(),
-        arguments: vec![
-            format!("--socket-path={}", socket.display()),
-            "--shared-dir".to_owned(),
-            source.display().to_string(),
-            "--sandbox".to_owned(),
-            "none".to_owned(),
-        ],
+        arguments,
         log,
     }
 }
@@ -429,7 +440,7 @@ mod tests {
             memory: 2048,
             cpus: 2,
             firmware: crate::machine::Firmware::Bios,
-            cpu: "max".to_owned(),
+            cpu_model: "max".to_owned(),
             machine: crate::machine::Chipset::Q35,
             disk: crate::machine::Disk::Virtio,
             user: "vm".to_owned(),
@@ -440,6 +451,7 @@ mod tests {
             started: None,
             generation: 0,
             ssh_config: false,
+            auto_remove: false,
             media: crate::catalogue::Media::Disk,
             cdrom: None,
             password: None,
@@ -515,7 +527,7 @@ mod tests {
     fn the_recorded_processor_model_is_the_one_presented() {
         let scratch = Scratch::new("cpumodel");
         let mut held = instance("one");
-        held.cpu = "Penryn,vendor=GenuineIntel,+avx".to_owned();
+        held.cpu_model = "Penryn,vendor=GenuineIntel,+avx".to_owned();
         let arguments = arguments(&held, &scratch.directory("one"));
         assert_eq!(
             pair(&arguments, "-cpu"),
@@ -710,14 +722,8 @@ mod tests {
     fn published_ports_become_forwards_on_the_loopback_address() {
         let scratch = Scratch::new("ports");
         let mut held = instance("one");
-        held.ports.push(Port {
-            host: 2222,
-            guest: 22,
-        });
-        held.ports.push(Port {
-            host: 8080,
-            guest: 80,
-        });
+        held.ports.push(Port::new(2222, 22));
+        held.ports.push(Port::new(8080, 80));
         let netdev = pair(&arguments(&held, &scratch.directory("one")), "-netdev").unwrap();
         assert!(
             netdev.contains("hostfwd=tcp:127.0.0.1:2222-:22"),
@@ -727,6 +733,33 @@ mod tests {
             netdev.contains("hostfwd=tcp:127.0.0.1:8080-:80"),
             "{netdev}"
         );
+    }
+
+    #[test]
+    fn a_published_port_listens_on_the_address_it_names() {
+        let scratch = Scratch::new("portaddress");
+        let mut held = instance("one");
+        held.ports.push(Port {
+            address: Some(std::net::Ipv4Addr::UNSPECIFIED),
+            host: 8080,
+            guest: 80,
+        });
+        let netdev = pair(&arguments(&held, &scratch.directory("one")), "-netdev").unwrap();
+        assert_eq!(netdev, "user,id=net0,hostfwd=tcp:0.0.0.0:8080-:80");
+    }
+
+    #[test]
+    fn a_published_ssh_port_is_forwarded_once() {
+        let scratch = Scratch::new("sshpublished");
+        let mut held = instance("one");
+        held.ports.push(Port {
+            address: Some(std::net::Ipv4Addr::UNSPECIFIED),
+            host: 2222,
+            guest: 22,
+        });
+        held.ssh_port = Some(2222);
+        let netdev = pair(&arguments(&held, &scratch.directory("one")), "-netdev").unwrap();
+        assert_eq!(netdev, "user,id=net0,hostfwd=tcp:0.0.0.0:2222-:22");
     }
 
     #[test]
@@ -802,6 +835,7 @@ mod tests {
             tag: tag.to_owned(),
             source: PathBuf::from("/home/x/work"),
             target: target.to_owned(),
+            readonly: false,
             pid: None,
             started: None,
         }
@@ -857,7 +891,7 @@ mod tests {
     #[test]
     fn a_share_is_served_from_the_directory_it_names() {
         let launch = share_launch(
-            Path::new("/home/x/work"),
+            &share("work", "/mnt/work"),
             Path::new("/run/user/1000/vm/abc.fs0"),
             PathBuf::from("/dev/null"),
         );
@@ -870,6 +904,23 @@ mod tests {
             launch.arguments
         );
         assert!(launch.arguments.contains(&"/home/x/work".to_owned()));
+        assert!(!launch.arguments.contains(&"--readonly".to_owned()));
+    }
+
+    #[test]
+    fn a_read_only_share_is_served_read_only() {
+        let mut held = share("work", "/mnt/work");
+        held.readonly = true;
+        let launch = share_launch(
+            &held,
+            Path::new("/run/user/1000/vm/abc.fs0"),
+            PathBuf::from("/dev/null"),
+        );
+        assert!(
+            launch.arguments.contains(&"--readonly".to_owned()),
+            "{:?}",
+            launch.arguments
+        );
     }
 
     #[test]

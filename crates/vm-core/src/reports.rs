@@ -71,7 +71,7 @@ pub struct Inspect {
     pub held: bool,
     pub size: Option<u64>,
     pub firmware: Firmware,
-    pub cpu: String,
+    pub cpu_model: String,
     pub machine: Chipset,
     pub disk: Disk,
     /// Every architecture the entry has a build for.
@@ -106,7 +106,7 @@ impl Inspect {
             held,
             size: artifact.size,
             firmware: artifact.firmware,
-            cpu: artifact.cpu().to_owned(),
+            cpu_model: artifact.cpu_model().to_owned(),
             machine: artifact.machine,
             disk: artifact.disk,
             architectures: entry.architectures(),
@@ -188,6 +188,10 @@ impl RunStatus {
 
 /// What `vm run` or `vm start` left running.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each flag is an independent fact about the machine"
+)]
 pub struct Run {
     pub name: String,
     pub image: String,
@@ -205,7 +209,7 @@ pub struct Run {
     pub screen: String,
     pub status: RunStatus,
     pub firmware: Firmware,
-    pub cpu: String,
+    pub cpu_model: String,
     pub machine: Chipset,
     pub disk: Disk,
     /// Set when this start moved the machine to other firmware.
@@ -216,6 +220,8 @@ pub struct Run {
     pub ssh_config_changed: Option<String>,
     /// The image in the CD-ROM drive.
     pub cdrom: Option<String>,
+    /// Whether the machine is removed once it stops.
+    pub auto_remove: bool,
 }
 
 /// Where a machine's screen can be reached.
@@ -326,6 +332,16 @@ pub struct Machines {
     pub all: bool,
 }
 
+/// One machine in full, as `vm inspect` shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineDetail {
+    pub row: MachineRow,
+    pub instance: Instance,
+    pub directory: String,
+    pub console: String,
+    pub screen: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopOutcome {
     /// The guest took the power button and shut itself down.
@@ -357,6 +373,8 @@ pub struct Stopped {
     pub outcome: StopOutcome,
     /// How long the guest was given, for the message when it took none of it.
     pub waited: u64,
+    /// Whether the machine was removed, having been made with auto-removal.
+    pub removed: bool,
 }
 
 /// How consistent a cloned disk is.

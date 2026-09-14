@@ -69,6 +69,13 @@ pub fn any_catalogue_image() -> Vec<CompletionCandidate> {
     })
 }
 
+/// Instances, then every image, for `vm inspect`.
+pub fn inspectable() -> Vec<CompletionCandidate> {
+    let mut candidates = any_instance();
+    candidates.extend(any_catalogue_image());
+    candidates
+}
+
 /// Every architecture the catalogue has a build for.
 pub fn architecture() -> Vec<CompletionCandidate> {
     loaded().map_or_else(Vec::new, |(catalogue, _)| architectures(&catalogue))
@@ -363,7 +370,7 @@ mod tests {
                     memory: 2048,
                     cpus: 2,
                     firmware: Firmware::Bios,
-                    cpu: "max".to_owned(),
+                    cpu_model: "max".to_owned(),
                     machine: Chipset::Q35,
                     disk: Disk::Virtio,
                     user: "vm".to_owned(),
@@ -374,6 +381,7 @@ mod tests {
                     started: handle.as_ref().map(|held| held.started),
                     generation: 0,
                     ssh_config: false,
+                    auto_remove: false,
                     media: vm_core::catalogue::Media::Disk,
                     cdrom: None,
                     password: None,

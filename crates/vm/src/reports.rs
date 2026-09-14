@@ -139,7 +139,7 @@ impl Report for Inspect {
             ("held", Value::Bool(self.held)),
             ("size", self.size.map_or(Value::Null, Value::Integer)),
             ("firmware", Value::string(self.firmware.name())),
-            ("cpu", Value::string(self.cpu.clone())),
+            ("cpu_model", Value::string(self.cpu_model.clone())),
             ("machine", Value::string(self.machine.name())),
             ("disk", Value::string(self.disk.name())),
             ("architectures", Value::strings(self.architectures.clone())),
@@ -194,21 +194,11 @@ impl Report for Inspect {
         if !self.used_by.is_empty() {
             fields.push(("Used by", self.used_by.join(", ")));
         }
-        if let Some(machine) = machine_text(self.firmware, self.machine, self.disk, &self.cpu) {
+        if let Some(machine) = machine_text(self.firmware, self.machine, self.disk, &self.cpu_model)
+        {
             fields.push(("Machine", machine));
         }
-        let width = fields
-            .iter()
-            .map(|(label, _)| label.chars().count())
-            .max()
-            .unwrap_or(0);
-        fields
-            .into_iter()
-            .map(|(label, value)| {
-                let padding = " ".repeat(width - label.chars().count());
-                format!("{}{padding}  {value}", style.heading(label))
-            })
-            .collect()
+        labelled(fields, style)
     }
 }
 
@@ -294,6 +284,7 @@ impl Report for Update {
 fn ports_value(ports: &[Port]) -> Value {
     Value::list(ports.iter().map(|port| {
         Value::map([
+            ("address", Value::string(port.listen().to_string())),
             ("host", Value::Integer(u64::from(port.host))),
             ("guest", Value::Integer(u64::from(port.guest))),
         ])
@@ -303,7 +294,12 @@ fn ports_value(ports: &[Port]) -> Value {
 fn ports_text(ports: &[Port]) -> String {
     ports
         .iter()
-        .map(|port| format!("{}->{}", port.host, port.guest))
+        .map(|port| {
+            let address = port
+                .address
+                .map_or_else(String::new, |address| format!("{address}:"));
+            format!("{address}{}->{}", port.host, port.guest)
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -333,7 +329,7 @@ impl Report for Run {
             ("console", Value::string(self.console.clone())),
             ("screen", Value::string(self.screen.clone())),
             ("firmware", Value::string(self.firmware.name())),
-            ("cpu", Value::string(self.cpu.clone())),
+            ("cpu_model", Value::string(self.cpu_model.clone())),
             ("machine", Value::string(self.machine.name())),
             ("disk", Value::string(self.disk.name())),
             ("firmware_changed", Value::Bool(self.firmware_changed)),
@@ -348,6 +344,7 @@ impl Report for Run {
                 "cdrom",
                 self.cdrom.clone().map_or(Value::Null, Value::string),
             ),
+            ("auto_remove", Value::Bool(self.auto_remove)),
         ])
     }
 
@@ -391,8 +388,12 @@ impl Report for Run {
                 self.image, self.name
             ));
         }
-        if let Some(machine) = machine_text(self.firmware, self.machine, self.disk, &self.cpu) {
+        if let Some(machine) = machine_text(self.firmware, self.machine, self.disk, &self.cpu_model)
+        {
             lines.push(format!("  machine  {machine}"));
+        }
+        if self.auto_remove {
+            lines.push("  removed  once it stops".to_owned());
         }
         if self.firmware_changed {
             lines.push(style.dim(&format!(
@@ -467,7 +468,12 @@ impl Report for Screenshot {
     }
 }
 
-fn machine_text(firmware: Firmware, machine: Chipset, disk: Disk, cpu: &str) -> Option<String> {
+fn machine_text(
+    firmware: Firmware,
+    machine: Chipset,
+    disk: Disk,
+    cpu_model: &str,
+) -> Option<String> {
     let mut parts = Vec::new();
     if !machine.is_default() {
         parts.push(format!("{} machine", machine.name()));
@@ -478,8 +484,8 @@ fn machine_text(firmware: Firmware, machine: Chipset, disk: Disk, cpu: &str) -> 
     if !firmware.is_default() {
         parts.push(format!("{} firmware", firmware.name()));
     }
-    if cpu != vm_core::machine::DEFAULT_CPU {
-        parts.push(format!("cpu {cpu}"));
+    if cpu_model != vm_core::machine::DEFAULT_CPU_MODEL {
+        parts.push(format!("CPU model {cpu_model}"));
     }
     (!parts.is_empty()).then(|| parts.join(", "))
 }
@@ -592,12 +598,13 @@ impl Report for Stopped {
             ("name", Value::string(self.name.clone())),
             ("outcome", Value::string(self.outcome.slug())),
             ("waited", Value::Integer(self.waited)),
+            ("removed", Value::Bool(self.removed)),
         ])
     }
 
     fn render_text(&self, style: Style) -> Vec<String> {
         let name = style.name(&self.name);
-        vec![match self.outcome {
+        let mut lines = vec![match self.outcome {
             StopOutcome::PoweredDown => format!("Stopped {name}"),
             StopOutcome::Killed => format!("Killed {name}"),
             StopOutcome::Unresponsive => format!(
@@ -609,8 +616,174 @@ impl Report for Stopped {
                 format!("Killed {name}: its monitor could not be reached")
             }
             StopOutcome::AlreadyStopped => format!("{name} was not running"),
-        }]
+        }];
+        if self.removed {
+            lines.push(format!("Removed {name}"));
+        }
+        lines
     }
+}
+
+/// Instance names alone, one per line, as `vm ps --quiet` lists them.
+pub struct Names(pub Vec<String>);
+
+impl Report for Names {
+    fn to_value(&self) -> Value {
+        Value::strings(self.0.clone())
+    }
+
+    fn render_text(&self, _: Style) -> Vec<String> {
+        self.0.clone()
+    }
+}
+
+impl Report for MachineDetail {
+    fn to_value(&self) -> Value {
+        let held = &self.instance;
+        let row = &self.row;
+        let optional = |value: Option<u64>| value.map_or(Value::Null, Value::Integer);
+        Value::map([
+            ("name", Value::string(held.name.clone())),
+            ("image", Value::string(held.image.clone())),
+            ("digest", Value::string(held.digest.clone())),
+            ("arch", Value::string(held.arch.clone())),
+            ("status", Value::string(row.state.slug())),
+            ("created", Value::Integer(held.created)),
+            ("pid", optional(held.pid.map(u64::from))),
+            ("memory", Value::Integer(held.memory)),
+            ("memory_used", optional(row.memory_used)),
+            ("cpus", Value::Integer(u64::from(held.cpus))),
+            ("disk_size", optional(row.disk)),
+            ("disk_used", optional(row.disk_used)),
+            ("firmware", Value::string(held.firmware.name())),
+            ("cpu_model", Value::string(held.cpu_model.clone())),
+            ("machine", Value::string(held.machine.name())),
+            ("disk", Value::string(held.disk.name())),
+            (
+                "cdrom",
+                held.cdrom.as_ref().map_or(Value::Null, |path| {
+                    Value::string(path.display().to_string())
+                }),
+            ),
+            ("user", Value::string(held.user.clone())),
+            ("seeded", Value::Bool(held.seeded)),
+            ("ssh_port", optional(held.ssh_port.map(u64::from))),
+            ("ssh_config", Value::Bool(held.ssh_config)),
+            ("password", Value::string(password_state(held))),
+            ("auto_remove", Value::Bool(held.auto_remove)),
+            ("ports", ports_value(&held.ports)),
+            (
+                "volumes",
+                Value::list(held.shares.iter().map(|share| {
+                    Value::map([
+                        ("source", Value::string(share.source.display().to_string())),
+                        ("target", Value::string(share.target.clone())),
+                        ("tag", Value::string(share.tag.clone())),
+                        ("readonly", Value::Bool(share.readonly)),
+                    ])
+                })),
+            ),
+            ("directory", Value::string(self.directory.clone())),
+            ("console", Value::string(self.console.clone())),
+            ("screen", Value::string(self.screen.clone())),
+        ])
+    }
+
+    fn render_text(&self, style: Style) -> Vec<String> {
+        let held = &self.instance;
+        let row = &self.row;
+        let yes_no = |flag: bool| if flag { "yes" } else { "no" }.to_owned();
+        let mut fields = vec![
+            ("Machine", held.name.clone()),
+            ("Image", format!("{} ({})", held.image, held.arch)),
+            ("Status", row.state.slug().to_owned()),
+            ("Created", format!("{} ago", age(held.created.max(1)))),
+            (
+                "Process",
+                held.pid
+                    .map_or_else(|| "none".to_owned(), |pid| pid.to_string()),
+            ),
+            ("Memory", MachineRow::sizes(row.memory_used, row.memory)),
+            ("Processors", held.cpus.to_string()),
+            ("Disk", MachineRow::sizes(row.disk_used, row.disk)),
+            (
+                "Hardware",
+                format!(
+                    "{} firmware, {} machine, {} disk, CPU model {}",
+                    held.firmware.name(),
+                    held.machine.name(),
+                    held.disk.name(),
+                    held.cpu_model
+                ),
+            ),
+        ];
+        if let Some(cdrom) = &held.cdrom {
+            fields.push(("CD-ROM", cdrom.display().to_string()));
+        }
+        fields.extend([
+            ("User", held.user.clone()),
+            (
+                "Guest access",
+                if held.seeded {
+                    "cloud-init; keys, volumes and ssh"
+                } else {
+                    "console only"
+                }
+                .to_owned(),
+            ),
+            (
+                "SSH port",
+                held.ssh_port
+                    .map_or_else(|| "none".to_owned(), |port| port.to_string()),
+            ),
+            ("SSH config", yes_no(held.ssh_config)),
+            ("Password", password_state(held).to_owned()),
+            ("Auto-remove", yes_no(held.auto_remove)),
+            (
+                "Ports",
+                if held.ports.is_empty() {
+                    "none".to_owned()
+                } else {
+                    ports_text(&held.ports)
+                },
+            ),
+        ]);
+        if held.shares.is_empty() {
+            fields.push(("Volumes", "none".to_owned()));
+        }
+        for share in &held.shares {
+            fields.push(("Volume", share.spec()));
+        }
+        fields.extend([
+            ("Directory", self.directory.clone()),
+            ("Console", self.console.clone()),
+        ]);
+        labelled(fields, style)
+    }
+}
+
+fn password_state(held: &instance::Instance) -> &'static str {
+    match held.password.as_deref() {
+        None => "none",
+        Some("*") => "disabled",
+        Some(_) => "set",
+    }
+}
+
+/// Label and value pairs, the values aligned.
+fn labelled(fields: Vec<(&str, String)>, style: Style) -> Vec<String> {
+    let width = fields
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    fields
+        .into_iter()
+        .map(|(label, value)| {
+            let padding = " ".repeat(width - label.chars().count());
+            format!("{}{padding}  {value}", style.heading(label))
+        })
+        .collect()
 }
 
 impl Report for Cloned {
@@ -863,7 +1036,7 @@ impl Report for Switched {
         }
         let mut lines = vec![match self.state.as_str() {
             "paused" => format!("Paused {name}"),
-            "running" => format!("Resumed {name}"),
+            "running" => format!("Unpaused {name}"),
             held => format!("{name} is {held}"),
         }];
         if self.state == "paused" {
@@ -999,7 +1172,7 @@ mod tests {
             changed: true,
         };
         let text = report.render_text(Style::plain()).join("\n");
-        assert_eq!(text, "Resumed one");
+        assert_eq!(text, "Unpaused one");
     }
 
     #[test]
@@ -1108,6 +1281,161 @@ mod tests {
         assert!(text.contains("2.0 GiB"), "{text}");
         assert!(!text.contains("of 2.0 GiB"), "{text}");
         assert!(text.contains("1.4 of 12.0 GiB"), "{text}");
+    }
+
+    #[test]
+    fn a_quiet_listing_is_names_alone() {
+        let report = Names(vec!["one".to_owned(), "two".to_owned()]);
+        assert_eq!(report.render_text(Style::plain()), ["one", "two"]);
+        assert_eq!(to_yaml(&report.to_value()), "- one\n- two\n");
+    }
+
+    #[test]
+    fn a_listening_address_is_shown_only_where_one_was_given() {
+        let ports = [
+            Port::new(8080, 80),
+            Port {
+                address: Some(std::net::Ipv4Addr::UNSPECIFIED),
+                host: 8443,
+                guest: 443,
+            },
+        ];
+        assert_eq!(ports_text(&ports), "8080->80, 0.0.0.0:8443->443");
+        let document = to_json(&ports_value(&ports));
+        assert!(document.contains(r#""address": "127.0.0.1""#), "{document}");
+        assert!(document.contains(r#""address": "0.0.0.0""#), "{document}");
+    }
+
+    fn stopped(removed: bool) -> Stopped {
+        Stopped {
+            name: "one".to_owned(),
+            outcome: StopOutcome::PoweredDown,
+            waited: 30,
+            removed,
+        }
+    }
+
+    #[test]
+    fn a_machine_removed_on_stopping_says_so() {
+        assert_eq!(stopped(false).render_text(Style::plain()), ["Stopped one"]);
+        assert_eq!(
+            stopped(true).render_text(Style::plain()),
+            ["Stopped one", "Removed one"]
+        );
+        assert!(to_yaml(&stopped(true).to_value()).contains("removed: true"));
+        assert!(to_yaml(&stopped(false).to_value()).contains("removed: false"));
+    }
+
+    fn detail() -> MachineDetail {
+        let instance = instance::Instance {
+            name: "one".to_owned(),
+            image: "debian:trixie".to_owned(),
+            digest: "sha512:abc".to_owned(),
+            arch: "amd64".to_owned(),
+            created: 1_700_000_000,
+            memory: 2048,
+            cpus: 2,
+            firmware: Firmware::Uefi,
+            cpu_model: "Penryn,+avx".to_owned(),
+            machine: Chipset::Q35,
+            disk: Disk::Virtio,
+            user: "vm".to_owned(),
+            seeded: true,
+            monitor: std::path::PathBuf::from("/run/user/1000/vm/0011.sock"),
+            ssh_port: Some(2222),
+            pid: None,
+            started: None,
+            generation: 0,
+            password: Some("*".to_owned()),
+            ssh_config: true,
+            auto_remove: true,
+            media: vm_core::catalogue::Media::Disk,
+            cdrom: None,
+            ports: vec![Port {
+                address: Some(std::net::Ipv4Addr::UNSPECIFIED),
+                host: 8080,
+                guest: 80,
+            }],
+            shares: vec![instance::Share {
+                tag: "work".to_owned(),
+                source: std::path::PathBuf::from("/home/x/work"),
+                target: "/mnt/work".to_owned(),
+                readonly: true,
+                pid: None,
+                started: None,
+            }],
+        };
+        MachineDetail {
+            row: MachineRow {
+                name: "one".to_owned(),
+                image: "debian:trixie".to_owned(),
+                state: State::Stopped,
+                created: 1_700_000_000,
+                ports: instance.ports.clone(),
+                pid: None,
+                ssh_port: Some(2222),
+                user: "vm".to_owned(),
+                memory: Some(2048),
+                memory_used: None,
+                disk: Some(12288),
+                disk_used: Some(1434),
+            },
+            instance,
+            directory: "/home/x/.local/state/vm/instances/one".to_owned(),
+            console: "/home/x/.local/state/vm/instances/one/console.log".to_owned(),
+            screen: "/run/user/1000/vm/0011.vnc".to_owned(),
+        }
+    }
+
+    #[test]
+    fn an_inspected_machine_shows_its_settings() {
+        let text = detail().render_text(Style::plain()).join("\n");
+        for expected in [
+            "Machine       one",
+            "Image         debian:trixie (amd64)",
+            "Status        stopped",
+            "Hardware      uefi firmware, q35 machine, virtio disk, CPU model Penryn,+avx",
+            "SSH port      2222",
+            "Password      disabled",
+            "Auto-remove   yes",
+            "Ports         0.0.0.0:8080->80",
+            "Volume        /home/x/work:/mnt/work:ro",
+            "Console       /home/x/.local/state/vm/instances/one/console.log",
+        ] {
+            assert!(text.contains(expected), "{expected} missing from\n{text}");
+        }
+    }
+
+    #[test]
+    fn an_inspected_machine_without_ports_or_volumes_says_none() {
+        let mut report = detail();
+        report.instance.ports.clear();
+        report.instance.shares.clear();
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(text.contains("Ports         none"), "{text}");
+        assert!(text.contains("Volumes       none"), "{text}");
+        assert!(!text.contains("Volume  "), "{text}");
+    }
+
+    #[test]
+    fn an_inspected_machine_is_a_document_too() {
+        let document = to_yaml(&detail().to_value());
+        for field in [
+            "name: one",
+            "status: stopped",
+            "cpu_model: Penryn,+avx",
+            "disk: virtio",
+            "disk_size: 12288",
+            "disk_used: 1434",
+            "memory_used: null",
+            "password: disabled",
+            "auto_remove: true",
+            "address: 0.0.0.0",
+            "readonly: true",
+            "ssh_config: true",
+        ] {
+            assert!(document.contains(field), "{field} missing from {document}");
+        }
     }
 
     /// Its record could not be read, so there is nothing to say about either.
@@ -1364,7 +1692,7 @@ mod tests {
             held: false,
             size: None,
             firmware: Firmware::Bios,
-            cpu: "max".to_owned(),
+            cpu_model: "max".to_owned(),
             machine: Chipset::Q35,
             disk: Disk::Virtio,
             architectures: vec!["amd64".to_owned()],
@@ -1401,7 +1729,7 @@ mod tests {
             held: true,
             size: None,
             firmware: Firmware::Bios,
-            cpu: "max".to_owned(),
+            cpu_model: "max".to_owned(),
             machine: Chipset::Q35,
             disk: Disk::Virtio,
             architectures: vec!["amd64".to_owned(), "arm64".to_owned()],
@@ -1487,7 +1815,7 @@ mod tests {
             held: false,
             size: None,
             firmware: Firmware::Bios,
-            cpu: "max".to_owned(),
+            cpu_model: "max".to_owned(),
             machine: Chipset::Q35,
             disk: Disk::Virtio,
             architectures: vec!["amd64".to_owned()],
@@ -1519,7 +1847,7 @@ mod tests {
         assert!(line(&report).ends_with("raw, a CD-ROM image"));
     }
 
-    fn run(firmware: Firmware, cpu: &str, firmware_changed: bool) -> Run {
+    fn run(firmware: Firmware, cpu_model: &str, firmware_changed: bool) -> Run {
         Run {
             name: "pd".to_owned(),
             image: "puredarwin:minimal".to_owned(),
@@ -1536,13 +1864,14 @@ mod tests {
             screen: "/run/user/1000/vm/0011.vnc".to_owned(),
             status: RunStatus::Restarted,
             firmware,
-            cpu: cpu.to_owned(),
+            cpu_model: cpu_model.to_owned(),
             machine: Chipset::Q35,
             disk: Disk::Virtio,
             firmware_changed,
             ssh_config: false,
             ssh_config_changed: None,
             cdrom: None,
+            auto_remove: false,
         }
     }
 
@@ -1588,7 +1917,7 @@ mod tests {
             source_format: None,
             media: vm_core::catalogue::Media::Disk,
             firmware: Firmware::Bios,
-            cpu: None,
+            cpu_model: None,
             machine: Chipset::Q35,
             disk: Disk::Virtio,
         }
@@ -1792,12 +2121,15 @@ mod tests {
         let report = run(Firmware::Uefi, "Penryn,+avx", false);
         let text = report.render_text(Style::plain()).join("\n");
         assert!(
-            text.contains("machine  uefi firmware, cpu Penryn,+avx"),
+            text.contains("machine  uefi firmware, CPU model Penryn,+avx"),
             "{text}"
         );
         let document = to_json(&report.to_value());
         assert!(document.contains(r#""firmware": "uefi""#), "{document}");
-        assert!(document.contains(r#""cpu": "Penryn,+avx""#), "{document}");
+        assert!(
+            document.contains(r#""cpu_model": "Penryn,+avx""#),
+            "{document}"
+        );
         assert!(
             document.contains(r#""firmware_changed": false"#),
             "{document}"
@@ -1811,7 +2143,7 @@ mod tests {
         report.disk = Disk::Ide;
         let text = report.render_text(Style::plain()).join("\n");
         assert!(
-            text.contains("machine  pc machine, ide disk, cpu Penryn"),
+            text.contains("machine  pc machine, ide disk, CPU model Penryn"),
             "{text}"
         );
         let document = to_json(&report.to_value());
@@ -1853,7 +2185,7 @@ mod tests {
                 source_format: None,
                 media: vm_core::catalogue::Media::Disk,
                 firmware: Firmware::Uefi,
-                cpu: Some("Penryn".to_owned()),
+                cpu_model: Some("Penryn".to_owned()),
                 machine: Chipset::Q35,
                 disk: Disk::Virtio,
             },
@@ -1868,12 +2200,12 @@ mod tests {
         assert!(
             machine(&report)
                 .unwrap()
-                .ends_with("uefi firmware, cpu Penryn")
+                .ends_with("uefi firmware, CPU model Penryn")
         );
         report.firmware = Firmware::Bios;
-        report.cpu = "max".to_owned();
+        report.cpu_model = "max".to_owned();
         assert_eq!(machine(&report), None);
-        assert!(to_json(&report.to_value()).contains(r#""cpu": "max""#));
+        assert!(to_json(&report.to_value()).contains(r#""cpu_model": "max""#));
     }
 
     #[test]
@@ -1961,7 +2293,7 @@ mod tests {
             held: false,
             size: Some(1024),
             firmware: Firmware::Bios,
-            cpu: "max".to_owned(),
+            cpu_model: "max".to_owned(),
             machine: Chipset::Q35,
             disk: Disk::Virtio,
             architectures: vec!["amd64".to_owned()],

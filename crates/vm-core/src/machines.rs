@@ -61,13 +61,15 @@ pub struct Request {
     pub disk_size: Option<String>,
     pub pull: Option<Pull>,
     pub firmware: Option<Firmware>,
-    pub cpu: Option<String>,
+    pub cpu_model: Option<String>,
     pub machine: Option<Chipset>,
     pub disk: Option<Disk>,
     /// A `$6$` hash for console login.
     pub password: Option<String>,
     /// Whether to add an SSH config entry; absent defers to the config file.
     pub ssh_config: Option<bool>,
+    /// Whether to remove the machine once it stops.
+    pub auto_remove: bool,
 }
 
 pub fn run(
@@ -122,6 +124,7 @@ pub fn run(
     }
 
     let instances = Instances::discover()?;
+    sweep(&instances);
     let name = request.name.clone().unwrap_or_else(|| {
         let taken = instances.names().unwrap_or_default();
         instance::suggest_name(&entry.name, &|candidate| {
@@ -185,10 +188,10 @@ fn build(
         memory: request.memory,
         cpus: request.cpus,
         firmware: request.firmware.unwrap_or(artifact.firmware),
-        cpu: request
-            .cpu
+        cpu_model: request
+            .cpu_model
             .clone()
-            .unwrap_or_else(|| artifact.cpu().to_owned()),
+            .unwrap_or_else(|| artifact.cpu_model().to_owned()),
         machine: request.machine.unwrap_or(artifact.machine),
         disk: request.disk.unwrap_or(artifact.disk),
         user: resolved.user.clone(),
@@ -199,6 +202,7 @@ fn build(
         started: None,
         generation: 0,
         ssh_config: resolved.ssh_config,
+        auto_remove: false,
         media: artifact.media,
         cdrom: artifact
             .media
@@ -243,6 +247,11 @@ fn build(
     let included = publish(directory, &held, instances.root())?;
 
     let accelerated = launch(directory, &mut held)?;
+    // Recorded only once running, so a listing meanwhile does not remove it.
+    if request.auto_remove {
+        held.auto_remove = true;
+        directory.write(&held)?;
+    }
     Ok(report(
         &held,
         directory,
@@ -298,11 +307,8 @@ fn launch(directory: &Directory, held: &mut Instance) -> Result<Option<bool>> {
 fn serve_shares(directory: &Directory, held: &mut Instance) -> Result<()> {
     for index in 0..held.shares.len() {
         let socket = directory.share_socket(index);
-        let launch = hypervisor::share_launch(
-            &held.shares[index].source,
-            &socket,
-            directory.share_log(index),
-        );
+        let launch =
+            hypervisor::share_launch(&held.shares[index], &socket, directory.share_log(index));
         let handle = crate::hypervisor::Detached.start(&launch)?;
         held.shares[index].pid = Some(handle.pid);
         held.shares[index].started = Some(handle.started);
@@ -369,11 +375,12 @@ fn report(
     included: Option<std::path::PathBuf>,
 ) -> reports::Run {
     reports::Run {
+        auto_remove: held.auto_remove,
         ssh_config: held.ssh_config,
         ssh_config_changed: included.map(|path| path.display().to_string()),
         cdrom: held.cdrom.as_ref().map(|path| path.display().to_string()),
         firmware: held.firmware,
-        cpu: held.cpu.clone(),
+        cpu_model: held.cpu_model.clone(),
         machine: held.machine,
         disk: held.disk,
         firmware_changed,
@@ -397,6 +404,7 @@ fn report(
 /// Boots an instance that exists but is not running.
 pub fn start(name: &str, changes: &Changes) -> Result<reports::Run> {
     let instances = Instances::discover()?;
+    sweep(&instances);
     let directory = instances.open(name)?;
     let mut held = directory.read()?;
     if held.is_running() {
@@ -448,7 +456,7 @@ pub struct Changes {
     pub user: Option<String>,
     pub disk_size: Option<String>,
     pub firmware: Option<Firmware>,
-    pub cpu: Option<String>,
+    pub cpu_model: Option<String>,
     pub machine: Option<Chipset>,
     pub disk: Option<Disk>,
     /// A `$6$` hash, or `*` to take the password away.
@@ -465,7 +473,7 @@ impl Changes {
             || self.password.is_some()
             || self.cpus.is_some()
             || self.firmware.is_some()
-            || self.cpu.is_some()
+            || self.cpu_model.is_some()
             || self.machine.is_some()
             || self.disk.is_some()
             || self.ports.is_some()
@@ -503,8 +511,8 @@ fn apply(directory: &Directory, held: &mut Instance, changes: &Changes) -> Resul
     if let Some(firmware) = changes.firmware {
         held.firmware = firmware;
     }
-    if let Some(cpu) = &changes.cpu {
-        held.cpu.clone_from(cpu);
+    if let Some(cpu) = &changes.cpu_model {
+        held.cpu_model.clone_from(cpu);
     }
     if let Some(chipset) = changes.machine {
         held.machine = chipset;
@@ -677,6 +685,7 @@ fn acceleration(client: &mut qmp::Connection) -> Option<bool> {
 /// Lists instances, forgetting any process that is no longer there.
 pub fn list(all: bool) -> Result<reports::Machines> {
     let instances = Instances::discover()?;
+    sweep(&instances);
     let mut rows = Vec::new();
     for name in instances.names()? {
         let Ok(directory) = instances.open(&name) else {
@@ -705,6 +714,39 @@ pub fn list(all: bool) -> Result<reports::Machines> {
     Ok(reports::Machines { rows, all })
 }
 
+pub fn exists(name: &str) -> Result<bool> {
+    let instances = Instances::discover()?;
+    sweep(&instances);
+    Ok(instances.open(name).is_ok())
+}
+
+/// One machine in full, forgetting its process if that is gone.
+pub fn inspect(name: &str) -> Result<reports::MachineDetail> {
+    let instances = Instances::discover()?;
+    sweep(&instances);
+    let directory = instances.open(name)?;
+    let mut held = directory.read()?;
+    let running = held.is_running();
+    if !running && held.handle().is_some() {
+        held.forget_process();
+        reap_shares(&mut held);
+        let _ = directory.write(&held);
+    }
+    let state = if running {
+        reports::State::Live(doing(&held))
+    } else {
+        reports::State::Stopped
+    };
+    let disk = crate::disk::usage(&directory.overlay());
+    Ok(reports::MachineDetail {
+        row: reports::MachineRow::of(&held, state, disk),
+        directory: directory.path().display().to_string(),
+        console: directory.console().display().to_string(),
+        screen: directory.screen_socket().display().to_string(),
+        instance: held,
+    })
+}
+
 /// Refuses a paused machine, which would otherwise accept a connection and hang.
 fn answering(held: &Instance) -> Result<()> {
     if held.is_running() && doing(held) == "paused" {
@@ -731,7 +773,7 @@ pub fn pause(name: &str) -> Result<reports::Switched> {
 }
 
 /// Lets it carry on from the instruction it stopped at.
-pub fn resume(name: &str) -> Result<reports::Switched> {
+pub fn unpause(name: &str) -> Result<reports::Switched> {
     switch(name, false)
 }
 
@@ -774,6 +816,7 @@ pub fn stop(
     observe: Observer,
 ) -> Result<reports::Stopped> {
     let instances = Instances::discover()?;
+    sweep(&instances);
     let directory = instances.open(name)?;
     let mut held = directory.read()?;
     let Some(handle) = held.handle().filter(process::Handle::is_running) else {
@@ -783,6 +826,7 @@ pub fn stop(
             name: name.to_owned(),
             outcome: reports::StopOutcome::AlreadyStopped,
             waited: 0,
+            removed: false,
         });
     };
 
@@ -827,11 +871,34 @@ pub fn stop(
     reap_shares(&mut held);
     directory.write(&held)?;
     directory.clear_runtime();
+    if held.auto_remove {
+        directory.remove()?;
+    }
     Ok(reports::Stopped {
         name: name.to_owned(),
         outcome,
         waited: timeout.as_secs(),
+        removed: held.auto_remove,
     })
+}
+
+/// Removes every machine made with auto-removal that is no longer running.
+pub fn sweep(instances: &Instances) {
+    let Ok(names) = instances.names() else {
+        return;
+    };
+    for name in names {
+        let Ok(directory) = instances.open(&name) else {
+            continue;
+        };
+        let Ok(mut held) = directory.read() else {
+            continue;
+        };
+        if held.auto_remove && !held.is_running() {
+            reap_shares(&mut held);
+            let _ = directory.remove();
+        }
+    }
 }
 
 fn wait_for_exit(handle: &process::Handle, timeout: Duration) -> bool {
@@ -927,7 +994,10 @@ pub fn remove(name: &str, force: bool) -> Result<reports::Removed> {
         }
         stop(name, Duration::from_secs(10), true, &mut |_| {})?;
     }
-    directory.remove()?;
+    // A machine made with auto-removal is gone once stopped.
+    if directory.path().exists() {
+        directory.remove()?;
+    }
     Ok(reports::Removed {
         name: name.to_owned(),
     })
@@ -999,6 +1069,7 @@ pub fn prune(
     dry_run: bool,
 ) -> Result<reports::Pruned> {
     let instances = Instances::discover()?;
+    sweep(&instances);
     let machines = if target == Some(PruneTarget::Images) {
         Vec::new()
     } else {
@@ -1040,6 +1111,7 @@ fn stranded(
 /// The machines that need a given image.
 pub fn holders(digest: &str) -> Result<Vec<String>> {
     let instances = Instances::discover()?;
+    sweep(&instances);
     let mut names = Vec::new();
     for name in instances.names()? {
         let Ok(directory) = instances.open(&name) else {
@@ -1180,7 +1252,7 @@ mod tests {
                 memory: 2048,
                 cpus: 2,
                 firmware: crate::machine::Firmware::Bios,
-                cpu: "max".to_owned(),
+                cpu_model: "max".to_owned(),
                 machine: crate::machine::Chipset::Q35,
                 disk: crate::machine::Disk::Virtio,
                 user: "vm".to_owned(),
@@ -1191,6 +1263,7 @@ mod tests {
                 started: None,
                 generation: 0,
                 ssh_config: false,
+                auto_remove: false,
                 media: crate::catalogue::Media::Disk,
                 cdrom: None,
                 password: None,
@@ -1221,6 +1294,7 @@ mod tests {
             tag: "data".to_owned(),
             source: std::path::PathBuf::from("/tmp"),
             target: target.to_owned(),
+            readonly: false,
             pid: None,
             started: None,
         }
@@ -1256,6 +1330,7 @@ mod tests {
         let (directory, mut held) = scratch.machine("one");
         let changes = Changes {
             ports: Some(vec![Port {
+                address: None,
                 host: 2022,
                 guest: 22,
             }]),
@@ -1270,6 +1345,7 @@ mod tests {
         let scratch = Scratch::new("noports");
         let (directory, mut held) = scratch.machine("one");
         held.ports.push(Port {
+            address: None,
             host: 8080,
             guest: 80,
         });
@@ -1490,14 +1566,14 @@ mod tests {
         std::fs::write(directory.firmware_variables(), b"boot entries").unwrap();
         let changes = Changes {
             firmware: Some(Firmware::Bios),
-            cpu: Some("Penryn,+avx".to_owned()),
+            cpu_model: Some("Penryn,+avx".to_owned()),
             ..Changes::default()
         };
         held.firmware = Firmware::Uefi;
         apply(&directory, &mut held, &changes).unwrap();
         let stored = directory.read().unwrap();
         assert_eq!(stored.firmware, Firmware::Bios);
-        assert_eq!(stored.cpu, "Penryn,+avx");
+        assert_eq!(stored.cpu_model, "Penryn,+avx");
         assert_eq!(stored.generation, 0);
         assert_eq!(
             std::fs::read(directory.firmware_variables()).unwrap(),
@@ -1617,6 +1693,7 @@ mod tests {
             tag: tag.to_owned(),
             source: std::path::PathBuf::from("/home/x"),
             target: "/mnt/x".to_owned(),
+            readonly: false,
             pid: None,
             started: None,
         }
@@ -1639,5 +1716,48 @@ mod tests {
         let mut shares = vec![share("work")];
         distinguish(&mut shares);
         assert_eq!(shares[0].tag, "work");
+    }
+
+    #[test]
+    fn a_sweep_removes_only_stopped_machines_made_with_auto_removal() {
+        let scratch = Scratch::new("sweep");
+        let instances = Instances::at(scratch.0.join("instances"), scratch.0.join("run"));
+        let (kept_directory, _) = scratch.machine("kept");
+        let (gone_directory, mut gone) = scratch.machine("gone");
+        gone.auto_remove = true;
+        gone_directory.write(&gone).unwrap();
+        let (running_directory, mut running) = scratch.machine("running");
+        let handle = process::Handle::of(std::process::id()).unwrap();
+        running.auto_remove = true;
+        running.pid = Some(handle.pid);
+        running.started = Some(handle.started);
+        running_directory.write(&running).unwrap();
+
+        sweep(&instances);
+
+        assert!(kept_directory.path().is_dir());
+        assert!(!gone_directory.path().exists());
+        assert!(running_directory.path().is_dir());
+        assert_eq!(instances.names().unwrap(), ["kept", "running"]);
+    }
+
+    #[test]
+    fn a_sweep_leaves_a_damaged_record_for_the_user_to_remove() {
+        let scratch = Scratch::new("sweepdamaged");
+        let instances = Instances::at(scratch.0.join("instances"), scratch.0.join("run"));
+        let (directory, _) = scratch.machine("damaged");
+        std::fs::write(directory.record(), "auto_remove = true\n").unwrap();
+        sweep(&instances);
+        assert!(directory.path().is_dir());
+    }
+
+    #[test]
+    fn a_sweep_of_a_state_directory_that_does_not_exist_does_nothing() {
+        let scratch = Scratch::new("sweepempty");
+        sweep(&Instances::at(
+            scratch.0.join("absent"),
+            scratch.0.join("run"),
+        ));
+        assert!(!scratch.0.join("absent").exists());
     }
 }

@@ -419,7 +419,7 @@ mod tests {
             source_format: None,
             media: Media::Disk,
             firmware: Firmware::Bios,
-            cpu: None,
+            cpu_model: None,
             machine: Chipset::Q35,
             disk: Disk::Virtio,
         }

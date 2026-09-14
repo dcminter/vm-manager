@@ -283,7 +283,7 @@ pub enum Action {
     Stop,
     Kill,
     Pause,
-    Resume,
+    Unpause,
     Console,
     Shell,
     Logs,
@@ -311,7 +311,7 @@ impl Action {
             Self::Stop => "Stop",
             Self::Kill => "Kill",
             Self::Pause => "Pause",
-            Self::Resume => "Resume",
+            Self::Unpause => "Unpause",
             Self::Console => "Console",
             Self::Shell => "Shell",
             Self::Logs => "Logs",
@@ -334,7 +334,7 @@ impl Action {
 
     pub const fn icon(self) -> &'static str {
         match self {
-            Self::Start | Self::Resume => "media-playback-start-symbolic",
+            Self::Start | Self::Unpause => "media-playback-start-symbolic",
             Self::Stop => "system-shutdown-symbolic",
             Self::Kill => "process-stop-symbolic",
             Self::Pause => "media-playback-pause-symbolic",
@@ -449,7 +449,7 @@ pub fn ports_text(ports: &[Port]) -> String {
     }
     ports
         .iter()
-        .map(|port| format!("{}:{}", port.host, port.guest))
+        .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -558,7 +558,7 @@ pub fn machine_actions(state: &State, record: Option<&Instance>) -> Vec<Action> 
         }
         State::Live(held) => {
             if held == "paused" {
-                actions.push(Action::Resume);
+                actions.push(Action::Unpause);
             } else {
                 actions.push(Action::Pause);
             }
@@ -640,6 +640,10 @@ fn access_group(held: &Instance) -> Group {
                 "SSH config entry",
                 if held.ssh_config { "yes" } else { "no" },
             ),
+            Row::new(
+                "Remove once stopped",
+                if held.auto_remove { "yes" } else { "no" },
+            ),
         ],
     )
 }
@@ -662,7 +666,7 @@ fn hardware_group(row: &MachineRow, held: &Instance) -> Group {
             Row::new("Processors", held.cpus.to_string()),
             Row::new("Disk", disk),
             Row::new("Firmware", held.firmware.name()),
-            Row::new("CPU", held.cpu.clone()),
+            Row::new("CPU model", held.cpu_model.clone()),
             Row::new("Chipset", held.machine.name()),
             Row::new("Disk controller", held.disk.name()),
             Row::new(
@@ -677,13 +681,13 @@ fn hardware_group(row: &MachineRow, held: &Instance) -> Group {
 
 fn ports_group(held: &Instance) -> Group {
     let ports = if held.ports.is_empty() {
-        vec![Row::new("Published", "none")]
+        vec![Row::new("Forwarded", "none")]
     } else {
         held.ports
             .iter()
             .map(|port| {
                 Row::new(
-                    &format!("Host {}", port.host),
+                    &format!("Host {}:{}", port.listen(), port.host),
                     format!("guest {}", port.guest),
                 )
             })
@@ -701,7 +705,12 @@ fn volumes_group(held: &Instance) -> Group {
             .map(|share| {
                 Row::new(
                     &share.source.display().to_string(),
-                    format!("{} as {}", share.target, share.tag),
+                    format!(
+                        "{} as {}{}",
+                        share.target,
+                        share.tag,
+                        if share.readonly { ", read-only" } else { "" }
+                    ),
                 )
             })
             .collect()
@@ -769,7 +778,7 @@ pub fn image_page(summary: &ImageSummary, builds: &[Inspect]) -> Page {
             &format!("Hardware{suffix}"),
             vec![
                 Row::new("Firmware", held.firmware.name()),
-                Row::new("CPU", held.cpu.clone()),
+                Row::new("CPU model", held.cpu_model.clone()),
                 Row::new("Chipset", held.machine.name()),
                 Row::new("Disk controller", held.disk.name()),
             ],
@@ -1011,7 +1020,14 @@ pub fn images_table(
 /// What a bulk action over checked rows can do.
 pub fn bulk_actions(kind: TableKind) -> Vec<Action> {
     match kind {
-        TableKind::Machines => vec![Action::Start, Action::Stop, Action::Kill, Action::Remove],
+        TableKind::Machines => vec![
+            Action::Start,
+            Action::Stop,
+            Action::Pause,
+            Action::Unpause,
+            Action::Kill,
+            Action::Remove,
+        ],
         TableKind::Images => vec![Action::Pull, Action::RemoveImage],
     }
 }
@@ -1028,6 +1044,7 @@ mod tests {
             state,
             created: 100,
             ports: vec![Port {
+                address: None,
                 host: 8080,
                 guest: 80,
             }],
@@ -1177,7 +1194,7 @@ mod tests {
         assert!(running.contains(&Action::Stop));
         assert!(!running.contains(&Action::Shell));
         let paused = machine_actions(&State::Live("paused".to_owned()), None);
-        assert!(paused.contains(&Action::Resume));
+        assert!(paused.contains(&Action::Unpause));
         let stopped = machine_actions(&State::Stopped, None);
         assert_eq!(stopped[0], Action::Start);
         assert!(!stopped.contains(&Action::Eject));
@@ -1231,7 +1248,7 @@ mod tests {
             held,
             size: None,
             firmware: vm_core::machine::Firmware::Bios,
-            cpu: "max".to_owned(),
+            cpu_model: "max".to_owned(),
             machine: vm_core::machine::Chipset::Q35,
             disk: vm_core::machine::Disk::Virtio,
             architectures: vec!["amd64".to_owned(), "arm64".to_owned()],
