@@ -45,10 +45,17 @@ jobs:
       matrix:
         include:
           - distribution: trixie
+            gui: true
             container: debian:trixie
           - distribution: noble
+            gui: true
             container: ubuntu:24.04
+          # Too old for the GUI.
+          - distribution: jammy
+            gui: false
+            container: ubuntu:22.04
           - distribution: kali
+            gui: true
             container: kalilinux/kali-rolling
     container: ${{ matrix.container }}
     steps:
@@ -56,7 +63,11 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            build-essential ca-certificates curl git dpkg-dev lintian \
+            build-essential ca-certificates curl git dpkg-dev lintian
+      - name: Install the GUI build environment
+        if: matrix.gui
+        run: |
+          apt-get install -y --no-install-recommends \
             pkg-config libgtk-4-dev libadwaita-1-dev libvte-2.91-gtk4-dev
       - uses: actions/checkout@v4
       - name: Install the toolchain
@@ -75,11 +86,14 @@ jobs:
           apt-get install -y ./packages/*.deb
           vm --version
           vm images
+          man -w vm
+          man -w 5 vm-config
+      - name: Check the GUI installs
+        if: matrix.gui
+        run: |
           vmg --version
           gsettings list-schemas | grep -qx com.paperstack.VmManager
-          man -w vm
           man -w vmg
-          man -w 5 vm-config
       - uses: actions/upload-artifact@v4
         with:
           name: vm-manager-${{ matrix.distribution }}

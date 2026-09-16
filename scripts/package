@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Builds the vm-manager and vm-manager-gui .debs: scripts/package <trixie|noble|kali> <version> [output directory]
+# Builds the vm-manager and, toolkit permitting, vm-manager-gui .debs: scripts/package <trixie|noble|jammy|kali> <version> [output directory]
 
 set -euo pipefail
 
-distribution="${1:?usage: package <trixie|noble|kali> <version> [outdir]}"
-version="${2:?usage: package <trixie|noble|kali> <version> [outdir]}"
+distribution="${1:?usage: package <trixie|noble|jammy|kali> <version> [outdir]}"
+version="${2:?usage: package <trixie|noble|jammy|kali> <version> [outdir]}"
 outdir="${3:-target/packages}"
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,6 +26,15 @@ noble)
     suggests="tigervnc-viewer, vm-manager-gui"
     gui_depends="libgtk-4-1, libadwaita-1-0, libvte-2.91-gtk4-0, libglib2.0-0t64"
     ;;
+jammy)
+    suffix="ubuntu22.04"
+    # Shares fail: qemu-system-common's virtiofsd needs root.
+    depends="qemu-system-x86, qemu-utils, openssh-client, procps"
+    recommends="ovmf, xz-utils, zstd"
+    suggests="tigervnc-viewer"
+    # The toolkit is too old for vmg.
+    gui_depends=""
+    ;;
 kali)
     # Kali has no releases, only the rolling branch.
     suffix="kali-rolling"
@@ -35,7 +44,7 @@ kali)
     gui_depends="libgtk-4-1, libadwaita-1-0, libvte-2.91-gtk4-0, libglib2.0-0t64"
     ;;
 *)
-    echo "package: unknown distribution '$distribution'; expected trixie, noble or kali" >&2
+    echo "package: unknown distribution '$distribution'; expected trixie, noble, jammy or kali" >&2
     exit 2
     ;;
 esac
@@ -72,7 +81,11 @@ verify_dependencies() {
 echo "Building $package"
 verify_dependencies
 
-cargo build --release --locked
+if [ -n "$gui_depends" ]; then
+    cargo build --release --locked
+else
+    cargo build --release --locked --package vm
+fi
 
 rm -rf "$staging"
 install -d "$staging/DEBIAN"
@@ -148,6 +161,11 @@ check_package() {
     fi
 }
 check_package "$outdir/$package.deb"
+
+if [ -z "$gui_depends" ]; then
+    echo "Skipping vm-manager-gui: $distribution lacks the toolkit it needs"
+    exit 0
+fi
 
 gui_package="vm-manager-gui_${full_version}_${architecture}"
 gui_staging="target/package/${gui_package}"
