@@ -513,16 +513,12 @@ pub fn lines(group: &adw::PreferencesGroup, title: &str, text: &str) -> gtk::Tex
     view.update_property(&[gtk::accessible::Property::Label(title)]);
     let frame = gtk::Frame::builder().child(&view).build();
     frame.add_css_class("view");
-    let row = adw::PreferencesRow::builder()
-        .title(title)
-        .child(&frame)
-        .activatable(false)
-        .build();
+    // A list box row outside a list box fails its focus assertion.
     let labelled = gtk::Box::new(gtk::Orientation::Vertical, 4);
     let label = gtk::Label::builder().label(title).xalign(0.0).build();
     label.add_css_class("dim-label");
     labelled.append(&label);
-    labelled.append(&row);
+    labelled.append(&frame);
     group.add(&labelled);
     view
 }
