@@ -107,6 +107,12 @@ enum Command {
         /// Share a host directory with the guest, as host:guest, read-only as host:guest:ro; repeatable
         #[arg(long, short = 'v', value_name = "HOST:GUEST[:ro]", value_parser = settings::parse_share)]
         volume: Vec<vm_core::instance::Share>,
+        /// Hand a host PCI device bound to vfio-pci to the guest, such as 01:00.0; repeatable
+        #[arg(long, value_name = "ADDRESS", value_parser = settings::parse_pci, add = ArgValueCandidates::new(completion::pci_device))]
+        pci: Vec<vm_core::passthrough::PciAddress>,
+        /// Hand a host USB device to the guest, as vendor:product or bus-port; repeatable
+        #[arg(long, value_name = "DEVICE", value_parser = settings::parse_usb, add = ArgValueCandidates::new(completion::usb_device))]
+        usb: Vec<vm_core::passthrough::UsbDevice>,
         /// Grow the disk to this size, such as 40G
         #[arg(long)]
         disk_size: Option<String>,
@@ -161,6 +167,18 @@ enum Command {
         /// Share nothing
         #[arg(long)]
         no_volume: bool,
+        /// Hand a host PCI device bound to vfio-pci to the guest, replacing existing ones; repeatable
+        #[arg(long, value_name = "ADDRESS", value_parser = settings::parse_pci, conflicts_with = "no_pci", add = ArgValueCandidates::new(completion::pci_device))]
+        pci: Vec<vm_core::passthrough::PciAddress>,
+        /// Hand over no PCI devices
+        #[arg(long)]
+        no_pci: bool,
+        /// Hand a host USB device to the guest, as vendor:product or bus-port, replacing existing ones; repeatable
+        #[arg(long, value_name = "DEVICE", value_parser = settings::parse_usb, conflicts_with = "no_usb", add = ArgValueCandidates::new(completion::usb_device))]
+        usb: Vec<vm_core::passthrough::UsbDevice>,
+        /// Hand over no USB devices
+        #[arg(long)]
+        no_usb: bool,
         /// Account to use in the guest; the one it has is left in place
         #[arg(long, short, value_parser = settings::parse_user)]
         user: Option<String>,
@@ -552,6 +570,8 @@ fn run_request(command: &Command) -> vm_core::Result<Request> {
         port,
         user,
         volume,
+        pci,
+        usb,
         disk_size,
         pull,
         firmware,
@@ -574,6 +594,8 @@ fn run_request(command: &Command) -> vm_core::Result<Request> {
         ports: port.clone(),
         user: user.clone(),
         shares: volume.clone(),
+        pci: pci.clone(),
+        usb: usb.clone(),
         disk_size: disk_size.clone(),
         pull: pull.map(Pull::plain),
         firmware: *firmware,
@@ -595,6 +617,10 @@ fn start_changes(command: &Command) -> vm_core::Result<Changes> {
         no_port,
         volume,
         no_volume,
+        pci,
+        no_pci,
+        usb,
+        no_usb,
         user,
         disk_size,
         firmware,
@@ -623,6 +649,8 @@ fn start_changes(command: &Command) -> vm_core::Result<Changes> {
         cpus: *cpus,
         ports: replacement(port, *no_port),
         shares: replacement(volume, *no_volume),
+        pci: replacement(pci, *no_pci),
+        usb: replacement(usb, *no_usb),
         user: user.clone(),
         disk_size: disk_size.clone(),
         firmware: *firmware,
@@ -1093,6 +1121,71 @@ mod tests {
             Some(Vec::new())
         );
         assert_eq!(cleared(&["vm", "start", "x"]), None);
+    }
+
+    #[test]
+    fn host_devices_are_given_with_pci_and_usb() {
+        use clap::Parser as _;
+        let parsed = |arguments: &[&str]| {
+            let command = Cli::try_parse_from(arguments).unwrap().command;
+            match &command {
+                Command::Run { .. } => {
+                    let request = run_request(&command).unwrap();
+                    (
+                        Some(request.pci.iter().map(ToString::to_string).collect()),
+                        Some(request.usb.iter().map(ToString::to_string).collect()),
+                    )
+                }
+                Command::Start { .. } => {
+                    let changes = start_changes(&command).unwrap();
+                    (
+                        changes
+                            .pci
+                            .map(|held| held.iter().map(ToString::to_string).collect()),
+                        changes
+                            .usb
+                            .map(|held| held.iter().map(ToString::to_string).collect()),
+                    )
+                }
+                _ => panic!("neither a run nor a start"),
+            }
+        };
+        let both = (
+            Some(vec!["0000:01:00.0".to_owned(), "0000:01:00.1".to_owned()]),
+            Some(vec!["046d:c52b".to_owned(), "1-2.3".to_owned()]),
+        );
+        let given = [
+            "--pci",
+            "01:00.0",
+            "--pci",
+            "0000:01:00.1",
+            "--usb",
+            "046d:c52b",
+            "--usb",
+            "1-2.3",
+        ];
+        for command in [["vm", "run", "x"], ["vm", "start", "x"]] {
+            let arguments: Vec<&str> = command.iter().chain(&given).copied().collect();
+            assert_eq!(parsed(&arguments), both, "{arguments:?}");
+        }
+        assert_eq!(
+            parsed(&["vm", "run", "x"]),
+            (Some(Vec::new()), Some(Vec::new()))
+        );
+        assert_eq!(parsed(&["vm", "start", "x"]), (None, None));
+        assert_eq!(
+            parsed(&["vm", "start", "x", "--no-pci", "--no-usb"]),
+            (Some(Vec::new()), Some(Vec::new()))
+        );
+        for refused in [
+            &["vm", "run", "x", "--pci", "gpu"][..],
+            &["vm", "run", "x", "--usb", "046d"],
+            &["vm", "start", "x", "--pci", "01:00.0", "--no-pci"],
+            &["vm", "start", "x", "--usb", "1-2", "--no-usb"],
+            &["vm", "run", "x", "--no-pci"],
+        ] {
+            assert!(Cli::try_parse_from(refused).is_err(), "{refused:?}");
+        }
     }
 
     #[test]

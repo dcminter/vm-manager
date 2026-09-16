@@ -248,6 +248,8 @@ mod tests {
             media: crate::catalogue::Media::Disk,
             cdrom: None,
             password: None,
+            pci: Vec::new(),
+            usb: Vec::new(),
             ports: Vec::new(),
             shares: Vec::new(),
         }

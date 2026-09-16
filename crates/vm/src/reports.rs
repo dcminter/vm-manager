@@ -313,6 +313,18 @@ fn ports_text(ports: &[Port]) -> String {
         .join(", ")
 }
 
+fn listed<T: std::fmt::Display>(items: &[T]) -> Value {
+    Value::list(items.iter().map(|item| Value::string(item.to_string())))
+}
+
+fn joined<T: std::fmt::Display>(items: &[T]) -> String {
+    items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl Report for Run {
     fn to_value(&self) -> Value {
         Value::map([
@@ -322,6 +334,8 @@ impl Report for Run {
             ("memory", Value::Integer(self.memory)),
             ("cpus", Value::Integer(u64::from(self.cpus))),
             ("ports", ports_value(&self.ports)),
+            ("pci", listed(&self.pci)),
+            ("usb", listed(&self.usb)),
             (
                 "ssh_port",
                 self.ssh_port
@@ -390,6 +404,12 @@ impl Report for Run {
         }
         if !self.ports.is_empty() {
             lines.push(format!("  ports    {}", ports_text(&self.ports)));
+        }
+        if !self.pci.is_empty() {
+            lines.push(format!("  pci      {}", joined(&self.pci)));
+        }
+        if !self.usb.is_empty() {
+            lines.push(format!("  usb      {}", joined(&self.usb)));
         }
         if self.cdrom.is_some() {
             lines.push(format!(
@@ -681,6 +701,8 @@ impl Report for MachineDetail {
             ("password", Value::string(password_state(held))),
             ("auto_remove", Value::Bool(held.auto_remove)),
             ("ports", ports_value(&held.ports)),
+            ("pci", listed(&held.pci)),
+            ("usb", listed(&held.usb)),
             (
                 "volumes",
                 Value::list(held.shares.iter().map(|share| {
@@ -757,6 +779,12 @@ impl Report for MachineDetail {
                 },
             ),
         ]);
+        if !held.pci.is_empty() {
+            fields.push(("PCI", joined(&held.pci)));
+        }
+        if !held.usb.is_empty() {
+            fields.push(("USB", joined(&held.usb)));
+        }
         if held.shares.is_empty() {
             fields.push(("Volumes", "none".to_owned()));
         }
@@ -1360,6 +1388,8 @@ mod tests {
             auto_remove: true,
             media: vm_core::catalogue::Media::Disk,
             cdrom: None,
+            pci: Vec::new(),
+            usb: Vec::new(),
             ports: vec![Port {
                 address: Some(std::net::Ipv4Addr::UNSPECIFIED),
                 host: 8080,
@@ -1413,6 +1443,29 @@ mod tests {
         ] {
             assert!(text.contains(expected), "{expected} missing from\n{text}");
         }
+    }
+
+    #[test]
+    fn an_inspected_machine_shows_its_host_devices_only_when_it_has_some() {
+        let mut report = detail();
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(!text.contains("PCI"), "{text}");
+        assert!(!text.contains("USB"), "{text}");
+        let document = vm_core::value::to_json_line(&report.to_value());
+        assert!(document.contains(r#""pci":[],"usb":[]"#), "{document}");
+        report.instance.pci = vec!["01:00.0".parse().unwrap(), "01:00.1".parse().unwrap()];
+        report.instance.usb = vec!["046d:c52b".parse().unwrap()];
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(
+            text.contains("PCI           0000:01:00.0, 0000:01:00.1"),
+            "{text}"
+        );
+        assert!(text.contains("USB           046d:c52b"), "{text}");
+        let document = vm_core::value::to_json_line(&report.to_value());
+        assert!(
+            document.contains(r#""pci":["0000:01:00.0","0000:01:00.1"],"usb":["046d:c52b"]"#),
+            "{document}"
+        );
     }
 
     #[test]
@@ -1875,6 +1928,8 @@ mod tests {
             arch: "amd64".to_owned(),
             memory: 4096,
             cpus: 2,
+            pci: Vec::new(),
+            usb: Vec::new(),
             ports: Vec::new(),
             ssh_port: None,
             user: "vm".to_owned(),
@@ -1894,6 +1949,23 @@ mod tests {
             cdrom: None,
             auto_remove: false,
         }
+    }
+
+    #[test]
+    fn a_started_machine_names_its_host_devices() {
+        let mut report = run(Firmware::Bios, "max", false);
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(!text.contains("pci"), "{text}");
+        assert!(!text.contains("usb"), "{text}");
+        report.pci = vec!["41:00.0".parse().unwrap()];
+        report.usb = vec!["046d:c52b".parse().unwrap(), "3-1.2".parse().unwrap()];
+        let text = report.render_text(Style::plain()).join("\n");
+        assert!(text.contains("  pci      0000:41:00.0"), "{text}");
+        assert!(text.contains("  usb      046d:c52b, 3-1.2"), "{text}");
+        assert!(
+            vm_core::value::to_json_line(&report.to_value())
+                .contains(r#""pci":["0000:41:00.0"],"usb":["046d:c52b","3-1.2"]"#)
+        );
     }
 
     #[test]

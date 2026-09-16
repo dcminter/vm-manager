@@ -223,6 +223,15 @@ pub enum Error {
     NoCdrom {
         name: String,
     },
+    Passthrough {
+        device: String,
+        reason: String,
+    },
+    /// Both in mebibytes.
+    LockedMemory {
+        needed: u64,
+        limit: u64,
+    },
     NoGuestAccess {
         name: String,
     },
@@ -332,6 +341,8 @@ impl Error {
             Self::InstanceStopped { .. } => "instance-stopped",
             Self::InstancePaused { .. } => "instance-paused",
             Self::NoCdrom { .. } => "no-cdrom",
+            Self::Passthrough { .. } => "passthrough-unavailable",
+            Self::LockedMemory { .. } => "locked-memory-limit",
             Self::NoGuestAccess { .. } => "no-guest-access",
             Self::GuestUnreachable { .. } => "guest-unreachable",
             Self::SshHostTaken { .. } => "ssh-host-taken",
@@ -632,6 +643,15 @@ impl fmt::Display for Error {
                  let it carry on with 'vm unpause {name}'"
             ),
             Self::NoCdrom { name } => write!(f, "{name} has no CD-ROM in its drive"),
+            Self::Passthrough { device, reason } => {
+                write!(f, "cannot pass {device} through: {reason}")
+            }
+            Self::LockedMemory { needed, limit } => write!(
+                f,
+                "a PCI device locks all {needed} MiB of the machine's memory, \
+                 beyond this user's limit of {limit} MiB; raise memlock in \
+                 /etc/security/limits.conf, or give less --memory"
+            ),
             Self::GuestUnreachable { name, seconds } => write!(
                 f,
                 "'{name}' did not accept its key over ssh within {seconds} seconds; \

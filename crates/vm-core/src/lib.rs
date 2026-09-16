@@ -19,6 +19,7 @@ pub mod instance;
 pub mod keys;
 pub mod machine;
 pub mod machines;
+pub mod passthrough;
 pub mod paths;
 pub mod process;
 pub mod prune;

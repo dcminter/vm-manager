@@ -5,6 +5,7 @@ use crate::compression::Compression;
 use crate::config::{Key, Settings};
 use crate::instance::{Instance, Port};
 use crate::machine::{Chipset, Disk, Firmware};
+use crate::passthrough::{PciAddress, UsbDevice};
 use crate::process;
 use std::path::PathBuf;
 
@@ -202,6 +203,8 @@ pub struct Run {
     pub memory: u64,
     pub cpus: u32,
     pub ports: Vec<Port>,
+    pub pci: Vec<PciAddress>,
+    pub usb: Vec<UsbDevice>,
     pub ssh_port: Option<u16>,
     pub user: String,
     pub seeded: bool,

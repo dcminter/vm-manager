@@ -27,6 +27,8 @@ pub const SSH_CONFIG: [&str; 3] = ["config default", "yes", "no"];
 pub const COMPRESSION: [&str; 4] = ["none", "xz", "gzip", "zstd"];
 const PORTS_TITLE: &str = "Forwarded ports, as host:guest or address:host:guest";
 const VOLUMES_TITLE: &str = "Shared directories, one host:guest or host:guest:ro per line";
+const PCI_TITLE: &str = "PCI devices bound to vfio-pci, as bus:device.function";
+const USB_TITLE: &str = "USB devices, as vendor:product or bus-port";
 
 /// Everything the run dialog collects, as text and indices.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -38,6 +40,8 @@ pub struct RunFields {
     pub ports: String,
     pub user: String,
     pub volumes: String,
+    pub pci: String,
+    pub usb: String,
     pub disk_size: String,
     pub pull: usize,
     pub firmware: usize,
@@ -85,6 +89,22 @@ pub fn parse_ports(text: &str) -> Result<Vec<Port>, String> {
         .collect()
 }
 
+/// Items separated by commas or spaces, each read by `parse`.
+pub fn parse_list<T>(text: &str, parse: fn(&str) -> Result<T, String>) -> Result<Vec<T>, String> {
+    text.split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|piece| !piece.is_empty())
+        .map(parse)
+        .collect()
+}
+
+fn joined<T: ToString>(items: &[T]) -> String {
+    items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Shares as `host:guest[:ro]`, one per line.
 pub fn parse_shares(text: &str) -> Result<Vec<Share>, String> {
     text.lines()
@@ -127,6 +147,8 @@ pub fn run_request(fields: &RunFields) -> Result<Request, String> {
             .map(|user| settings::parse_user(&user))
             .transpose()?,
         shares: parse_shares(&fields.volumes)?,
+        pci: parse_list(&fields.pci, settings::parse_pci)?,
+        usb: parse_list(&fields.usb, settings::parse_usb)?,
         disk_size: blank(&fields.disk_size),
         pull: match fields.pull {
             1 => Some(Pull::Missing),
@@ -154,6 +176,8 @@ pub struct SettingsFields {
     pub ports: String,
     pub user: String,
     pub volumes: String,
+    pub pci: String,
+    pub usb: String,
     pub disk_size: String,
     pub firmware: usize,
     pub cpu_model: String,
@@ -184,6 +208,8 @@ impl SettingsFields {
                 .map(Share::spec)
                 .collect::<Vec<_>>()
                 .join("\n"),
+            pci: joined(&held.pci),
+            usb: joined(&held.usb),
             disk_size: String::new(),
             firmware: index_of(&FIRMWARE, held.firmware.name()),
             cpu_model: held.cpu_model.clone(),
@@ -205,6 +231,8 @@ pub fn start_changes(held: &Instance, fields: &SettingsFields) -> Result<Changes
     let memory = settings::parse_memory(&fields.memory)?;
     let ports = parse_ports(&fields.ports)?;
     let shares = parse_shares(&fields.volumes)?;
+    let pci = parse_list(&fields.pci, settings::parse_pci)?;
+    let usb = parse_list(&fields.usb, settings::parse_usb)?;
     let same_shares = shares.len() == held.shares.len()
         && shares.iter().zip(&held.shares).all(|(new, old)| {
             new.source == old.source && new.target == old.target && new.readonly == old.readonly
@@ -221,6 +249,8 @@ pub fn start_changes(held: &Instance, fields: &SettingsFields) -> Result<Changes
         cpus: (fields.cpus.max(1) != held.cpus).then(|| fields.cpus.max(1)),
         ports: (ports != held.ports).then_some(ports),
         shares: (!same_shares).then_some(shares),
+        pci: (pci != held.pci).then_some(pci),
+        usb: (usb != held.usb).then_some(usb),
         user: (user != held.user).then_some(user),
         disk_size: blank(&fields.disk_size),
         firmware: firmware.filter(|wanted| *wanted != held.firmware),
@@ -580,6 +610,37 @@ fn hardware_rows(
     )
 }
 
+/// The host device rows, described by what this host can hand over.
+fn device_rows(form: &Form, pci: &str, usb: &str) -> (adw::EntryRow, adw::EntryRow) {
+    let group = form.group("Host devices");
+    let host = vm_core::passthrough::Host::system();
+    group.set_description(Some(&available(
+        &host.pci_candidates(),
+        &host.usb_candidates(),
+    )));
+    (entry(&group, PCI_TITLE, pci), entry(&group, USB_TITLE, usb))
+}
+
+/// One line per bus naming the devices a guest can be given.
+pub fn available(pci: &[(String, String)], usb: &[(String, String)]) -> String {
+    let listed = |items: &[(String, String)]| {
+        if items.is_empty() {
+            "none".to_owned()
+        } else {
+            items
+                .iter()
+                .map(|(value, help)| format!("{value} ({help})"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+    format!(
+        "PCI bound to vfio-pci: {}\nUSB plugged in: {}",
+        listed(pci),
+        listed(usb)
+    )
+}
+
 /// The run dialog, submitting a `Run` command.
 pub fn run_dialog(
     parent: &impl IsA<gtk::Widget>,
@@ -609,6 +670,7 @@ pub fn run_dialog(
     let sharing = form.group("Sharing");
     let ports = entry(&sharing, PORTS_TITLE, "");
     let volumes = lines(&sharing, VOLUMES_TITLE, "");
+    let (pci, usb) = device_rows(&form, "", "");
     let (firmware, cpu, machine, disk) = hardware_rows(&form, 0, "", 0, 0);
     let _ = host;
     form.present(
@@ -622,6 +684,8 @@ pub fn run_dialog(
                 ports: ports.text().to_string(),
                 user: user.text().to_string(),
                 volumes: text_of(&volumes),
+                pci: pci.text().to_string(),
+                usb: usb.text().to_string(),
                 disk_size: disk_size.text().to_string(),
                 pull: pull.selected() as usize,
                 firmware: firmware.selected() as usize,
@@ -668,6 +732,7 @@ pub fn settings_dialog(
     let sharing = form.group("Sharing");
     let ports = entry(&sharing, PORTS_TITLE, &fields.ports);
     let volumes = lines(&sharing, VOLUMES_TITLE, &fields.volumes);
+    let (pci, usb) = device_rows(&form, &fields.pci, &fields.usb);
     let (firmware, cpu, machine, disk) = hardware_rows(
         &form,
         fields.firmware,
@@ -695,6 +760,8 @@ pub fn settings_dialog(
                 ports: ports.text().to_string(),
                 user: user.text().to_string(),
                 volumes: text_of(&volumes),
+                pci: pci.text().to_string(),
+                usb: usb.text().to_string(),
                 disk_size: disk_size.text().to_string(),
                 firmware: firmware.selected() as usize,
                 cpu_model: cpu.text().to_string(),
@@ -1282,6 +1349,8 @@ mod tests {
             ports: "8080:80, 2222:22".to_owned(),
             user: "dave".to_owned(),
             volumes: String::new(),
+            pci: "01:00.0, 01:00.1".to_owned(),
+            usb: "046d:c52b\n1-2.3".to_owned(),
             disk_size: "40G".to_owned(),
             pull: 2,
             firmware: 2,
@@ -1302,6 +1371,69 @@ mod tests {
         assert_eq!(request.disk, Some(Disk::Sata));
         assert_eq!(request.ssh_config, Some(false));
         assert_eq!(request.disk_size.as_deref(), Some("40G"));
+        assert_eq!(
+            request
+                .pci
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["0000:01:00.0", "0000:01:00.1"]
+        );
+        assert_eq!(
+            request
+                .usb
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["046d:c52b", "1-2.3"]
+        );
+    }
+
+    #[test]
+    fn host_devices_are_read_from_lists_and_refused_when_malformed() {
+        let held = parse_list(" 01:00.0,,0000:02:00.1 ", settings::parse_pci).unwrap_or_default();
+        assert_eq!(held.len(), 2);
+        assert!(parse_list("", settings::parse_usb).is_ok_and(|held| held.is_empty()));
+        let refused = run_request(&RunFields {
+            reference: "debian:trixie".to_owned(),
+            usb: "logitech".to_owned(),
+            ..RunFields::default()
+        });
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|reason| reason.contains("not a USB device")),
+            "{refused:?}"
+        );
+        let refused = run_request(&RunFields {
+            reference: "debian:trixie".to_owned(),
+            pci: "gpu".to_owned(),
+            ..RunFields::default()
+        });
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|reason| reason.contains("not a PCI address")),
+            "{refused:?}"
+        );
+    }
+
+    #[test]
+    fn available_devices_are_listed_per_bus() {
+        let pci = [("0000:01:00.0".to_owned(), "10de:1b80".to_owned())];
+        assert_eq!(
+            available(&pci, &[]),
+            "PCI bound to vfio-pci: 0000:01:00.0 (10de:1b80)\nUSB plugged in: none"
+        );
+        let usb = [
+            ("046d:c52b".to_owned(), "Logitech at 1-2".to_owned()),
+            ("0bda:8153".to_owned(), "at 3-1".to_owned()),
+        ];
+        assert_eq!(
+            available(&[], &usb),
+            "PCI bound to vfio-pci: none\n\
+             USB plugged in: 046d:c52b (Logitech at 1-2), 0bda:8153 (at 3-1)"
+        );
     }
 
     #[test]
@@ -1382,6 +1514,8 @@ mod tests {
             media: vm_core::catalogue::Media::Disk,
             cdrom: None,
             password: None,
+            pci: Vec::new(),
+            usb: Vec::new(),
             ports: vec![Port {
                 address: None,
                 host: 8080,
@@ -1419,6 +1553,43 @@ mod tests {
         assert_eq!(changes.ssh_config, Some(true));
         assert_eq!(changes.password.as_deref(), Some("*"));
         assert_eq!(changes.firmware, None);
+        assert_eq!(changes.pci, None);
+        assert_eq!(changes.usb, None);
+    }
+
+    #[test]
+    fn host_devices_open_as_held_and_change_only_when_edited() {
+        let mut held = machine();
+        held.pci = vec![
+            "01:00.0"
+                .parse()
+                .unwrap_or_else(|reason| panic!("{reason}")),
+        ];
+        held.usb = vec![
+            "046d:c52b"
+                .parse()
+                .unwrap_or_else(|reason| panic!("{reason}")),
+            "1-2".parse().unwrap_or_else(|reason| panic!("{reason}")),
+        ];
+        let fields = SettingsFields::of(&held);
+        assert_eq!(fields.pci, "0000:01:00.0");
+        assert_eq!(fields.usb, "046d:c52b, 1-2");
+        let same = start_changes(&held, &fields).unwrap_or_else(|reason| panic!("{reason}"));
+        assert!(!same.any());
+        let written_short = SettingsFields {
+            pci: "01:00.0".to_owned(),
+            ..fields.clone()
+        };
+        let same = start_changes(&held, &written_short).unwrap_or_else(|reason| panic!("{reason}"));
+        assert_eq!(same.pci, None);
+        let cleared = SettingsFields {
+            pci: String::new(),
+            usb: "1-2".to_owned(),
+            ..fields
+        };
+        let changes = start_changes(&held, &cleared).unwrap_or_else(|reason| panic!("{reason}"));
+        assert_eq!(changes.pci, Some(Vec::new()));
+        assert_eq!(changes.usb, Some(vec![held.usb[1].clone()]));
     }
 
     #[test]

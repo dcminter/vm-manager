@@ -234,6 +234,23 @@ pub fn disk() -> Vec<CompletionCandidate> {
         .collect()
 }
 
+/// PCI devices ready to be handed to a guest.
+pub fn pci_device() -> Vec<CompletionCandidate> {
+    described(vm_core::passthrough::Host::system().pci_candidates())
+}
+
+/// USB devices plugged into this host.
+pub fn usb_device() -> Vec<CompletionCandidate> {
+    described(vm_core::passthrough::Host::system().usb_candidates())
+}
+
+fn described(candidates: Vec<(String, String)>) -> Vec<CompletionCandidate> {
+    candidates
+        .into_iter()
+        .map(|(value, help)| CompletionCandidate::new(value).help(Some(help.into())))
+        .collect()
+}
+
 /// A side of `vm cp`: a local path, or a running instance's name followed by a colon.
 pub fn copy_side(current: &OsStr) -> Vec<CompletionCandidate> {
     let running =
@@ -385,6 +402,8 @@ mod tests {
                     media: vm_core::catalogue::Media::Disk,
                     cdrom: None,
                     password: None,
+                    pci: Vec::new(),
+                    usb: Vec::new(),
                     ports: Vec::new(),
                     shares: Vec::new(),
                 })

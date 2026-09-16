@@ -3,6 +3,7 @@
 use crate::catalogue::Media;
 use crate::error::{Error, Result};
 use crate::machine::{self, Chipset, Disk, Firmware};
+use crate::passthrough::{PciAddress, UsbDevice};
 use crate::process::Handle;
 use crate::{paths, seed};
 use serde::{Deserialize, Serialize};
@@ -136,6 +137,12 @@ pub struct Instance {
     /// The CD-ROM image in the drive, until it is ejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cdrom: Option<PathBuf>,
+    /// Host PCI functions handed to the guest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pci: Vec<PciAddress>,
+    /// Host USB devices handed to the guest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub usb: Vec<UsbDevice>,
     /// Omitted when empty, because TOML cannot follow a table with a bare key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<Port>,
@@ -626,6 +633,8 @@ mod tests {
             media: crate::catalogue::Media::Disk,
             cdrom: None,
             password: None,
+            pci: Vec::new(),
+            usb: Vec::new(),
             ports: Vec::new(),
             shares: Vec::new(),
         }

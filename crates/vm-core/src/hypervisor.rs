@@ -167,6 +167,9 @@ pub fn arguments(instance: &Instance, directory: &Directory) -> Vec<String> {
             share.tag
         ));
     }
+    for argument in crate::passthrough::arguments(instance) {
+        push(&argument);
+    }
     push("-display");
     push("none");
     // QMP cannot add a VNC server later.
@@ -455,6 +458,8 @@ mod tests {
             media: crate::catalogue::Media::Disk,
             cdrom: None,
             password: None,
+            pci: Vec::new(),
+            usb: Vec::new(),
             ports: Vec::new(),
             shares: Vec::new(),
         }
@@ -512,6 +517,38 @@ mod tests {
                 .contains("accel=kvm:tcg")
         );
         assert_eq!(pair(&arguments, "-cpu"), Some("max".to_owned()));
+    }
+
+    #[test]
+    fn host_devices_are_attached_only_when_given() {
+        let scratch = Scratch::new("passthrough");
+        let devices = |arguments: &[String]| {
+            arguments
+                .iter()
+                .filter(|held| {
+                    held.starts_with("vfio-pci")
+                        || held.starts_with("usb-host")
+                        || held.contains("xhci")
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let directory = scratch.directory("one");
+        let plain = arguments(&instance("one"), &directory);
+        assert!(devices(&plain).is_empty(), "{plain:?}");
+        let mut held = instance("one");
+        held.pci = vec!["0000:41:00.0".parse().unwrap()];
+        held.usb = vec!["1-4".parse().unwrap()];
+        let passed = arguments(&held, &directory);
+        assert_eq!(
+            devices(&passed),
+            [
+                "vfio-pci,host=0000:41:00.0",
+                "qemu-xhci,id=xhci",
+                "usb-host,bus=xhci.0,hostbus=1,hostport=4"
+            ]
+        );
+        assert_eq!(passed.len(), plain.len() + 6);
     }
 
     fn drives(arguments: &[String]) -> Vec<String> {

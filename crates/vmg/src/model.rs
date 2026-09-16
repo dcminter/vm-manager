@@ -600,6 +600,7 @@ pub fn machine_page(row: &MachineRow, record: Option<&Instance>, now: u64) -> Pa
         groups.push(hardware_group(row, held));
         groups.push(ports_group(held));
         groups.push(volumes_group(held));
+        groups.push(devices_group(held));
     }
     Page {
         node: NodeId::Machine(row.name.clone()),
@@ -696,6 +697,22 @@ fn ports_group(held: &Instance) -> Group {
             .collect()
     };
     Group::new("Ports", ports)
+}
+
+fn devices_group(held: &Instance) -> Group {
+    let pci = held
+        .pci
+        .iter()
+        .map(|address| Row::new("PCI", address.to_string()));
+    let usb = held
+        .usb
+        .iter()
+        .map(|device| Row::new("USB", device.to_string()));
+    let mut rows: Vec<Row> = pci.chain(usb).collect();
+    if rows.is_empty() {
+        rows.push(Row::new("Passed through", "none"));
+    }
+    Group::new("Host devices", rows)
 }
 
 fn volumes_group(held: &Instance) -> Group {
@@ -1233,6 +1250,8 @@ mod tests {
             auto_remove: false,
             media: vm_core::catalogue::Media::Disk,
             cdrom: None,
+            pci: Vec::new(),
+            usb: Vec::new(),
             ports: Vec::new(),
             shares: Vec::new(),
         };
@@ -1242,6 +1261,42 @@ mod tests {
         assert_eq!(Action::RunCommand.label(), "Run Command…");
         let stopped = machine_actions(&State::Stopped, Some(&record));
         assert!(!stopped.contains(&Action::RunCommand));
+
+        let rows = |held: &Instance| {
+            devices_group(held)
+                .rows
+                .into_iter()
+                .map(|row| (row.label, row.value))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            rows(&record),
+            [("Passed through".to_owned(), "none".to_owned())]
+        );
+        let mut passing = record;
+        passing.pci = vec![
+            "01:00.0"
+                .parse()
+                .unwrap_or_else(|reason| panic!("{reason}")),
+        ];
+        passing.usb = vec![
+            "046d:c52b"
+                .parse()
+                .unwrap_or_else(|reason| panic!("{reason}")),
+        ];
+        assert_eq!(
+            rows(&passing),
+            [
+                ("PCI".to_owned(), "0000:01:00.0".to_owned()),
+                ("USB".to_owned(), "046d:c52b".to_owned())
+            ]
+        );
+        let page = machine_page(&row("one", State::Stopped), Some(&passing), 160);
+        assert!(
+            page.groups
+                .iter()
+                .any(|group| group.title == "Host devices")
+        );
     }
 
     #[test]

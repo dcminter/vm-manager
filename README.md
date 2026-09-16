@@ -147,7 +147,37 @@ vm stop ci
 ```
 
 `vm start` accepts the same settings as `vm run` and applies them from then on.
-`--no-port`, `--no-volume` and `--no-password` clear them.
+`--no-port`, `--no-volume`, `--no-pci`, `--no-usb` and `--no-password` clear
+them.
+
+### Host devices
+
+`--pci` gives the guest a host PCI device, such as a GPU for compute work, and
+`--usb` gives it a USB device. Both repeat, and `vm start` replaces them as a
+list. A PCI device is named by its address from `lspci`, such as `01:00.0`; give
+each function the guest needs, for example a GPU's `01:00.1` audio function as
+well. A USB device is named by its IDs from `lsusb`, such as `046d:c52b`, or by
+where it is plugged in, such as `1-2.3`, when several share IDs.
+
+```bash
+vm run debian:trixie --name compute --memory 16G --pci 01:00.0 --pci 01:00.1
+vm start compute --usb 046d:c52b
+```
+
+The host has to allow this before `vm` can do it, and `vm` says what is
+missing:
+
+- The IOMMU must be on: `intel_iommu=on` or `amd_iommu=on` on the kernel
+  command line.
+- A PCI device, and every other device in its IOMMU group, must be bound to
+  `vfio-pci` instead of its usual driver, for example with
+  `sudo driverctl set-override 0000:01:00.0 vfio-pci`.
+- The user needs read and write access to `/dev/vfio/` and `/dev/bus/usb/`
+  nodes, which a udev rule can grant.
+- A PCI device locks all of the guest's memory, so the user's `memlock` limit
+  in `/etc/security/limits.conf` must be at least the machine's memory.
+
+The host loses the device while the machine runs.
 
 Images without cloud-init still run, but take no key and no account.
 

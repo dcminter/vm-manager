@@ -4,6 +4,7 @@ use crate::compression::Compression;
 use crate::error::Error;
 use crate::instance::{Port, Share};
 use crate::machine::{self, Chipset, Disk, Firmware};
+use crate::passthrough::{PciAddress, UsbDevice};
 use crate::{ARCHITECTURES, seed};
 use std::path::Path;
 
@@ -103,6 +104,16 @@ pub fn parse_port(text: &str) -> std::result::Result<Port, String> {
         host: number(host)?,
         guest: number(guest)?,
     })
+}
+
+/// A host PCI function, as `bus:device.function` or `domain:bus:device.function`.
+pub fn parse_pci(text: &str) -> std::result::Result<PciAddress, String> {
+    text.trim().parse()
+}
+
+/// A host USB device, as `vendor:product` or `bus-port`.
+pub fn parse_usb(text: &str) -> std::result::Result<UsbDevice, String> {
+    text.trim().parse()
 }
 
 /// Turns `KEY=VALUE` into an environment variable, the key a shell could name.

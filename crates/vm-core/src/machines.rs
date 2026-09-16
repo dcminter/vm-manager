@@ -5,6 +5,7 @@ use crate::error::{Error, Result};
 use crate::hypervisor::Supervisor as _;
 use crate::instance::{Directory, Instance, Instances, Port, Share};
 use crate::machine::{self, Chipset, Disk, Firmware};
+use crate::passthrough::{PciAddress, UsbDevice};
 use crate::reports;
 use crate::store::{Pulled, Store};
 use crate::value::Value;
@@ -58,6 +59,8 @@ pub struct Request {
     /// Absent defers to the config file.
     pub user: Option<String>,
     pub shares: Vec<Share>,
+    pub pci: Vec<PciAddress>,
+    pub usb: Vec<UsbDevice>,
     pub disk_size: Option<String>,
     pub pull: Option<Pull>,
     pub firmware: Option<Firmware>,
@@ -211,6 +214,8 @@ fn build(
         password: request.password.clone(),
         ports: request.ports.clone(),
         shares: request.shares.clone(),
+        pci: request.pci.clone(),
+        usb: request.usb.clone(),
     };
     distinguish(&mut held.shares);
 
@@ -264,6 +269,7 @@ fn build(
 
 /// Starts the hypervisor and waits for its monitor, reporting whether KVM is in use.
 fn launch(directory: &Directory, held: &mut Instance) -> Result<Option<bool>> {
+    crate::passthrough::Host::system().check(held)?;
     prepare_runtime(directory.monitor())?;
     if held.firmware == Firmware::Uefi {
         machine::prepare_uefi(&held.arch, &directory.firmware_variables())?;
@@ -390,6 +396,8 @@ fn report(
         memory: held.memory,
         cpus: held.cpus,
         ports: held.ports.clone(),
+        pci: held.pci.clone(),
+        usb: held.usb.clone(),
         ssh_port: held.ssh_port,
         user: held.user.clone(),
         seeded: held.seeded,
@@ -453,6 +461,8 @@ pub struct Changes {
     pub cpus: Option<u32>,
     pub ports: Option<Vec<Port>>,
     pub shares: Option<Vec<Share>>,
+    pub pci: Option<Vec<PciAddress>>,
+    pub usb: Option<Vec<UsbDevice>>,
     pub user: Option<String>,
     pub disk_size: Option<String>,
     pub firmware: Option<Firmware>,
@@ -478,6 +488,8 @@ impl Changes {
             || self.disk.is_some()
             || self.ports.is_some()
             || self.shares.is_some()
+            || self.pci.is_some()
+            || self.usb.is_some()
             || self.user.is_some()
             || self.disk_size.is_some()
             || self.ssh_config.is_some()
@@ -538,6 +550,12 @@ fn apply(directory: &Directory, held: &mut Instance, changes: &Changes) -> Resul
         distinguish(&mut held.shares);
         // Shares are mounted from the seed on every boot.
         rewrite = true;
+    }
+    if let Some(pci) = changes.pci.clone() {
+        held.pci = pci;
+    }
+    if let Some(usb) = changes.usb.clone() {
+        held.usb = usb;
     }
     if let Some(user) = changes.user.clone() {
         // cloud-init creates accounts only on a new instance id.
@@ -1318,6 +1336,8 @@ mod tests {
                 media: crate::catalogue::Media::Disk,
                 cdrom: None,
                 password: None,
+                pci: Vec::new(),
+                usb: Vec::new(),
                 ports: Vec::new(),
                 shares: Vec::new(),
             };
@@ -1422,6 +1442,37 @@ mod tests {
         assert_eq!(held.shares[0].target, "/mnt/new");
         // Two directories named the same still need distinct tags.
         assert_ne!(held.shares[0].tag, held.shares[1].tag);
+    }
+
+    #[test]
+    fn host_devices_given_again_replace_the_ones_it_had_and_are_recorded() {
+        let scratch = Scratch::new("devices");
+        let (directory, mut held) = scratch.machine("one");
+        held.pci = vec!["01:00.0".parse().unwrap()];
+        held.usb = vec!["1-2".parse().unwrap()];
+        let only_pci = Changes {
+            pci: Some(vec!["02:00.0".parse().unwrap(), "02:00.1".parse().unwrap()]),
+            ..Changes::default()
+        };
+        assert!(only_pci.any());
+        apply(&directory, &mut held, &only_pci).unwrap();
+        assert_eq!(held.pci.len(), 2);
+        assert_eq!(held.usb, vec!["1-2".parse().unwrap()]);
+        assert_eq!(held.generation, 0);
+        let no_usb = Changes {
+            usb: Some(Vec::new()),
+            ..Changes::default()
+        };
+        assert!(no_usb.any());
+        apply(&directory, &mut held, &no_usb).unwrap();
+        assert!(held.usb.is_empty());
+        assert_eq!(directory.read().unwrap(), held);
+        let text = std::fs::read_to_string(directory.path().join("instance.toml")).unwrap();
+        assert!(
+            text.contains(r#"pci = ["0000:02:00.0", "0000:02:00.1"]"#),
+            "{text}"
+        );
+        assert!(!text.contains("usb"), "{text}");
     }
 
     #[test]

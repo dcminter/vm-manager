@@ -36,8 +36,8 @@ limit the list to those catalogues; see
 .TP
 .BI inspect " NAME\fR|\fPIMAGE"
 Show a machine: its state, image, sizes, hardware, account, SSH port, console
-password, forwarded ports, volumes and directory. Otherwise show an image's
-build for this host's architecture, or for
+password, forwarded ports, host devices, volumes and directory. Otherwise show
+an image's build for this host's architecture, or for
 .BR \-\-arch " ARCH" :
 its other architectures, the catalogue naming it and any lower catalogues it
 hides, its catalogue entry file, its source and digest, how its guest is
@@ -192,16 +192,16 @@ the disk holds a system, so an installer's reboot starts the installed system.
 .TP
 .BI start " NAME"
 Start a stopped machine. Takes
-.BR \-\-memory ", " \-\-cpus ", " \-\-port ", " \-\-volume ", " \-\-user ,
+.BR \-\-memory ", " \-\-cpus ", " \-\-port ", " \-\-volume ", " \-\-pci ", " \-\-usb ", " \-\-user ,
 .BR \-\-disk\-size ", " \-\-firmware ", " \-\-cpu\-model ", " \-\-machine ", " \-\-disk ,
 .B \-\-password
 and
 .B \-\-add\-ssh\-config
 as
 .B run
-does; each change persists, and settings not given are kept. Forwards and shares
-are replaced as a list.
-.BR \-\-no\-port ", " \-\-no\-volume ", " \-\-no\-password
+does; each change persists, and settings not given are kept. Forwards, shares
+and host devices are each replaced as a list.
+.BR \-\-no\-port ", " \-\-no\-volume ", " \-\-no\-pci ", " \-\-no\-usb ", " \-\-no\-password
 and
 .B \-\-no\-ssh\-config
 remove them.
@@ -417,6 +417,39 @@ Share a host directory with the guest over virtiofs, mounted at every boot;
 read-only with
 .BR :ro .
 Repeatable.
+.TP
+.BI \-\-pci " ADDRESS"
+Give the guest a host PCI device, such as a GPU, named by its address as
+.B lspci
+shows it:
+.IR BUS : DEVICE . FUNCTION ,
+such as
+.BR 01:00.0 ,
+with an optional leading
+.IR DOMAIN : .
+Each function is given separately. Repeatable. The IOMMU must be on, the device
+and the rest of its IOMMU group must be bound to
+.BR vfio\-pci ,
+the user needs read and write access to
+.BR /dev/vfio/ ,
+and the user's locked-memory limit must cover the machine's memory;
+.B vm
+names whichever is missing before it starts the machine.
+.TP
+.BI \-\-usb " DEVICE"
+Give the guest a host USB device, named by its IDs as
+.B lsusb
+shows them,
+.IR VENDOR : PRODUCT ,
+such as
+.BR 046d:c52b ,
+or by where it is plugged in,
+.IR BUS \- PORT [. PORT ...],
+such as
+.BR 1\-2.3 ,
+when several devices share IDs. Hubs cannot be given. Repeatable. The user needs
+read and write access to the device's node under
+.BR /dev/bus/usb/ .
 .TP
 .B \-\-rm
 Remove the machine once it stops:
